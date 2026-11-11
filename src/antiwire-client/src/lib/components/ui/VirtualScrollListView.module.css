@@ -1,0 +1,24 @@
+.virtual-scroll {
+  flex: 1;
+  min-height: 0;
+  overflow-y: auto;
+  contain: strict;
+  transform: translateZ(0);
+}
+
+.virtual-scroll.is-scrolling .virtual-row {
+  pointer-events: none;
+}
+
+.virtual-inner {
+  position: relative;
+  width: 100%;
+}
+
+.virtual-row {
+  position: absolute;
+  top: 0;
+  left: 0;
+  width: 100%;
+  box-sizing: border-box;
+}

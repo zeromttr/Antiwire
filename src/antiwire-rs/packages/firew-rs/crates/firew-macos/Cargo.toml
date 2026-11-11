@@ -1,0 +1,27 @@
+[package]
+name = "firew-macos"
+description = "macOS PF ioctl backend for firew-rs"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+repository.workspace = true
+readme.workspace = true
+
+[lints]
+workspace = true
+
+[dependencies]
+firew-core.workspace = true
+firew-sys.workspace = true
+# Not target-gated: the pf-table / ipset rendering logic is pure and is
+# compiled and unit-tested on every host, only its syscalls are gated.
+ipnet = "2.11"
+
+[target.'cfg(target_os = "macos")'.dependencies]
+ipnetwork = "0.20"
+pfctl = "0.6"
+
+[dev-dependencies]
+firew-rs.workspace = true
+ipnet = "2.11"

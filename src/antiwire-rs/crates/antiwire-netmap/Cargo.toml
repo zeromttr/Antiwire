@@ -1,0 +1,22 @@
+[package]
+name = "antiwire-netmap"
+version.workspace = true
+publish.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+description = "Local network device discovery and monitoring"
+
+[dependencies]
+hickory-proto = { workspace = true, features = ["mdns"] }
+hickory-resolver = { version = "0.26.3", default-features = false, features = [
+    "system-config",
+    "tokio",
+] }
+ipnet = { workspace = true }
+serde = { workspace = true }
+thiserror = { workspace = true }
+tokio = { workspace = true }
+tokio-util = { workspace = true }
+futures-util = { workspace = true }
+tempfile = { workspace = true }

@@ -1,0 +1,85 @@
+version: 2
+
+updates:
+  # Electron + React client — Dependabot natively reads the text-based bun.lock.
+  - package-ecosystem: bun
+    directory: /src/antiwire-client
+    schedule:
+      interval: weekly
+    open-pull-requests-limit: 10
+    groups:
+      frontend-security-updates:
+        applies-to: security-updates
+        patterns:
+          - "*"
+      frontend-version-updates:
+        applies-to: version-updates
+        patterns:
+          - "*"
+        update-types:
+          - minor
+          - patch
+
+
+  # Daemon workspace (~500 locked packages).
+  - package-ecosystem: cargo
+    directory: /src/antiwire-rs
+    schedule:
+      interval: weekly
+    open-pull-requests-limit: 10
+    groups:
+      daemon-cargo-security-updates:
+        applies-to: security-updates
+        patterns:
+          - "*"
+      daemon-cargo-version-updates:
+        applies-to: version-updates
+        patterns:
+          - "*"
+        update-types:
+          - minor
+          - patch
+
+  # Nested workspaces keep their own Cargo.lock when developed standalone.
+  - package-ecosystem: cargo
+    directory: /src/antiwire-rs/packages/firew-rs
+    schedule:
+      interval: weekly
+    open-pull-requests-limit: 5
+    groups:
+      firewall-cargo-security-updates:
+        applies-to: security-updates
+        patterns:
+          - "*"
+      firewall-cargo-version-updates:
+        applies-to: version-updates
+        patterns:
+          - "*"
+        update-types:
+          - minor
+          - patch
+
+  - package-ecosystem: cargo
+    directory: /src/antiwire-rs/packages/netmet-rs
+    schedule:
+      interval: weekly
+    open-pull-requests-limit: 5
+    groups:
+      netmetrics-cargo-security-updates:
+        applies-to: security-updates
+        patterns:
+          - "*"
+      netmetrics-cargo-version-updates:
+        applies-to: version-updates
+        patterns:
+          - "*"
+        update-types:
+          - minor
+          - patch
+
+  # Keep GitHub Actions versions current.
+  - package-ecosystem: github-actions
+    directory: /
+    schedule:
+      interval: weekly
+    open-pull-requests-limit: 5

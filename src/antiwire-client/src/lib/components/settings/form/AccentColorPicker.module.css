@@ -1,0 +1,110 @@
+.accent-picker {
+  padding: 14px 0;
+  border-bottom: 1px solid var(--ln);
+}
+
+.accent-label {
+  font-size: 13px;
+  font-weight: 500;
+  color: var(--t1);
+}
+
+.accent-desc {
+  font-size: 11px;
+  color: var(--t3);
+  margin-top: 4px;
+  margin-bottom: 14px;
+}
+
+/* Settings > Appearance: a flat section (was `.appearance :global(.accent-picker)`). */
+.accent-picker.appearance {
+  padding: 0;
+  border-bottom: none;
+}
+
+.appearance .accent-label {
+  font-weight: 600;
+}
+
+.appearance .accent-desc {
+  font-size: 12.5px;
+}
+
+.accent-row {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 12px 18px;
+}
+
+.swatches {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 10px;
+}
+
+.swatch,
+.swatches .swatch.custom {
+  position: relative;
+  width: 26px;
+  height: 26px;
+  border-radius: 50%;
+  background: var(--swatch);
+  box-shadow: inset 0 0 0 1px rgba(0, 0, 0, 0.18);
+  outline: 2px solid transparent;
+  outline-offset: 2px;
+  transform: scale(0.92);
+  cursor: pointer;
+  transition:
+    transform var(--dur-fast) var(--ease-standard),
+    outline-color var(--dur-fast) var(--ease-standard);
+}
+
+.swatch:hover,
+.swatches .swatch.custom:hover {
+  transform: scale(1);
+}
+
+.swatch.selected,
+.swatches .swatch.custom.selected {
+  transform: scale(1);
+  outline-color: var(--swatch);
+}
+
+.swatch:focus-visible,
+.swatches .swatch.custom:focus-visible {
+  outline-color: var(--t2);
+}
+
+.divider {
+  width: 1px;
+  height: 20px;
+  margin: 0 2px;
+  background: var(--ln);
+}
+
+.swatches .swatch.custom {
+  display: grid;
+  place-items: center;
+  color: var(--t2);
+  background: var(--swatch, var(--ctl));
+  box-shadow: inset 0 0 0 1px var(--ln-strong);
+}
+
+.current {
+  display: flex;
+  align-items: baseline;
+  gap: 8px;
+  font-size: 12px;
+}
+
+.current-name {
+  font-weight: 500;
+  color: var(--t1);
+}
+
+.current-hex {
+  font-size: 11px;
+  color: var(--t3);
+}

@@ -1,0 +1,38 @@
+[package]
+name = "antiwire-platform"
+version.workspace = true
+publish.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+description = "SIEM export (file, syslog, webhook), log retention, and platform helpers"
+
+[dependencies]
+antiwire-http = { workspace = true, features = ["blocking"] }
+antiwire-policy = { workspace = true }
+antiwire-secrets = { workspace = true }
+antiwire-store = { workspace = true }
+antiwire-tuning = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+rustls = { workspace = true }
+rustls-platform-verifier = { workspace = true }
+time = { workspace = true, features = ["local-offset"] }
+tokio = { workspace = true }
+tracing = { workspace = true }
+
+[target.'cfg(windows)'.dependencies]
+windows = { workspace = true, features = [
+  "Win32_Foundation",
+  "Win32_Security",
+  "Win32_Security_Cryptography",
+  "Win32_Security_Cryptography_Catalog",
+  "Win32_Security_Cryptography_Sip",
+  "Win32_Security_WinTrust",
+  "Win32_System_Threading",
+] }
+
+[dev-dependencies]
+antiwire-store = { workspace = true, features = ["test-support"] }
+tempfile = { workspace = true }
+time = { workspace = true, features = ["macros"] }

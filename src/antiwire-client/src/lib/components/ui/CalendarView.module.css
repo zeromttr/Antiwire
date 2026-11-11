@@ -1,0 +1,175 @@
+.grid {
+  display: grid;
+  grid-template-columns: repeat(7, minmax(0, 1fr));
+  gap: 2px;
+  padding-top: 5px;
+}
+
+.months,
+.years {
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 4px;
+  padding-top: 6px;
+}
+
+.view[data-dir='1'] :is(.day, .pick) {
+  animation: dayFromEnd var(--dur-slow) var(--ease-out) backwards;
+  animation-delay: calc(var(--row) * 14ms);
+}
+
+.view[data-dir='-1'] :is(.day, .pick) {
+  animation: dayFromStart var(--dur-slow) var(--ease-out) backwards;
+  animation-delay: calc(var(--row) * 14ms);
+}
+
+.view[data-dir='0'] :is(.day, .pick) {
+  animation: dayRise var(--dur-base) var(--ease-standard) backwards;
+  animation-delay: calc(var(--row) * 10ms);
+}
+
+.day {
+  position: relative;
+  height: 29px;
+  display: grid;
+  place-items: center;
+  border: 0;
+  border-radius: 8px;
+  background: transparent;
+  color: var(--t2);
+  font-size: 11px;
+  font-weight: 500;
+  font-variant-numeric: tabular-nums;
+  cursor: pointer;
+  transition:
+    background-color var(--dur-fast) var(--ease-standard),
+    color var(--dur-fast) var(--ease-standard),
+    box-shadow var(--dur-fast) var(--ease-standard);
+}
+
+.day.outside {
+  color: color-mix(in oklab, var(--t3) 55%, transparent);
+}
+
+.day:disabled,
+.pick:disabled {
+  color: color-mix(in oklab, var(--t3) 40%, transparent);
+  cursor: default;
+}
+
+.day:hover:not(:disabled) {
+  background: var(--hover);
+  color: var(--t1);
+}
+
+.day.is-today {
+  color: var(--acc);
+  box-shadow: inset 0 0 0 1px color-mix(in oklab, var(--acc) 42%, transparent);
+}
+
+.day.selected {
+  background: var(--acc-fill);
+  color: var(--on-acc);
+  font-weight: 650;
+  box-shadow:
+    0 0 0 1px color-mix(in oklab, var(--acc) 55%, transparent),
+    0 3px 12px color-mix(in oklab, var(--acc) 30%, transparent);
+}
+
+.day.selected:hover {
+  background: color-mix(in oklab, var(--acc-fill) 88%, var(--t1));
+  color: var(--on-acc);
+}
+
+.view.open .day.selected .day-num {
+  animation: dayPop var(--dur-data) var(--ease-pop) both;
+}
+
+.day:focus-visible {
+  outline: 2px solid var(--acc);
+  outline-offset: 1px;
+}
+
+.pick {
+  height: 33px;
+  display: grid;
+  place-items: center;
+  border: 0;
+  border-radius: 8px;
+  background: transparent;
+  color: var(--t2);
+  font-size: 11px;
+  font-weight: 500;
+  font-variant-numeric: tabular-nums;
+  cursor: pointer;
+  transition:
+    background-color var(--dur-fast) var(--ease-standard),
+    color var(--dur-fast) var(--ease-standard),
+    box-shadow var(--dur-fast) var(--ease-standard);
+}
+
+.pick:hover:not(:disabled) {
+  background: var(--hover);
+  color: var(--t1);
+}
+
+.pick.is-today {
+  color: var(--acc);
+  box-shadow: inset 0 0 0 1px color-mix(in oklab, var(--acc) 42%, transparent);
+}
+
+.pick.selected {
+  background: var(--acc-fill);
+  color: var(--on-acc);
+  font-weight: 650;
+  box-shadow:
+    0 0 0 1px color-mix(in oklab, var(--acc) 55%, transparent),
+    0 3px 12px color-mix(in oklab, var(--acc) 30%, transparent);
+}
+
+.pick.selected:hover {
+  background: color-mix(in oklab, var(--acc-fill) 88%, var(--t1));
+  color: var(--on-acc);
+}
+
+.pick:focus-visible {
+  outline: 2px solid var(--acc);
+  outline-offset: 1px;
+}
+
+@keyframes dayRise {
+  from {
+    opacity: 0;
+    transform: translateY(6px);
+  }
+}
+
+@keyframes dayFromEnd {
+  from {
+    opacity: 0;
+    transform: translateX(10px);
+  }
+}
+
+@keyframes dayFromStart {
+  from {
+    opacity: 0;
+    transform: translateX(-10px);
+  }
+}
+
+@keyframes dayPop {
+  from {
+    opacity: 0.3;
+    transform: scale(0.55);
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .view[data-dir] :is(.day, .pick),
+  .view.open .day.selected .day-num,
+  .day,
+  .pick {
+    animation: none;
+    transition: none;
+  }
+}

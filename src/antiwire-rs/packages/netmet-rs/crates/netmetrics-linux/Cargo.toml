@@ -1,0 +1,22 @@
+[package]
+name = "netmetrics-linux"
+description = "Linux eBPF and procfs fallback backend for netmetrics"
+version.workspace = true
+edition = "2024"
+license.workspace = true
+rust-version.workspace = true
+
+[features]
+default = ["ebpf"]
+ebpf = ["dep:aya"]
+
+[dependencies]
+netmetrics-core.workspace = true
+netmetrics-sys.workspace = true
+
+[target.'cfg(target_os = "linux")'.dependencies]
+aya = { version = "0.13.1", optional = true }
+libc = "0.2"
+
+[lints]
+workspace = true

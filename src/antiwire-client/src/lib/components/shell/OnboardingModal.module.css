@@ -1,0 +1,199 @@
+.setup-overlay {
+  position: fixed;
+  inset: 0;
+  background: var(--scrim);
+  z-index: 200;
+}
+
+/* Fixed size: the dialog never jumps as steps change length. */
+.setup-modal {
+  position: fixed;
+  left: 50%;
+  top: 50%;
+  transform: translate3d(-50%, -50%, 0);
+  z-index: 201;
+  display: grid;
+  grid-template-columns: 196px minmax(0, 1fr);
+  width: min(800px, calc(100vw - 48px));
+  height: min(540px, calc(100vh - 48px));
+  overflow: hidden;
+  border: 1px solid var(--ln-strong);
+  border-radius: 14px;
+  background: var(--p1);
+  box-shadow: var(--sh-pop);
+  backface-visibility: hidden;
+}
+
+/* Enter and exit motion (were the scrimFade / dialogIn / dialogOut transitions).
+ * Radix keeps the closed overlay and content mounted until these finish. */
+.setup-overlay[data-state='open'] {
+  animation: scrim-in var(--dur-base) linear both;
+}
+
+.setup-overlay[data-state='closed'] {
+  animation: scrim-out var(--dur-base) linear both;
+}
+
+.setup-modal[data-state='open'] {
+  animation: dialog-in var(--dur-slow) var(--ease-out) both;
+}
+
+.setup-modal[data-state='closed'] {
+  animation: dialog-out calc(var(--dur-exit) + 20ms) var(--ease-in) both;
+}
+
+@keyframes scrim-in {
+  from {
+    opacity: 0;
+  }
+}
+
+@keyframes scrim-out {
+  to {
+    opacity: 0;
+  }
+}
+
+@keyframes dialog-in {
+  from {
+    opacity: 0;
+    transform: translate3d(-50%, calc(-50% + 8px), 0) scale(0.97);
+  }
+}
+
+@keyframes dialog-out {
+  to {
+    opacity: 0;
+    transform: translate3d(-50%, calc(-50% + 4px), 0) scale(0.985);
+  }
+}
+
+/* ── Content ───────────────────────────────────────────── */
+.main {
+  display: grid;
+  grid-template-rows: minmax(0, 1fr) auto;
+  min-width: 0;
+  min-height: 0;
+}
+
+.step {
+  display: flex;
+  flex-direction: column;
+  min-height: 0;
+}
+
+.step-head {
+  flex: none;
+  padding: 26px 28px 18px;
+}
+
+.setup-title {
+  margin: 0;
+  color: var(--t1);
+  font-size: 18px;
+  font-weight: 600;
+  letter-spacing: -0.02em;
+}
+
+.lead {
+  margin: 6px 0 0;
+  max-width: 60ch;
+  color: var(--t2);
+  font-size: 13px;
+  line-height: 1.5;
+}
+
+.step-body {
+  flex: 1;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  padding: 0 28px 20px;
+  overflow-y: auto;
+}
+
+.state {
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 8px;
+  text-align: center;
+}
+
+.state strong {
+  color: var(--t1);
+  font-size: 13px;
+  font-weight: 500;
+}
+
+.state p {
+  max-width: 340px;
+  margin: 0;
+  color: var(--t3);
+  font-size: 12px;
+  line-height: 1.45;
+}
+
+.state-dot {
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  background: var(--warn);
+  animation: pulse 1.8s var(--ease-in-out) infinite;
+}
+
+/* Local copy of app.css's `pulse`: module keyframe names are scoped. */
+@keyframes pulse {
+  0%,
+  100% {
+    opacity: 1;
+  }
+  50% {
+    opacity: 0.35;
+  }
+}
+
+.error {
+  padding: 9px 12px;
+  border-radius: 8px;
+  color: var(--bad);
+  background: color-mix(in oklab, var(--bad) 10%, transparent);
+  font-size: 12px;
+}
+
+.foot {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 16px;
+  padding: 14px 20px 14px 28px;
+  border-top: 1px solid var(--ln);
+}
+
+.progress {
+  color: var(--t3);
+  font-size: 12px;
+  font-variant-numeric: tabular-nums;
+}
+
+.actions {
+  display: flex;
+  gap: 8px;
+}
+
+@media (max-width: 640px) {
+  .setup-modal {
+    grid-template-columns: minmax(0, 1fr);
+    grid-template-rows: auto minmax(0, 1fr);
+    width: calc(100vw - 24px);
+    height: calc(100vh - 24px);
+  }
+
+  .step-head,
+  .step-body {
+    padding-inline: 18px;
+  }
+}

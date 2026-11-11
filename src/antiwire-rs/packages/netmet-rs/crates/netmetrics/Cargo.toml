@@ -1,0 +1,37 @@
+[package]
+name = "netmetrics"
+description = "One cross-platform API for native network flow telemetry"
+version.workspace = true
+edition = "2024"
+license.workspace = true
+rust-version.workspace = true
+
+[features]
+default = ["windows", "linux", "macos"]
+windows = ["dep:netmetrics-windows"]
+linux = ["dep:netmetrics-linux"]
+macos = ["dep:netmetrics-macos"]
+
+[dependencies]
+netmetrics-core.workspace = true
+netmetrics-sys.workspace = true
+serde.workspace = true
+
+[target.'cfg(windows)'.dependencies]
+netmetrics-windows = { version = "0.1.0", path = "../netmetrics-windows", optional = true }
+
+[target.'cfg(target_os = "linux")'.dependencies]
+netmetrics-linux = { version = "0.1.0", path = "../netmetrics-linux", optional = true }
+
+[target.'cfg(target_os = "macos")'.dependencies]
+netmetrics-macos = { version = "0.1.0", path = "../netmetrics-macos", optional = true }
+
+[dev-dependencies]
+serde_json.workspace = true
+
+[lints]
+workspace = true
+
+[[bench]]
+name = "owner_cache"
+harness = false

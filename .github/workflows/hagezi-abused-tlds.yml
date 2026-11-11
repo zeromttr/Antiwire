@@ -1,0 +1,73 @@
+name: Update abused TLDs
+
+# Rebuilds data/hagezi-abused-tlds.txt from HaGeZi's Most Abused TLDs list.
+# The update job only writes to main. Run it from the Actions tab with
+# branch = main, or wait for the daily schedule.
+on:
+  schedule:
+    - cron: "0 8 * * *"
+  workflow_dispatch:
+  pull_request:
+    # Drafts skip CI (see the job `if`); marking a PR ready runs it.
+    types: [opened, synchronize, reopened, ready_for_review]
+    paths:
+      - "scripts/update-hagezi-abused-tlds.mjs"
+      - "scripts/update-hagezi-abused-tlds.test.mjs"
+      - "data/hagezi-abused-tlds.txt"
+      - "data/hagezi-abused-tlds.sha256"
+      - ".github/workflows/hagezi-abused-tlds.yml"
+  push:
+    branches:
+      - main
+    paths:
+      - "scripts/update-hagezi-abused-tlds.mjs"
+      - "scripts/update-hagezi-abused-tlds.test.mjs"
+      - "data/hagezi-abused-tlds.txt"
+      - "data/hagezi-abused-tlds.sha256"
+      - ".github/workflows/hagezi-abused-tlds.yml"
+
+permissions:
+  contents: read
+
+concurrency:
+  group: hagezi-abused-tlds-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  # One job: tests always run, and the refresh only runs on main from the schedule or
+  # by hand. Two jobs were billed two whole minutes for well under one.
+  test-and-update:
+    if: github.event.pull_request.draft != true
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: write
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v7
+
+      - name: Install Bun
+        uses: oven-sh/setup-bun@v2
+        with:
+          # One Bun for CI and developers; `bun check` and `bun fmt` need 1.4 or newer.
+          bun-version-file: .bun-version
+
+      - name: Test list generator
+        run: bun test scripts/update-hagezi-abused-tlds.test.mjs
+
+      - name: Refresh list from HaGeZi
+        if: github.ref == 'refs/heads/main' && (github.event_name == 'schedule' || github.event_name == 'workflow_dispatch')
+        run: bun scripts/update-hagezi-abused-tlds.mjs
+
+      - name: Commit if the list changed
+        if: github.ref == 'refs/heads/main' && (github.event_name == 'schedule' || github.event_name == 'workflow_dispatch')
+        run: |
+          set -euo pipefail
+          git add data/hagezi-abused-tlds.txt data/hagezi-abused-tlds.sha256
+          if git diff --cached --quiet; then
+            echo "No TLD list changes"
+            exit 0
+          fi
+          git -c user.name="github-actions[bot]" -c user.email="41898282+github-actions[bot]@users.noreply.github.com" \
+            commit -m "Update HaGeZi abused TLD list"
+          git push origin HEAD:main

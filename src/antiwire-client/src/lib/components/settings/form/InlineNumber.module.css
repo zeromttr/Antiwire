@@ -1,0 +1,15 @@
+.inline-number {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+}
+
+/* Was `:global(.settings-number-wrap)`: the number input's wrapper is the first child. */
+.inline-number > :first-child {
+  width: 96px;
+}
+
+.unit {
+  color: var(--t3);
+  font-size: 12.5px;
+}

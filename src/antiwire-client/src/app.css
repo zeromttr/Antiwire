@@ -1,0 +1,382 @@
+/* Subset-scoped imports: the app ships 24 locales (incl. bg/uk Cyrillic and el
+ * Greek), so latin + latin-ext + cyrillic(+ext) + greek are all live. Only
+ * vietnamese is dropped — no vi locale exists. Importing per-subset files
+ * instead of the full `400.css` entries keeps that one unused subset (x6
+ * weights x2 families, woff+woff2) out of the layout chunk. */
+@import '@fontsource/ibm-plex-sans/latin-400.css';
+@import '@fontsource/ibm-plex-sans/latin-500.css';
+@import '@fontsource/ibm-plex-sans/latin-600.css';
+@import '@fontsource/ibm-plex-sans/latin-ext-400.css';
+@import '@fontsource/ibm-plex-sans/latin-ext-500.css';
+@import '@fontsource/ibm-plex-sans/latin-ext-600.css';
+@import '@fontsource/ibm-plex-sans/cyrillic-400.css';
+@import '@fontsource/ibm-plex-sans/cyrillic-500.css';
+@import '@fontsource/ibm-plex-sans/cyrillic-600.css';
+@import '@fontsource/ibm-plex-sans/cyrillic-ext-400.css';
+@import '@fontsource/ibm-plex-sans/cyrillic-ext-500.css';
+@import '@fontsource/ibm-plex-sans/cyrillic-ext-600.css';
+@import '@fontsource/ibm-plex-sans/greek-400.css';
+@import '@fontsource/ibm-plex-sans/greek-500.css';
+@import '@fontsource/ibm-plex-sans/greek-600.css';
+@import '@fontsource/jetbrains-mono/latin-400.css';
+@import '@fontsource/jetbrains-mono/latin-500.css';
+@import '@fontsource/jetbrains-mono/latin-600.css';
+@import '@fontsource/jetbrains-mono/latin-ext-400.css';
+@import '@fontsource/jetbrains-mono/latin-ext-500.css';
+@import '@fontsource/jetbrains-mono/latin-ext-600.css';
+@import '@fontsource/jetbrains-mono/cyrillic-400.css';
+@import '@fontsource/jetbrains-mono/cyrillic-500.css';
+@import '@fontsource/jetbrains-mono/cyrillic-600.css';
+@import '@fontsource/jetbrains-mono/cyrillic-ext-400.css';
+@import '@fontsource/jetbrains-mono/cyrillic-ext-500.css';
+@import '@fontsource/jetbrains-mono/cyrillic-ext-600.css';
+@import '@fontsource/jetbrains-mono/greek-400.css';
+@import '@fontsource/jetbrains-mono/greek-500.css';
+@import '@fontsource/jetbrains-mono/greek-600.css';
+
+/* Element reset. This replaces the Tailwind preflight that used to come from
+ * `@import 'tailwindcss'` (removed: the framework was installed but unused —
+ * every utility-like class in the tree is a custom style). Keep this list to
+ * the elements the app actually renders so the baseline stays reviewable. */
+button {
+  background: transparent;
+  border: 0;
+  padding: 0;
+  color: inherit;
+  font: inherit;
+  cursor: pointer;
+}
+
+button:disabled {
+  cursor: default;
+}
+
+h1,
+h2,
+h3,
+h4,
+h5,
+h6,
+p {
+  margin: 0;
+  font-size: inherit;
+  font-weight: inherit;
+}
+
+ul,
+ol {
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+svg {
+  display: block;
+}
+
+/* Accent tokens. The client store sets `--acc-base` / `--acc-sub-base` to the
+ * user's chosen colors and `--on-acc` to whichever ink reads best on them.
+ * `--acc-fill` is the exact color, for solid fills that carry `--on-acc` text.
+ * `--acc` / `--acc-sub` are for text, lines and tints: the exact color in dark
+ * mode, deepened to a legible lightness in light mode (see below). */
+:root,
+[data-theme='dark'] {
+  --acc-base: #3ee6a0;
+  --acc-sub-base: #5ce8ff;
+  --acc-fill: var(--acc-base);
+  --acc-sub-fill: var(--acc-sub-base);
+  --acc: var(--acc-base);
+  --acc-sub: var(--acc-sub-base);
+  --ok: #4fd99f;
+  --bad: #f76a6f;
+  --warn: #f0b44c;
+  --glow: none;
+  --bg: #0c0d0f;
+  --p1: #15161b;
+  --p2: #1f2025;
+  --ln: color-mix(in oklab, var(--t1) 7%, transparent);
+  --t1: #ececef;
+  --t2: #a4a5ad;
+  --t3: #85868f;
+  --on-acc: #0b0f0c;
+  --on-danger: #fff;
+  --chrome: #0c0d0f;
+  --chrome-from: #0c0d0f;
+  --chrome-to: #0c0d0f;
+  --p-grad-from: #15161b;
+  --p-grad-to: #15161b;
+  --well: #0e0f11;
+  --well-soft: #121316;
+  --scrim: rgba(4, 5, 6, 0.66);
+  --activity-inactive: #1d1e23;
+  --activity-mix: #141519;
+  /* Activity heatmap: five stages mixing the accent over the panel, from a
+   * dim-but-tinted first stage to the full accent. Dark mode ends on the exact
+   * accent so peaks glow; light mode ends on the deepened accent so the ramp
+   * spans more lightness and stays calm on Porcelain. */
+  --heat-down: var(--acc-fill);
+  --heat-up: var(--acc-sub-fill);
+  --heat-1: 24%;
+  --heat-2: 42%;
+  --heat-3: 60%;
+  --heat-4: 80%;
+  --heat-5: 100%;
+  /* Component surfaces (see src/lib/components/ui). */
+  --ln-strong: color-mix(in oklab, var(--t1) 11%, transparent);
+  --ctl: #1f2025;
+  --ctl-hover: #25262c;
+  --hover: color-mix(in oklab, var(--t1) 4%, transparent);
+  --pop: rgba(29, 30, 35, 0.96);
+  --track: color-mix(in oklab, var(--t1) 7%, transparent);
+  --knob-off: #8e8f98;
+  --sh-ctl: 0 1px 2px rgba(0, 0, 0, 0.35);
+  --sh-pop: 0 16px 40px rgba(0, 0, 0, 0.5), 0 2px 6px rgba(0, 0, 0, 0.3);
+  --hl: color-mix(in oklab, var(--t1) 5%, transparent);
+  --focus-ring: 0 0 0 3px color-mix(in oklab, var(--acc) 22%, transparent);
+  --font-sans: 'IBM Plex Sans', 'Helvetica Neue', Helvetica, Arial, sans-serif;
+  --font-mono:
+    'Cascadia Mono', 'Cascadia Code', 'JetBrains Mono', 'SF Mono', Menlo, Consolas, ui-monospace,
+    monospace;
+  color-scheme: dark;
+}
+
+[data-theme='light'] {
+  /* Fallback for engines without relative color syntax: mix toward ink. */
+  --acc: color-mix(in oklab, var(--acc-base) 55%, #10140f);
+  --acc-sub: color-mix(in oklab, var(--acc-sub-base) 55%, #0f1216);
+  --ok: #1f8a5b;
+  --bad: #d4474d;
+  --warn: #a86d12;
+  --bg: #eeede9;
+  --p1: #f8f7f5;
+  --p2: #e7e6e2;
+  --ln: rgba(40, 35, 25, 0.085);
+  --t1: #1f1e1c;
+  --t2: #56554f;
+  --t3: #6c6b64;
+  --on-danger: #fff;
+  --chrome: #e7e6e2;
+  --chrome-from: #e7e6e2;
+  --chrome-to: #e7e6e2;
+  --p-grad-from: #f8f7f5;
+  --p-grad-to: #f8f7f5;
+  --well: #fdfcfb;
+  --well-soft: #f3f2ef;
+  --scrim: rgba(40, 35, 25, 0.32);
+  --activity-inactive: #e2e1dc;
+  --activity-mix: #e9e8e4;
+  --heat-down: var(--acc);
+  --heat-up: var(--acc-sub);
+  --heat-1: 16%;
+  --heat-2: 34%;
+  --heat-3: 54%;
+  --heat-4: 76%;
+  --heat-5: 100%;
+  --ln-strong: rgba(40, 35, 25, 0.13);
+  --ctl: #fdfcfb;
+  --ctl-hover: #ffffff;
+  --hover: rgba(40, 35, 25, 0.04);
+  --pop: rgba(253, 252, 251, 0.97);
+  --track: rgba(40, 35, 25, 0.08);
+  --knob-off: #ffffff;
+  --sh-ctl: 0 1px 2px rgba(40, 30, 15, 0.1), 0 0 0 1px rgba(40, 35, 25, 0.04);
+  --sh-pop: 0 16px 40px rgba(40, 30, 15, 0.12), 0 1px 3px rgba(40, 30, 15, 0.08);
+  --hl: rgba(255, 255, 255, 0.7);
+  --focus-ring: 0 0 0 3px color-mix(in oklab, var(--acc) 20%, transparent);
+  color-scheme: light;
+}
+
+/* Keep the accent's hue but cap its lightness, so any accent the user picks
+ * (even lime or plasma) clears 4.5:1 as text on Porcelain surfaces. */
+@supports (color: oklch(from red l c h)) {
+  [data-theme='light'] {
+    --acc: oklch(from var(--acc-base) min(l, 0.5) min(c, 0.2) h);
+    --acc-sub: oklch(from var(--acc-sub-base) min(l, 0.5) min(c, 0.2) h);
+  }
+}
+
+* {
+  box-sizing: border-box;
+  -webkit-user-drag: none;
+  scrollbar-width: thin;
+  scrollbar-color: color-mix(in oklab, var(--t1) 14%, transparent) transparent;
+}
+
+html,
+body {
+  margin: 0;
+  padding: 0;
+  height: 100%;
+  background: transparent;
+  color: var(--t1);
+  font-family: var(--font-sans);
+  -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
+  overflow: hidden;
+  user-select: none;
+  -webkit-user-select: none;
+}
+
+/* Clip the whole document so body-portaled dialogs and menus respect the same
+ * silhouette as the shell. The native windows must also be transparent. */
+html {
+  --window-radius: 8px;
+}
+
+/* The OS rounds and shadows a native frame itself (shared/window-frame.ts). */
+html[data-window-frame='native'] {
+  --window-radius: 0px;
+}
+
+body {
+  clip-path: inset(0 round var(--window-radius));
+}
+
+input,
+textarea,
+select {
+  font-family: inherit;
+  user-select: text;
+  -webkit-user-select: text;
+}
+
+.mono {
+  font-family: var(--font-mono);
+  font-synthesis: none;
+  -webkit-font-smoothing: auto;
+  -moz-osx-font-smoothing: auto;
+  text-rendering: optimizeSpeed;
+}
+
+::-webkit-scrollbar {
+  width: 9px;
+  height: 9px;
+}
+
+::-webkit-scrollbar-track {
+  background: transparent;
+}
+
+::-webkit-scrollbar-thumb {
+  background: color-mix(in oklab, var(--t1) 11%, transparent);
+  border-radius: 9px;
+  border: 2px solid transparent;
+  background-clip: content-box;
+}
+
+::-webkit-scrollbar-thumb:hover {
+  background: color-mix(in oklab, var(--t1) 22%, transparent);
+  background-clip: content-box;
+}
+
+@keyframes pulse {
+  0%,
+  100% {
+    opacity: 1;
+  }
+  50% {
+    opacity: 0.35;
+  }
+}
+
+.panel {
+  background: var(--p1);
+  border: 1px solid var(--ln);
+  border-radius: 12px;
+  contain: layout;
+}
+
+.scroll {
+  overscroll-behavior-y: contain;
+  contain: paint;
+}
+
+.panel-gradient {
+  background: linear-gradient(180deg, var(--p-grad-from), var(--p-grad-to));
+  border: 1px solid var(--ln);
+  border-radius: 14px;
+}
+
+.badge-ok {
+  color: var(--ok);
+  background: color-mix(in oklab, var(--ok) 12%, transparent);
+}
+
+.badge-bad {
+  color: var(--bad);
+  background: color-mix(in oklab, var(--bad) 13%, transparent);
+}
+
+.badge-warn {
+  color: var(--warn);
+  background: color-mix(in oklab, var(--warn) 13%, transparent);
+}
+
+/* Motion vocabulary; src/lib/motion.ts mirrors these for script-driven motion.
+ * Arrivals and moves decelerate (--ease-out); exits accelerate away (--ease-in)
+ * and are quicker than the entrance they undo. */
+:root {
+  --dur-instant: 80ms;
+  --dur-fast: 120ms;
+  --dur-base: 180ms;
+  --dur-slow: 260ms;
+  --dur-exit: 120ms;
+  --dur-data: 420ms;
+  --ease-out: cubic-bezier(0.16, 1, 0.3, 1);
+  --ease-in: cubic-bezier(0.55, 0, 1, 0.45);
+  --ease-standard: cubic-bezier(0.2, 0, 0, 1);
+  --ease-in-out: cubic-bezier(0.65, 0, 0.35, 1);
+  --ease-pop: cubic-bezier(0.34, 1.4, 0.64, 1);
+}
+
+/*
+ * Background mode (see stores/window-activity): while the window is unfocused,
+ * the always-running decorative motion stops — live and "new" pulses, the
+ * realtime glow, skeleton shimmer — and data updates skip their easing.
+ * Spinners keep turning: they mean work is in progress. Everything resumes
+ * when the window is focused again.
+ */
+:root[data-window='background'] {
+  /* Nobody is watching values ease between updates; show them at once. */
+  --dur-data: 0ms;
+}
+
+:root[data-window='background'] :is(.live-dot, .new-dot, .pulse-dot, .state-dot, .realtime-live),
+:root[data-window='background'] .live .dot,
+:root[data-window='background'] .live-dot::after,
+:root[data-window='background'] .shimmer::after,
+:root[data-window='background'] .grid-scroll.loading .cell {
+  animation-play-state: paused;
+}
+
+/* An icon turning while its action runs (refresh, sync). Apply to the svg. */
+.spinning {
+  animation: spin 0.9s linear infinite;
+}
+
+@keyframes spin {
+  to {
+    transform: rotate(360deg);
+  }
+}
+
+/* One switch for everyone who asks for less motion: changes still happen,
+ * they just do not travel. */
+@media (prefers-reduced-motion: reduce) {
+  *,
+  *::before,
+  *::after {
+    animation-duration: 1ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 1ms !important;
+    scroll-behavior: auto !important;
+  }
+}
+
+[data-test-mode='true'] *,
+[data-test-mode='true'] *::before,
+[data-test-mode='true'] *::after {
+  animation-duration: 0s !important;
+  animation-delay: 0s !important;
+  transition-duration: 0s !important;
+}

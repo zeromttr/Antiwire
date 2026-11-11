@@ -1,0 +1,22 @@
+[Unit]
+Description=Antiwire networking daemon
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+ExecStart=/usr/bin/antiwire-daemon --data-dir /var/lib/antiwire
+# The reaper the daemon spawns lives in this unit's control group, so a stop
+# kills it with the daemon. This runs once every process of the unit is gone,
+# after a clean stop and after a crash alike, and reverts what the daemon left:
+# adapter DNS, the port 53 divert, and non-persistent firewall rules.
+ExecStopPost=/usr/bin/antiwire-daemon --heal-host-state --data-dir /var/lib/antiwire
+Environment=NETMETRICS_BPF_OBJECT=/usr/lib/netmetrics/netmetrics.bpf.o
+Restart=on-failure
+RestartSec=3
+# Firewall, DNS redirection, and ETW-equivalent collectors need elevated privileges.
+User=root
+Group=root
+
+[Install]
+WantedBy=multi-user.target

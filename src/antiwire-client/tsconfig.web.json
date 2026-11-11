@@ -1,0 +1,12 @@
+{
+  "extends": "./tsconfig.base.json",
+  "compilerOptions": {
+    "lib": ["ES2023", "DOM", "DOM.Iterable"],
+    "jsx": "react-jsx",
+    // Paraglide emits JS with JSDoc types and no .d.ts (generating those took ~25 s).
+    "allowJs": true,
+    "types": ["vite/client", "bun-types"]
+  },
+  "include": ["src", "shared", "tests", "src/**/*.json"],
+  "exclude": ["src/lib/paraglide/server.js"]
+}

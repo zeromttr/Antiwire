@@ -1,0 +1,999 @@
+syntax = "proto3";
+
+package antiwire;
+
+option csharp_namespace = "Antiwire.Shared.Protos";
+
+service AntiwireService {
+  // Query general system statistics
+  rpc GetStats (Empty) returns (StatsResponse);
+
+  // Applications that own live connections right now, with current rates
+  rpc GetActiveApplications (Empty) returns (ActiveApplicationsResponse);
+
+  // Stream real-time connections as they are intercepted
+  rpc StreamRealtimeTraffic (Empty) returns (stream TrafficEvent);
+
+  // Query database connection history
+  rpc GetConnectionLogs (LogRequest) returns (LogResponse);
+
+  // Country counts across all retained connection history, independent of paging.
+  rpc GetCountryStatistics (Empty) returns (CountryStatisticsResponse);
+
+  // Live policy lookup: which source, and which named blocklists, currently
+  // prevent `domain` from being reached.
+  rpc ExplainDomainBlock (ExplainDomainBlockRequest) returns (ExplainDomainBlockResponse);
+
+  // Query per-application connection history summaries
+  rpc GetApplicationLogSummaries (ApplicationLogSummaryRequest) returns (ApplicationLogSummaryResponse);
+
+  // Query 30-minute activity buckets for the dashboard heatmap
+  rpc GetActivityBuckets (ActivityBucketsRequest) returns (ActivityBucketsResponse);
+
+  // Delete connection history, the dashboard activity built from it, and alerts:
+  // everything from a point in time onwards, or all of it.
+  rpc DeleteHistory (DeleteHistoryRequest) returns (DeleteHistoryResponse);
+
+  // Manage firewall rules
+  rpc GetRules (Empty) returns (RulesResponse);
+  rpc AddRule (Rule) returns (ActionResponse);
+  rpc RemoveRule (Rule) returns (ActionResponse);
+
+  // Country blocks: one logical rule carrying many CIDRs.
+  rpc AddCountryRule (CountryRule) returns (ActionResponse);
+  rpc RemoveCountryRule (CountryRule) returns (ActionResponse);
+
+  // Saved TypeSafe domain classifications, most recently updated first.
+  rpc GetAiDecisions (AiDecisionsRequest) returns (AiDecisionsResponse);
+  rpc DeleteAiDecision (DeleteAiDecisionRequest) returns (ActionResponse);
+  rpc RefreshAiDecision (RefreshAiDecisionRequest) returns (AiDecision);
+  rpc AdvancedAiDecision (AdvancedAiDecisionRequest) returns (AiDecision);
+
+  // Official registration record for a domain, from its registry's RDAP or WHOIS
+  rpc LookupDomain (LookupDomainRequest) returns (LookupDomainResponse);
+  // Live DNS records for a host and its domain, asked of the configured upstream
+  rpc LookupDnsRecords (DnsRecordsRequest) returns (DnsRecordsResponse);
+  // Hostnames under a domain from local connection and DNS history
+  rpc GetSeenSubdomains (SeenSubdomainsRequest) returns (SeenSubdomainsResponse);
+  // Hostnames under a domain on logged TLS certificates (sends the domain to crt.sh)
+  rpc SearchCertificates (CertificateSearchRequest) returns (CertificateSearchResponse);
+
+  // Manage settings
+  rpc GetSettings (Empty) returns (SettingsResponse);
+  rpc UpdateSettings (SettingsRequest) returns (UpdateSettingsResponse);
+  rpc SyncHostsBlocklist (Empty) returns (ActionResponse);
+  rpc RefreshGeoDatabase (Empty) returns (ActionResponse);
+
+  // Stream notifications to UI
+  rpc StreamNotifications (Empty) returns (stream NotificationEvent);
+  // Persisted alert feed management
+  rpc GetAlerts (Empty) returns (AlertsResponse);
+  rpc DismissAlert (AlertRequest) returns (ActionResponse);
+  rpc ClearAlerts (Empty) returns (ActionResponse);
+
+  // Packet capture is entirely on-demand. Listing devices does not open them;
+  // StartCapture is the only call that starts SharpPcap.
+  rpc ListCaptureDevices (Empty) returns (CaptureDevicesResponse);
+  rpc StartCapture (StartCaptureRequest) returns (CaptureSessionResponse);
+  rpc StopCapture (CaptureControl) returns (ActionResponse);
+  rpc GetCaptureStatus (CaptureControl) returns (CaptureStatus);
+  rpc StreamCaptureStatus (CaptureControl) returns (stream CaptureStatus);
+  rpc StreamCapturedPackets (CaptureControl) returns (stream CapturedPacket);
+  rpc DownloadCapture (CaptureControl) returns (stream CaptureChunk);
+
+  // Local IPv4 network discovery and presence monitoring.
+  rpc GetNetworkMappingState (Empty) returns (NetworkMappingState);
+  rpc ScanNetwork (NetworkMapRequest) returns (NetworkMapResponse);
+  rpc StopNetworkScan (Empty) returns (ActionResponse);
+  rpc ClearNetworkDevices (Empty) returns (ActionResponse);
+  rpc SaveNetworkScanRange (NetworkScanRange) returns (ActionResponse);
+  rpc RemoveNetworkScanRange (NetworkScanRange) returns (ActionResponse);
+  rpc SaveNetworkDeviceWatch (NetworkDeviceWatch) returns (ActionResponse);
+  rpc RemoveNetworkDeviceWatch (NetworkDeviceWatch) returns (ActionResponse);
+  rpc UpdateOuiDatabase (Empty) returns (ActionResponse);
+
+  // ── Updates ──
+  // Read-only: what the daemon last learned from the signed release manifest.
+  rpc GetUpdateStatus (Empty) returns (UpdateStatus);
+  // The only way an update starts. The daemon never installs one on its own.
+  rpc InstallUpdate (InstallUpdateRequest) returns (ActionResponse);
+  // Reads the release feeds now instead of at the next scheduled check, and
+  // returns the resulting status. Never downloads or installs a release.
+  rpc CheckForUpdates (Empty) returns (UpdateStatus);
+}
+
+message SettingsRequest {
+  bool siem_enabled = 1;          // master toggle for SIEM forwarding
+  string siem_url = 2;            // webhook endpoint URL
+  // Webhook auth token / bearer value. Write-only: empty keeps the stored token,
+  // and `clear_siem_auth_token` removes it.
+  string siem_auth_token = 3;
+  string siem_auth_header = 4;    // webhook auth header name (default Authorization)
+  bool ai_enabled = 5;
+  reserved 6;                     // was ai_url; antiwire-aibackend owns the endpoint
+  reserved "ai_url";
+  // Write-only: empty keeps the stored key, and `clear_ai_api_key` removes it.
+  string ai_api_key = 7;
+  bool log_retention_enabled = 8;
+  uint32 log_retention_days = 9;
+  bool doh_blocking_enabled = 10;
+  string doh_provider = 11;   // cloudflare | google | quad9 | opendns | custom
+  string doh_custom_url = 12;
+  bool dns_resolver_enabled = 13; // master switch for the built-in DNS resolver
+  string dns_protocol = 36; // "doh" or "doq"
+
+  // ── SIEM sinks (file / syslog / webhook; independent under siem_enabled) ──
+  string wazuh_transport = 14;     // legacy diagnostic: "file" | "syslog"
+  string wazuh_file_path = 15;     // JSON event file the Wazuh agent tails (file sink)
+  string wazuh_manager_host = 16;  // syslog host/IP
+  uint32 wazuh_manager_port = 17;  // syslog port (default 514)
+  string wazuh_protocol = 18;      // "udp" | "tcp" | "tls" (syslog sink)
+  bool siem_file_enabled = 48;
+  bool siem_syslog_enabled = 49;
+  bool siem_webhook_enabled = 50;
+
+  // Per-category log forwarding toggles — change which event types are sent at any time
+  bool siem_send_allowed = 19;     // allowed connections (high volume)
+  bool siem_send_blocked = 20;     // blocked connections
+  bool siem_send_new_app = 21;     // first time an application connects out
+  bool siem_send_new_domain = 22;  // first time a domain is contacted
+  bool siem_send_threats = 23;     // AI anomaly alerts & system errors
+
+  bool hosts_blocklist_enabled = 24;
+  string hosts_blocklist_selected_lists = 25;
+  string hosts_blocklist_update_frequency = 26;
+  string hosts_blocklist_last_updated = 27;
+  string hosts_blocklist_custom_urls = 28;
+
+   bool notify_every_connection = 29;
+  bool notify_new_connection = 30;
+  bool notify_new_app = 31;
+  bool notify_threat_detected = 32;
+  bool persist_rules_offline = 33;
+  bool geo_ip_enabled = 34;
+  bool log_daemon_connections = 35;
+
+  // ── Power-user DNS options (gated in the UI; advanced fields ignored at runtime when power_user is off) ──
+  bool power_user_settings_enabled = 37;
+  // sinkhole (0.0.0.0/:: default) | nxdomain | refused | custom
+  string dns_block_response_mode = 38;
+  // Used when dns_block_response_mode == "custom" (IPv4 and/or IPv6 literal)
+  string dns_block_custom_ip = 39;
+  bool dns_rebinding_protection_enabled = 40;
+  bool dns_answer_local_names_enabled = 79; // false forwards .local names upstream
+  // Blocks domains registered fewer than dns_new_domain_max_age_days ago.
+  bool dns_new_domain_blocking_enabled = 80;
+  // 7, 14, 30 or 90. 0 keeps the saved value.
+  uint32 dns_new_domain_max_age_days = 81;
+  // "stable", "beta", or "nightly". Empty keeps the saved channel.
+  string update_channel = 82;
+  reserved 41; // removed dnssec_validation_enabled
+  reserved 42; // removed dns_ecs_stripping_enabled
+  reserved 43; // removed dns_edns_padding_enabled
+  bool network_mapping_auto_enabled = 44;
+  uint32 network_mapping_interval_minutes = 45;
+
+  // proactive blocks when a score meets its threshold; retroactive only reports it
+  string ai_decision_mode = 51;
+  uint32 ai_confidence_advertising = 52;
+  uint32 ai_confidence_tracking = 53;
+  uint32 ai_confidence_telemetry = 54;
+  uint32 ai_confidence_analytics = 55;
+  uint32 ai_confidence_malicious = 56;
+  uint32 ai_confidence_fraud = 57;
+  uint32 ai_confidence_cryptomining = 58;
+  uint32 ai_confidence_tunnel = 59;
+
+  // Per-category decision controls: `enabled` gates the category, `action` is
+  // "block" (enforce) or "record" (log only).
+  bool ai_advertising_enabled = 60;
+  string ai_advertising_action = 61;
+  bool ai_tracking_enabled = 62;
+  string ai_tracking_action = 63;
+  bool ai_telemetry_enabled = 64;
+  string ai_telemetry_action = 65;
+  bool ai_analytics_enabled = 66;
+  string ai_analytics_action = 67;
+  bool ai_malicious_enabled = 68;
+  string ai_malicious_action = 69;
+  bool ai_fraud_enabled = 70;
+  string ai_fraud_action = 71;
+  bool ai_cryptomining_enabled = 72;
+  string ai_cryptomining_action = 73;
+  bool ai_tunnel_enabled = 74;
+  string ai_tunnel_action = 75;
+
+  // When set, an advanced check stores the official registration record.
+  bool save_domain_lookups = 76;
+
+  // Remove the stored secret. Ignored when the matching field above is non-empty.
+  bool clear_ai_api_key = 77;
+  bool clear_siem_auth_token = 78;
+}
+
+message SettingsResponse {
+  bool siem_enabled = 1;
+  string siem_url = 2;
+  string siem_auth_token = 3;     // always empty; see siem_auth_token_set
+  string siem_auth_header = 4;
+  bool ai_enabled = 5;
+  reserved 6;                     // was ai_url; antiwire-aibackend owns the endpoint
+  reserved "ai_url";
+  string ai_api_key = 7;          // always empty; see ai_api_key_set
+  bool log_retention_enabled = 8;
+  uint32 log_retention_days = 9;
+  bool doh_blocking_enabled = 10;
+  string doh_provider = 11;
+  string doh_custom_url = 12;
+  bool dns_resolver_enabled = 13; // master switch for the built-in DNS resolver
+  string dns_protocol = 36; // "doh" or "doq"
+
+  // ── SIEM sinks ──
+  string wazuh_transport = 14;
+  string wazuh_file_path = 15;
+  string wazuh_manager_host = 16;
+  uint32 wazuh_manager_port = 17;
+  string wazuh_protocol = 18;
+  bool siem_file_enabled = 48;
+  bool siem_syslog_enabled = 49;
+  bool siem_webhook_enabled = 50;
+
+  bool siem_send_allowed = 19;
+  bool siem_send_blocked = 20;
+  bool siem_send_new_app = 21;
+  bool siem_send_new_domain = 22;
+  bool siem_send_threats = 23;
+
+  bool hosts_blocklist_enabled = 24;
+  string hosts_blocklist_selected_lists = 25;
+  string hosts_blocklist_update_frequency = 26;
+  string hosts_blocklist_last_updated = 27;
+  string hosts_blocklist_custom_urls = 28;
+
+   bool notify_every_connection = 29;
+  bool notify_new_connection = 30;
+  bool notify_new_app = 31;
+  bool notify_threat_detected = 32;
+  bool persist_rules_offline = 33;
+  bool geo_ip_enabled = 34;
+  bool log_daemon_connections = 35;
+
+  bool power_user_settings_enabled = 37;
+  string dns_block_response_mode = 38;
+  string dns_block_custom_ip = 39;
+  bool dns_rebinding_protection_enabled = 40;
+  bool dns_answer_local_names_enabled = 79;
+  bool dns_new_domain_blocking_enabled = 80;
+  uint32 dns_new_domain_max_age_days = 81; // 7, 14, 30 or 90
+  string update_channel = 82; // "stable", "beta", or "nightly"
+  reserved 41; // removed dnssec_validation_enabled
+  reserved 42; // removed dns_ecs_stripping_enabled
+  reserved 43; // removed dns_edns_padding_enabled
+  bool network_mapping_auto_enabled = 44;
+  uint32 network_mapping_interval_minutes = 45;
+  string oui_database_last_updated = 46;
+  string geoip_database_last_updated = 47;
+
+  string ai_decision_mode = 51;
+  uint32 ai_confidence_advertising = 52;
+  uint32 ai_confidence_tracking = 53;
+  uint32 ai_confidence_telemetry = 54;
+  uint32 ai_confidence_analytics = 55;
+  uint32 ai_confidence_malicious = 56;
+  uint32 ai_confidence_fraud = 57;
+  uint32 ai_confidence_cryptomining = 58;
+  uint32 ai_confidence_tunnel = 59;
+
+  bool ai_advertising_enabled = 60;
+  string ai_advertising_action = 61;
+  bool ai_tracking_enabled = 62;
+  string ai_tracking_action = 63;
+  bool ai_telemetry_enabled = 64;
+  string ai_telemetry_action = 65;
+  bool ai_analytics_enabled = 66;
+  string ai_analytics_action = 67;
+  bool ai_malicious_enabled = 68;
+  string ai_malicious_action = 69;
+  bool ai_fraud_enabled = 70;
+  string ai_fraud_action = 71;
+  bool ai_cryptomining_enabled = 72;
+  string ai_cryptomining_action = 73;
+  bool ai_tunnel_enabled = 74;
+  string ai_tunnel_action = 75;
+
+  // When set, an advanced check stores the official registration record.
+  bool save_domain_lookups = 76;
+
+  // Whether a secret is stored. The secrets themselves are never returned.
+  bool ai_api_key_set = 77;
+  bool siem_auth_token_set = 78;
+}
+
+message Empty {}
+
+// One application with live connections, from the flow tracker.
+message ActiveApplication {
+  string app_name = 1;
+  string app_path = 2;
+  // Live connections this application owns.
+  uint32 connection_count = 3;
+  // Current rates in bytes per second, averaged since the previous query.
+  // Zero on the first query after an application appears.
+  uint64 download_rate = 4;
+  uint64 upload_rate = 5;
+  // Busiest destinations first (domain when known, else the IP), at most three.
+  repeated string top_destinations = 6;
+  // Distinct destinations across all of its live connections.
+  uint32 destination_count = 7;
+  // Unix seconds when its newest live connection opened.
+  int64 newest_opened_at = 8;
+}
+
+message ActiveApplicationsResponse {
+  repeated ActiveApplication applications = 1;
+  // False when the daemon cannot attribute connections to applications, so
+  // an empty list must not be read as "nothing is connected".
+  bool available = 2;
+}
+
+message StatsResponse {
+  uint64 total_bytes_sent = 1;
+  uint64 total_bytes_received = 2;
+  uint32 active_connections_count = 3;
+  uint32 blocked_connections_count = 4;
+  // False when the collector cannot observe traffic volume. Connections are still tracked
+  // and attributed, but every sent/received figure — here and in connection logs — stays
+  // at zero.
+  bool byte_accounting_available = 5;
+  // User-facing explanation of the degradation, empty while the collector is healthy.
+  string collector_status_detail = 6;
+  // Unset means a legacy daemon that always reported a count. False means the
+  // count could not be acquired and `active_connections_count` must not be shown
+  // as a confirmed empty table.
+  optional bool active_connections_available = 7;
+  // True when `active_connections_count` is last-known after a failed refresh.
+  bool active_connections_stale = 8;
+  // Distinct applications that own at least one live connection. Unset means
+  // the daemon cannot attribute connections (or predates this field); it is
+  // not a confirmed zero.
+  optional uint32 active_applications_count = 9;
+  // Product version of the running daemon, e.g. "0.2.0". Empty from a daemon that
+  // predates this field.
+  string daemon_version = 10;
+  // Bytes the history database occupies on disk, including its SQLite WAL and
+  // shared-memory files. Unset when the size cannot be read, or from a daemon
+  // that predates this field.
+  optional uint64 database_size_bytes = 11;
+}
+
+message CountryStatisticsResponse {
+  map<string, uint64> country_counts = 1; // Normalized, known country codes only.
+  uint64 total_count = 2;                // Every retained connection record.
+  uint64 unknown_count = 3;              // Records without a known country.
+}
+
+// What a TrafficEvent's byte counts mean.
+enum TrafficEventKind {
+  // A daemon that predates the field. Treat as FLOW_RECORD unless `action` is "UPDATE".
+  TRAFFIC_EVENT_KIND_UNSPECIFIED = 0;
+  // A connection record: bytes_sent and bytes_received are the flow's totals.
+  TRAFFIC_EVENT_KIND_FLOW_RECORD = 1;
+  // Bytes moved since the previous delta for the same live flow.
+  TRAFFIC_EVENT_KIND_BYTE_DELTA = 2;
+  // This stream fell behind and missed events. Only `timestamp` is set; re-query
+  // anything that depends on deltas.
+  TRAFFIC_EVENT_KIND_LAGGED = 3;
+}
+
+message TrafficEvent {
+  uint64 timestamp = 1;
+  string app_name = 2;
+  string app_path = 3;
+  string protocol = 4;
+  string src_ip = 5;
+  uint32 src_port = 6;
+  string dst_ip = 7;
+  uint32 dst_port = 8;
+  string dst_domain = 9;
+  // Totals or a delta, according to `kind`.
+  uint64 bytes_sent = 10;
+  uint64 bytes_received = 11;
+  string action = 12; // ALLOWED, BLOCKED; UPDATE for a byte delta
+  uint64 last_seen = 13;
+  string country_code = 14;
+  string isp = 15;
+  // Catalog ids / custom list names that produced a hosts-blocklist block.
+  // Empty when the event was not blocked by a named list.
+  repeated string blocklist_names = 16;
+  // Database row id for persisted connection logs. 0 for realtime events
+  // that have not been persisted (and for legacy daemons that omit it).
+  int32 id = 17;
+  // Unix seconds when the connection ended. 0 means no close was observed; it does not prove the connection is live.
+  uint64 closed_at = 18;
+  // True when the daemon confirmed the connection open with a tracked-flow
+  // write in this session. Never persisted: absent/false means unknown, not
+  // closed. Close evidence wins over this flag.
+  bool is_active = 19;
+  TrafficEventKind kind = 20;
+}
+
+message ExplainDomainBlockRequest {
+  string domain = 1;
+}
+
+message ExplainDomainBlockResponse {
+  bool blocked = 1;
+  // "dns_rule" | "blocklist" | "blocklist_pending" | "" when not blocked.
+  string source = 2;
+  repeated string blocklist_names = 3;
+}
+
+message LogRequest {
+  uint32 limit = 1;
+  uint32 offset = 2;
+  string search_query = 3;
+  // Ordering for the returned page. "" / "timestamp" = newest-created first (chronological log,
+  // used by the Records page). "last_seen" = most-recently-active first, so long-lived flows that
+  // are still transferring stay in the window (used by the dashboard exfil/analytics watch).
+  string order_by = 4;
+  reserved 5;
+  reserved "exfil_only";
+  string app_name = 6;
+  string action_filter = 7; // "" / "All", "Allowed", "Blocked"
+  uint32 time_filter_seconds = 8; // 0 = all time
+  bool sort_descending = 9;
+  string protocol_filter = 10; // "" / "ALL", "TCP", "UDP", etc.
+  uint64 time_window_start = 11; // unix seconds, 0 = unset
+  uint64 time_window_end = 12; // unix seconds, exclusive, 0 = unset
+  string country_filter = 13; // ISO alpha-2 or "unknown" for empty geo
+  // Exact application row id (see ApplicationLogSummary.app_id). 0 = unset,
+  // in which case app_name matches every install path sharing the name.
+  int32 app_id = 14;
+  // Exact destination port. 0 = unset.
+  uint32 port_filter = 15;
+  // Exact destination host: matches the domain (case-insensitive) or the IP.
+  string host_filter = 16;
+}
+
+message LogResponse {
+  repeated TrafficEvent logs = 1;
+  uint32 total_count = 2;
+  uint32 blocked_count = 3;
+  uint32 unique_domain_count = 4;
+  reserved 5, 6;
+  reserved "bytes_sent_total", "bytes_received_total";
+}
+
+message ApplicationLogSummaryRequest {
+  string search_query = 1;
+  string action_filter = 2; // "" / "All", "Allowed", "Blocked"
+  uint32 time_filter_seconds = 3; // 0 = all time
+  uint64 time_window_start = 4; // unix seconds, 0 = unset
+  uint64 time_window_end = 5; // unix seconds, exclusive, 0 = unset
+}
+
+message ApplicationLogSummary {
+  string app_name = 1;
+  string app_path = 2;
+  uint32 total_count = 3;
+  uint32 blocked_count = 4;
+  uint64 total_bytes = 5;
+  uint64 bytes_sent = 6;
+  uint64 bytes_received = 7;
+  // Database row id of the application. The Records UI selects by this id so
+  // a name shared by several install paths still matches exactly one row.
+  int32 app_id = 8;
+}
+
+message ApplicationLogSummaryResponse {
+  repeated ApplicationLogSummary applications = 1;
+  uint32 total_count = 2;
+  uint32 blocked_count = 3;
+}
+
+message ActivityBucketsRequest {
+  uint32 days = 1; // default 7; ignored when since+until form an explicit range
+  uint64 since = 2; // unix seconds (UTC), inclusive; 0 = unset
+  uint64 until = 3; // unix seconds (UTC), exclusive; 0 = unset
+}
+
+message DeleteHistoryRequest {
+  bool all = 1;     // delete all history; `since` is ignored
+  uint64 since = 2; // unix seconds (UTC), inclusive; required unless `all`
+}
+
+// Fields 1 and 2 match ActionResponse.
+message DeleteHistoryResponse {
+  bool success = 1;
+  string message = 2;
+  uint64 deleted_count = 3; // rows removed across all history tables
+}
+
+message ActivityBucket {
+  uint64 bucket_start = 1; // unix seconds (UTC)
+  uint32 event_count = 2;
+  uint64 bytes_sent = 3;
+  uint64 bytes_received = 4;
+  uint32 blocked_count = 5;
+}
+
+message ActivityBucketsResponse {
+  repeated ActivityBucket buckets = 1;
+}
+
+message Rule {
+  uint32 id = 1;
+  string target_type = 2;  // APPLICATION, IP, DNS
+  string target_value = 3; // Path, CIDR, or Domain
+  string action = 4;       // ALLOW, BLOCK
+  string direction = 5;    // INBOUND, OUTBOUND, BOTH (empty = OUTBOUND)
+}
+
+message CountryRule {
+  uint32 id = 1;
+  string country_code = 2;    // ISO-3166-1 alpha-2
+  string action = 3;          // ALLOW, BLOCK
+  string direction = 4;       // INBOUND, OUTBOUND, BOTH (empty = OUTBOUND)
+  repeated string cidrs = 5;  // full network list; empty when removing
+}
+
+message CountryRuleSummary {
+  uint32 id = 1;
+  string country_code = 2;
+  string action = 3;
+  string direction = 4;
+  uint32 cidr_count = 5;
+}
+
+message RulesResponse {
+  repeated Rule rules = 1;
+  repeated CountryRuleSummary country_rules = 2;
+}
+
+message ActionResponse {
+  bool success = 1;
+  string message = 2;
+}
+
+// Fields 1 and 2 match ActionResponse, so a client that still decodes this as
+// ActionResponse keeps working.
+message UpdateSettingsResponse {
+  bool success = 1;
+  string message = 2;
+  // Saved settings that could not be put into effect, each with the reason.
+  // The settings stay saved; empty when everything applied.
+  repeated string not_applied = 3;
+}
+
+message AiDecisionsRequest {
+  uint32 limit = 1;  // 0 = daemon default; capped by the daemon
+  uint32 offset = 2;
+  string verdict_filter = 3; // "" / "all", "block", "record", "clean"
+  string search_query = 4;   // case-insensitive substring of the domain
+}
+
+message AiDecision {
+  string domain = 1;
+  string model = 2;
+  // "block" (enforced), "record" (flagged only), or "" when no enabled
+  // category met its threshold.
+  string verdict = 3;
+  string top_category = 4; // empty when verdict is ""
+  double top_score = 5;    // 0.0-1.0
+  // Raw per-category probabilities, 0.0-1.0.
+  double rating_advertising = 6;
+  double rating_tracking = 7;
+  double rating_telemetry = 8;
+  double rating_analytics = 9;
+  double rating_malicious = 10;
+  double rating_fraud = 11;
+  double rating_cryptomining = 12;
+  double rating_tunnel = 13;
+  string scan_tier = 14;
+  uint64 first_seen = 15; // unix seconds
+  uint64 updated_at = 16; // unix seconds
+  double rating_newly_registered = 17;
+  double rating_registry_hold = 18;
+  double rating_hidden_registrant = 19;
+  double rating_abusive_registrar = 20;
+}
+
+message AiDecisionsResponse {
+  repeated AiDecision decisions = 1;
+  uint32 total_count = 2; // rows matching every filter
+  // Per-verdict counts honor search_query but ignore verdict_filter.
+  uint32 block_count = 3;
+  uint32 record_count = 4;
+  uint32 clean_count = 5;
+}
+
+message DeleteAiDecisionRequest {
+  string domain = 1;
+}
+
+message RefreshAiDecisionRequest {
+  string domain = 1;
+}
+
+message AdvancedAiDecisionRequest {
+  string domain = 1;
+}
+
+message LookupDomainRequest {
+  // Hostname as observed; the registry is asked for it, then its parents.
+  // A record's " (inferred)" marker is ignored.
+  string domain = 1;
+}
+
+// Registration facts published by the registry or its registrar. Unix-second
+// timestamps are 0 when the registry does not publish them.
+message DomainRegistration {
+  // Registered name the record describes, e.g. "example.com" for "www.example.com".
+  string domain = 1;
+  // "rdap" or "whois".
+  string source = 2;
+  string registrar = 3;
+  string registrar_id = 4;
+  repeated string statuses = 5;
+  repeated string nameservers = 6;
+  int64 registered_at = 7;
+  int64 expires_at = 8;
+  int64 updated_at = 9;
+  string registrant_name = 10;
+  string registrant_organization = 11;
+  // The registry marked registrant data as redacted.
+  bool redacted = 12;
+  // "signed", "unsigned", or "" when the registry does not say.
+  string dnssec = 13;
+  // Unix seconds when the daemon read this record.
+  int64 fetched_at = 14;
+  repeated DelegationSigner ds_records = 15;
+  // Name servers the registry publishes glue addresses for.
+  repeated NameserverGlue nameserver_addresses = 16;
+  // Registry object id, e.g. "2138514_DOMAIN_COM-VRSN".
+  string handle = 17;
+  // Unicode form of an internationalized name.
+  string unicode_name = 18;
+  string registrar_url = 19;
+  // ISO 3166-1 alpha-2 when the source gives a code.
+  string registrar_country = 20;
+  string whois_server = 21;
+  // The registrar's published abuse contact.
+  string abuse_email = 22;
+  string abuse_phone = 23;
+  string abuse_url = 24;
+  // Country and state or province only; never street, email or telephone.
+  string registrant_country = 25;
+  string registrant_region = 26;
+  // Registrar-hosted form for contacting the registrant.
+  string registrant_contact_url = 27;
+  // Expiration in the registrar's own record, which can differ from expires_at.
+  int64 registrar_expires_at = 28;
+  int64 transferred_at = 29;
+  // When the source last refreshed the record it served.
+  int64 database_updated_at = 30;
+  // Registry record read: its RDAP URL, or its WHOIS server.
+  string registry_source = 31;
+  // Registrar record merged in, when one was: its RDAP URL or WHOIS server.
+  string registrar_source = 32;
+}
+
+// A DNSSEC delegation signer record (RFC 4034).
+message DelegationSigner {
+  uint32 key_tag = 1;
+  uint32 algorithm = 2;
+  uint32 digest_type = 3;
+  // Hex, uppercase.
+  string digest = 4;
+}
+
+message NameserverGlue {
+  string name = 1;
+  repeated string addresses = 2;
+}
+
+message DnsRecordsRequest {
+  // Hostname as observed; a record's " (inferred)" marker is ignored.
+  string host = 1;
+  // Registered domain when known, e.g. from LookupDomain. When empty or not
+  // a parent of host, the daemon uses the zone the upstream reports.
+  string domain = 2;
+  // Address the connection reached, for reverse DNS. Empty skips it.
+  string address = 3;
+}
+
+message DnsAnswer {
+  string name = 1;
+  string record_type = 2;
+  uint32 ttl = 3;
+  // Zone-file presentation, e.g. "10 mail.example.com".
+  string data = 4;
+}
+
+message DnsRecordSet {
+  // "host", "domain", "mail", "dkim" or "reverse".
+  string purpose = 1;
+  string name = 2;
+  string record_type = 3;
+  // "noerror", "nxdomain", "servfail", "refused" or "error".
+  string status = 4;
+  // The upstream validated the answer with DNSSEC.
+  bool authenticated = 5;
+  repeated DnsAnswer answers = 6;
+}
+
+message DnsRecordsResponse {
+  // Transport and endpoint asked, e.g. "DoH https://1.1.1.1/dns-query".
+  string upstream = 1;
+  // Domain the domain and mail questions were asked for.
+  string domain = 2;
+  repeated DnsRecordSet sets = 3;
+}
+
+message SeenSubdomainsRequest {
+  // Hostname as observed; a record's " (inferred)" marker is ignored.
+  string host = 1;
+  // Registered domain when known. When empty or not a parent of host, the
+  // daemon uses the zone the DNS upstream reports.
+  string domain = 2;
+}
+
+message SeenSubdomain {
+  string name = 1;
+  uint64 connections = 2;
+  uint64 blocked = 3;
+  // Unix seconds; 0 when unknown.
+  int64 first_seen = 4;
+  int64 last_seen = 5;
+}
+
+message SeenSubdomainsResponse {
+  repeated SeenSubdomain names = 1;
+  // More names exist than were returned.
+  bool truncated = 2;
+  // Domain the names are under.
+  string domain = 3;
+}
+
+message CertificateSearchRequest {
+  // Hostname as observed; the search covers its registered domain and every
+  // name beneath it.
+  string host = 1;
+  // Registered domain when known, as in SeenSubdomainsRequest.
+  string domain = 2;
+}
+
+message CertificateHostname {
+  string name = 1;
+  uint32 certificates = 2;
+  // Unix seconds; 0 when unknown.
+  int64 first_issued = 3;
+  int64 latest_expiry = 4;
+  string issuer = 5;
+}
+
+message CertificateSearchResponse {
+  LookupOutcome outcome = 1;
+  string domain = 2;
+  uint32 certificates = 3;
+  repeated CertificateHostname names = 4;
+  // crt.sh returned more than the daemon reads.
+  bool truncated = 5;
+  // The error, in English, for anything but FOUND.
+  string detail = 6;
+}
+
+enum LookupOutcome {
+  LOOKUP_OUTCOME_FOUND = 0;
+  // The registry answered and has no registration for this name.
+  LOOKUP_OUTCOME_NOT_FOUND = 1;
+  // The registry asked the daemon to slow down.
+  LOOKUP_OUTCOME_RATE_LIMITED = 2;
+  // IANA lists no RDAP or WHOIS server for the TLD.
+  LOOKUP_OUTCOME_NO_AUTHORITY = 3;
+  // The registry could not be reached or returned an unreadable record.
+  LOOKUP_OUTCOME_UNAVAILABLE = 4;
+  // The name is not a hostname a registry can hold, e.g. an address.
+  LOOKUP_OUTCOME_INVALID_DOMAIN = 5;
+}
+
+message LookupDomainResponse {
+  LookupOutcome outcome = 1;
+  // Set when outcome is FOUND.
+  DomainRegistration registration = 2;
+  // The lookup error, in English, for anything but FOUND.
+  string detail = 3;
+}
+
+message NotificationEvent {
+  string type = 1;      // e.g. "AI_ALERT", "NEW_APP", "NEW_DOMAIN", "MAJOR_ERROR", "MALICIOUS_FLOW"
+  string title = 2;
+  string message = 3;
+  uint64 timestamp = 4; // Unix timestamp
+  string severity = 5;  // e.g. "INFO", "WARNING", "CRITICAL"
+  uint64 id = 6;        // Database id when the alert is persisted
+}
+
+message AlertsResponse {
+  repeated NotificationEvent alerts = 1;
+}
+
+message AlertRequest {
+  uint64 id = 1;
+}
+
+message CaptureDevice {
+  // Stable libpcap device identifier; pass this value back to StartCapture.
+  string name = 1;
+  string description = 2;
+  repeated string addresses = 3;
+  bool loopback = 4;
+}
+
+message CaptureDevicesResponse {
+  repeated CaptureDevice devices = 1;
+  // False when libpcap/Npcap is unavailable. The RPC still succeeds so the UI
+  // can render a useful install/permission message instead of a transport error.
+  bool available = 2;
+  string message = 3;
+}
+
+message StartCaptureRequest {
+  string device_name = 1;
+  // Optional BPF expression. Empty means capture everything (libpcap/Wireshark default).
+  // The UI may offer presets (e.g. "tcp or udp") for narrower kernel-side filters.
+  string capture_filter = 2;
+  uint32 snap_length = 3;
+  bool promiscuous = 4;
+  uint32 read_timeout_ms = 5;
+  uint32 max_seconds = 6;
+  uint64 max_bytes = 7;
+  // Optional application restriction. When set, only TCP/UDP flows the
+  // daemon's connection tracker attributes to this executable are kept, in the
+  // PCAP and the live stream. Flows open at StartCapture are included; a packet
+  // of a flow the tracker has not reported yet is held briefly before it is
+  // dropped. Non-IP, ICMP, and non-first IP fragments are dropped. Fails with
+  // FAILED_PRECONDITION when the tracker cannot attribute connections.
+  // Matching is best-effort. app_name is shown in status; it defaults to the
+  // file name of app_path.
+  string app_path = 8;
+  string app_name = 9;
+}
+
+message CaptureControl {
+  string capture_id = 1;
+}
+
+message CaptureSessionResponse {
+  string capture_id = 1;
+  bool started = 2;
+  string message = 3;
+}
+
+message CaptureStatus {
+  string capture_id = 1;
+  string state = 2; // starting | capturing | stopping | completed | faulted
+  bool active = 3;
+  uint64 packets = 4;
+  uint64 bytes = 5;
+  uint64 dropped_packets = 6;
+  uint32 elapsed_seconds = 7;
+  string device_name = 8;
+  string message = 9;
+  // Packets an application capture left out as other applications' traffic.
+  uint64 filtered_packets = 10;
+  // Application the capture is restricted to; empty for a whole-interface capture.
+  string app_name = 11;
+}
+
+message CaptureChunk {
+  bytes data = 1;
+  bool last = 2;
+}
+
+message CapturedPacket {
+  uint64 sequence = 1;
+  uint64 timestamp_us = 2;
+  // Bytes stored for this frame in the PCAP (snaplen-limited).
+  uint32 captured_length = 3;
+  // On-wire length (pcap orig_len). May exceed captured_length when snaplen truncates.
+  uint32 original_length = 4;
+  uint32 link_layer = 5;
+  string protocol = 6;
+  string source = 7;
+  string destination = 8;
+  uint32 source_port = 9;
+  uint32 destination_port = 10;
+  string info = 11;
+  // Live-stream payload; may be truncated for IPC bandwidth. Use captured_length /
+  // original_length for true sizes. Full frames are always written to the PCAP file.
+  bytes data = 12;
+}
+
+message NetworkDevice {
+  string mac_address = 1;
+  string ip_address = 2;
+  string manufacturer = 3;
+  string mdns_name = 4;
+  string adapter_id = 5;
+  bool present = 6;
+  bool watched = 7;
+  string last_seen = 8;
+}
+
+message NetworkScanRange {
+  int32 id = 1;
+  string adapter_id = 2;
+  string cidr = 3;
+}
+
+message NetworkDeviceWatch {
+  int32 id = 1;
+  string mac_address = 2;
+  string adapter_id = 3;
+  string cidr = 4;
+  uint32 interval_minutes = 5;
+  bool enabled = 6;
+  bool present = 7;
+  string last_checked = 8;
+  string ip_address = 9;
+}
+
+message NetworkMappingState {
+  bool supported = 1;
+  string message = 2;
+  repeated NetworkDevice devices = 3;
+  repeated NetworkScanRange scan_ranges = 4;
+  repeated NetworkDeviceWatch device_watches = 5;
+  string last_scan = 6;
+  // True while a discover pass (manual, scheduled, or watch-driven) holds the scan gate.
+  bool is_scanning = 7;
+}
+
+message NetworkMapRequest {
+  // Empty uses active private adapters plus saved ranges. Explicit ranges are
+  // accepted for one-off scans and must contain at most 1,024 hosts each.
+  repeated string cidr_ranges = 1;
+}
+
+message NetworkMapResponse {
+  bool success = 1;
+  string message = 2;
+  repeated NetworkDevice devices = 3;
+  string scanned_at = 4;
+}
+
+message UpdateStatus {
+  enum State {
+    UPDATE_STATE_UNKNOWN = 0;
+    UPDATE_STATE_UP_TO_DATE = 1;
+    UPDATE_STATE_AVAILABLE = 2;
+    // Downloading, verifying, or swapping after an InstallUpdate request.
+    UPDATE_STATE_INSTALLING = 3;
+    UPDATE_STATE_FAILED = 4;
+    // Debug build, --no-service run, an install the updater cannot replace (a Linux
+    // tarball, or a tree from before versioned installs), or no compiled-in feed.
+    UPDATE_STATE_UNSUPPORTED = 5;
+  }
+  State state = 1;
+  // Version of the running daemon. A client older than this asks to be reopened.
+  string current_version = 2;
+  // Set when a newer release is known, including while UNSUPPORTED.
+  string available_version = 3;
+  // Short release notes from the signed manifest.
+  string notes = 4;
+  // User-facing reason for FAILED or UNSUPPORTED; empty otherwise.
+  string detail = 5;
+  // The update channel the status describes: "stable", "beta", or "nightly".
+  string channel = 6;
+  // When the last check finished, in unix seconds; 0 before the first.
+  int64 last_checked_at = 7;
+  // Why the last check could not read the release feeds; empty when it could.
+  string check_error = 8;
+}
+
+message InstallUpdateRequest {
+  // The version the user confirmed. The daemon refuses the request when it no
+  // longer matches the available release.
+  string version = 1;
+}

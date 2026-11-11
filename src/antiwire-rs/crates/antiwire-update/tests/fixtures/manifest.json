@@ -1,0 +1,20 @@
+{
+  "version": "0.2.0",
+  "notes": "Test release.",
+  "files": [
+    {
+      "role": "daemon",
+      "platform": "windows-x86_64",
+      "name": "antiwire-daemon-0.2.0-windows-x86_64.exe",
+      "sha256": "76b00120d2360c5b168484b2846f022422d3207e4d12a5cda1597036ce83b4ec",
+      "size": 12
+    },
+    {
+      "role": "client",
+      "platform": "windows-x86_64",
+      "name": "antiwire-0.2.0-windows-x86_64.exe",
+      "sha256": "f30e6f16d9730076eb4f51116fa7d8acf0f8d6e43b794e9afa39cd3eefc36b6d",
+      "size": 12
+    }
+  ]
+}

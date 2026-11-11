@@ -1,0 +1,49 @@
+[package]
+name = "firew-rs"
+description = "Cross-platform native firewall CRUD library"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+repository.workspace = true
+readme.workspace = true
+
+[lints]
+workspace = true
+
+[dependencies]
+firew-core.workspace = true
+firew-sys.workspace = true
+ipnet = "2.11"
+parking_lot = "0.12"
+
+[target.'cfg(target_os = "linux")'.dependencies]
+firew-linux = { workspace = true, optional = true }
+
+[target.'cfg(windows)'.dependencies]
+firew-windows = { workspace = true, optional = true }
+
+[target.'cfg(target_os = "macos")'.dependencies]
+firew-macos = { workspace = true, optional = true }
+
+[dependencies.tokio]
+version = "1.43"
+features = ["rt", "sync"]
+optional = true
+
+[dependencies.async-std]
+version = "1.13"
+optional = true
+
+[dependencies.smol]
+version = "2.0"
+optional = true
+
+[features]
+default = ["linux", "windows", "macos"]
+linux = ["dep:firew-linux"]
+windows = ["dep:firew-windows"]
+macos = ["dep:firew-macos"]
+tokio = ["dep:tokio"]
+async-std = ["dep:async-std"]
+smol = ["dep:smol"]

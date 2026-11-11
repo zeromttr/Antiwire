@@ -1,0 +1,396 @@
+//! Collector lifecycle, retries, and polling for the Windows ETW backend.
+
+use crate::owner_module::{self, CookiePoller, TcpOwnerSnapshot, UdpOwnerSnapshot};
+use crate::session_names::SessionNames;
+use arc_swap::ArcSwap;
+use dns_trace::start_dns_trace;
+use fallback::{ETW_RETRY_INTERVAL, FallbackExit, IpHelperFallback, interface_stats};
+use ferrisetw::trace::KernelTrace;
+use kernel_trace::{KernelTraceState, start_kernel_trace};
+use netmetrics_core::{DegradeReason, Protocol, SocketCount, unix_now_ms};
+use netmetrics_sys::{
+    Backend, BackendConfig, BackendError, BackendErrorKind, BackendEvent, EventSink, StopFlag,
+};
+use network::{ETW_CLOCK_LAG, TCP_PID_METRICS};
+use session::{RunningTrace, SessionOwners, classify_trace_error, start_clearing_stale_session};
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{Arc, LazyLock, Mutex};
+use std::time::{Duration, Instant};
+
+mod dns_flush;
+mod dns_trace;
+mod fallback;
+mod kernel_trace;
+mod network;
+mod process_trace;
+mod session;
+#[cfg(test)]
+mod tests;
+
+pub use dns_flush::{dns_event_flush_stats, request_dns_event_flush};
+pub use dns_trace::dns_caller_recovery_stats;
+pub use network::{
+    UdpPidAttributionSample, address_string_fallback_count, etw_clock_lag, owner_evidence_stats,
+    take_owner_disagreements, tcp_owner_cookie_hit_count, tcp_pid_attribution_stats,
+    udp_pid_attribution_stats,
+};
+/// Count plus sample time from a successful TCP owner-table poll.
+pub use owner_module::SocketCountSample;
+
+/// Kernel TCP/IP, process, and optional DNS-Client ETW collector.
+#[derive(Debug, Default)]
+pub struct WindowsBackend;
+
+impl Backend for WindowsBackend {
+    fn name(&self) -> &'static str {
+        "windows-etw"
+    }
+
+    #[allow(clippy::too_many_lines)]
+    fn run(
+        &mut self,
+        config: &BackendConfig,
+        sink: EventSink,
+        stop: StopFlag,
+    ) -> Result<(), BackendError> {
+        // ETW session names are global. A process-owned named mutex distinguishes an orphaned
+        // trace from a live collector using the same configured name, so stale recovery never
+        // tears down another running instance. Failure here must not skip the IP Helper
+        // fallback: creating `Global\` mutexes requires the same elevation as kernel ETW, and
+        // a live owner of this name must not be displaced.
+        let names = match SessionNames::new(&config.session_name, config.dns_hints) {
+            Ok(names) => names,
+            Err(detail) => {
+                return Err(BackendError::new(
+                    BackendErrorKind::Unavailable,
+                    "windows-etw-session",
+                    detail,
+                ));
+            }
+        };
+        // A start can fail for reasons that pass: another run still tearing down its
+        // session, or a transient ETW error. Snapshot polling covers the gap and gives ETW
+        // another chance every `ETW_RETRY_INTERVAL`, so one bad start does not cost byte
+        // accounting for the life of the daemon. Only the first failure is reported.
+        let mut fallback = IpHelperFallback::default();
+        let EtwStart {
+            session_owners,
+            kernel_trace,
+            tcp_owners,
+            udp_owners,
+            flow_owners,
+            image_stops,
+        } = loop {
+            if let Some(etw) = self.start_etw(config, &names, &sink, !fallback.entered) {
+                break etw;
+            }
+            match fallback.run(config, &sink, &stop, ETW_RETRY_INTERVAL)? {
+                FallbackExit::Stopped => return Ok(()),
+                FallbackExit::RetryEtw => {}
+            }
+        };
+
+        let mut flow_listener =
+            match crate::windivert::start(Arc::clone(&flow_owners), sink.clone()) {
+                Ok(listener) => Some(listener),
+                Err(detail) => {
+                    sink.emit(BackendEvent::Degraded(DegradeReason::SourceUnavailable {
+                        source: "windivert-flow".to_owned(),
+                        detail,
+                    }));
+                    None
+                }
+            };
+        // Only a listener that started and then exited is restarted; one that
+        // never started (no package, no elevation) would fail the same way again.
+        let mut next_flow_retry: Option<Instant> = None;
+
+        let mut process_trace =
+            match process_trace::start(config, names.process(), &session_owners, &sink) {
+                Ok(trace) => Some(trace),
+                Err(error) => {
+                    sink.emit(BackendEvent::Degraded(
+                        error.degrade_reason("windows-process-image"),
+                    ));
+                    None
+                }
+            };
+        image_stops.store(process_trace.is_some(), Ordering::Release);
+        let mut next_process_retry = process_trace
+            .is_none()
+            .then(|| Instant::now() + Duration::from_secs(1));
+
+        let mut dns_trace = if config.dns_hints {
+            match start_dns_trace(
+                config,
+                names.dns().expect("DNS logger name"),
+                &session_owners,
+                &sink,
+            ) {
+                Ok(trace) => Some(trace),
+                Err(error) => {
+                    sink.emit(BackendEvent::Degraded(error.degrade_reason(self.name())));
+                    None
+                }
+            }
+        } else {
+            None
+        };
+
+        let poll_interval = Duration::from_millis(config.poll_interval_ms.max(250));
+        let mut cookie_poller = CookiePoller::new(tcp_owners, udp_owners, poll_interval);
+        let mut next_cookie_poll = Instant::now();
+        let mut reported_cookie_error = false;
+        let mut next_interface_poll = Instant::now();
+        let mut reported_interface_error = false;
+        let mut next_dns_retry = (config.dns_hints && dns_trace.is_none())
+            .then(|| Instant::now() + Duration::from_secs(1));
+        while !stop.is_stop_requested() {
+            if flow_listener
+                .as_ref()
+                .is_some_and(crate::windivert::FlowListener::is_finished)
+            {
+                // Dropping it joins the receive thread and withdraws its owner
+                // feed. The flow deletes it missed can leave recycled tuples in
+                // the cache, so the next listener starts from an empty one.
+                flow_listener = None;
+                *flow_owners
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner) =
+                    crate::flow_owner::FlowOwnerCache::default();
+                sink.emit(BackendEvent::Degraded(DegradeReason::SourceUnavailable {
+                    source: "windivert-flow".to_owned(),
+                    detail: "WinDivert FLOW receive loop exited; restarting".to_owned(),
+                }));
+                next_flow_retry = Some(Instant::now() + Duration::from_secs(1));
+            }
+            if next_flow_retry.is_some_and(|at| Instant::now() >= at) {
+                flow_listener =
+                    crate::windivert::start(Arc::clone(&flow_owners), sink.clone()).ok();
+                next_flow_retry = flow_listener
+                    .is_none()
+                    .then(|| Instant::now() + Duration::from_secs(5));
+            }
+            if let Some(trace) = process_trace.as_ref()
+                && let Some(result) = trace.processing_result()
+            {
+                let detail = format!("process image ETW processing ended: {result:?}");
+                image_stops.store(false, Ordering::Release);
+                let _ = process_trace.take().expect("process trace").stop();
+                sink.emit(BackendEvent::Degraded(DegradeReason::SourceUnavailable {
+                    source: "windows-process-image".to_owned(),
+                    detail,
+                }));
+                next_process_retry = Some(Instant::now() + Duration::from_secs(1));
+            }
+            if process_trace.is_none()
+                && next_process_retry.is_some_and(|deadline| Instant::now() >= deadline)
+            {
+                match process_trace::start(config, names.process(), &session_owners, &sink) {
+                    Ok(trace) => {
+                        process_trace = Some(trace);
+                        image_stops.store(true, Ordering::Release);
+                        next_process_retry = None;
+                    }
+                    Err(_) => {
+                        next_process_retry = Some(Instant::now() + Duration::from_secs(5));
+                    }
+                }
+            }
+            if let Some(result) = kernel_trace.processing_result() {
+                let detail = match result {
+                    Ok(()) => "kernel ETW processing exited unexpectedly".to_owned(),
+                    Err(detail) => format!("kernel ETW processing failed: {detail}"),
+                };
+                let _ = kernel_trace.stop();
+                return Err(BackendError::new(
+                    BackendErrorKind::SessionLost,
+                    "windows-kernel-etw",
+                    detail,
+                ));
+            }
+            if let Some(trace) = dns_trace.as_ref()
+                && let Some(result) = trace.processing_result()
+            {
+                let detail = match result {
+                    Ok(()) => "DNS ETW processing exited unexpectedly".to_owned(),
+                    Err(detail) => format!("DNS ETW processing failed: {detail}"),
+                };
+                let trace = dns_trace.take().expect("DNS trace");
+                let _ = trace.stop();
+                sink.emit(BackendEvent::Degraded(DegradeReason::SourceUnavailable {
+                    source: "windows-dns-client".to_owned(),
+                    detail,
+                }));
+                next_dns_retry = Some(Instant::now() + Duration::from_secs(1));
+            }
+            if dns_trace.is_none()
+                && let Some(deadline) = next_dns_retry
+                && Instant::now() >= deadline
+            {
+                match start_dns_trace(
+                    config,
+                    names.dns().expect("DNS logger name"),
+                    &session_owners,
+                    &sink,
+                ) {
+                    Ok(trace) => {
+                        dns_trace = Some(trace);
+                        next_dns_retry = None;
+                    }
+                    Err(error) => {
+                        sink.emit(BackendEvent::Degraded(error.degrade_reason(self.name())));
+                        next_dns_retry = Some(Instant::now() + Duration::from_secs(5));
+                    }
+                }
+            }
+            let now = Instant::now();
+            // ETW carries no socket handle, so identity is joined on from the owner-module
+            // tables. A failure here costs cookies, never the event stream.
+            if now >= next_cookie_poll {
+                match cookie_poller.poll(&sink, unix_now_ms()) {
+                    Ok(()) => reported_cookie_error = false,
+                    Err(detail) if !reported_cookie_error => {
+                        reported_cookie_error = true;
+                        sink.emit(BackendEvent::Degraded(DegradeReason::SourceUnavailable {
+                            source: "windows-owner-module".to_owned(),
+                            detail,
+                        }));
+                    }
+                    Err(_) => {}
+                }
+                next_cookie_poll = Instant::now() + poll_interval;
+            }
+            if Instant::now() >= next_interface_poll {
+                match interface_stats(unix_now_ms()) {
+                    Ok(samples) => {
+                        reported_interface_error = false;
+                        for sample in samples {
+                            sink.emit(BackendEvent::Interface(sample));
+                        }
+                    }
+                    Err(detail) if !reported_interface_error => {
+                        reported_interface_error = true;
+                        sink.emit(BackendEvent::Degraded(DegradeReason::SourceUnavailable {
+                            source: "windows-ip-helper-interface".to_owned(),
+                            detail,
+                        }));
+                    }
+                    Err(_) => {}
+                }
+                next_interface_poll = Instant::now() + poll_interval;
+            }
+            let deadline = next_cookie_poll.min(next_interface_poll);
+            stop.wait_deadline(deadline);
+        }
+
+        if let Some(trace) = dns_trace {
+            let _ = trace.stop();
+        }
+        if let Some(trace) = process_trace {
+            let _ = trace.stop();
+        }
+        kernel_trace
+            .stop()
+            .map_err(|error| classify_trace_error("kernel ETW", &error))
+    }
+}
+
+/// A started kernel ETW session and the owner state its callbacks share.
+struct EtwStart {
+    session_owners: SessionOwners,
+    kernel_trace: RunningTrace<KernelTrace>,
+    tcp_owners: Arc<ArcSwap<TcpOwnerSnapshot>>,
+    udp_owners: Arc<ArcSwap<UdpOwnerSnapshot>>,
+    flow_owners: Arc<Mutex<crate::flow_owner::FlowOwnerCache>>,
+    image_stops: Arc<AtomicBool>,
+}
+
+impl WindowsBackend {
+    /// Acquires the session names and starts kernel ETW, clearing a stale session once.
+    ///
+    /// Returns `None` when ETW is unavailable; the failure is reported only when `report`.
+    fn start_etw(
+        &self,
+        config: &BackendConfig,
+        names: &SessionNames,
+        sink: &EventSink,
+        report: bool,
+    ) -> Option<EtwStart> {
+        let degraded = |reason: DegradeReason| {
+            if report {
+                sink.emit(BackendEvent::Degraded(reason));
+            }
+        };
+        let session_owners = match SessionOwners::acquire(names) {
+            Ok(owner) => owner,
+            Err(detail) => {
+                degraded(DegradeReason::SourceUnavailable {
+                    source: "windows-etw-session".to_owned(),
+                    detail,
+                });
+                return None;
+            }
+        };
+        // Allocate diagnostic counters before callbacks begin; callback updates are atomic only.
+        LazyLock::force(&TCP_PID_METRICS);
+        let tcp_owners = Arc::new(ArcSwap::from_pointee(TcpOwnerSnapshot::default()));
+        let udp_owners = Arc::new(ArcSwap::from_pointee(UdpOwnerSnapshot::default()));
+        let flow_owners = Arc::new(Mutex::new(crate::flow_owner::FlowOwnerCache::default()));
+        let image_stops = Arc::new(AtomicBool::new(false));
+        // A new session converts its timestamps from a new reference.
+        ETW_CLOCK_LAG.reset(unix_now_ms());
+        let state = KernelTraceState {
+            tcp_owners: &tcp_owners,
+            udp_owners: &udp_owners,
+            flow_owners: &flow_owners,
+            image_stops: &image_stops,
+        };
+        let kernel_trace =
+            match start_clearing_stale_session(&session_owners, names.kernel(), || {
+                start_kernel_trace(config, names.kernel(), &session_owners, sink, &state)
+            }) {
+                Ok(trace) => trace,
+                Err(detail) => {
+                    let error = classify_trace_error("kernel ETW", &detail);
+                    degraded(error.degrade_reason(self.name()));
+                    return None;
+                }
+            };
+        Some(EtwStart {
+            session_owners,
+            kernel_trace,
+            tcp_owners,
+            udp_owners,
+            flow_owners,
+            image_stops,
+        })
+    }
+}
+
+/// Returns the number of eligible TCP sockets.
+///
+/// Prefers a fresh owner-module poll sample so a running collector does not
+/// issue another table syscall. Stale samples (older than five seconds) and a
+/// missing cache fall through to the `OWNER_PID` walker. Walker failure keeps the
+/// last-known count and marks it stale; never sampled and walker failure is
+/// unavailable, not a valid zero.
+///
+/// The count skips listeners and invalid/unowned endpoints. It is not restricted
+/// to established IPv4 connections: `OWNER_PID` covers IPv4 and IPv6.
+#[must_use]
+pub fn active_socket_count() -> SocketCount {
+    owner_module::active_tcp_socket_count()
+}
+
+/// TCP 5-tuple and UDP bind owners from the IP Helper owner-module tables.
+#[must_use]
+pub fn socket_owner_snapshot() -> netmetrics_core::SocketOwnerSnapshot {
+    owner_module::socket_owner_snapshot()
+}
+
+/// [`socket_owner_snapshot`] limited to the tables of `protocol`.
+#[must_use]
+pub fn socket_owner_snapshot_for(protocol: Protocol) -> netmetrics_core::SocketOwnerSnapshot {
+    owner_module::socket_owner_snapshot_for(protocol)
+}

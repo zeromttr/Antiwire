@@ -1,0 +1,28 @@
+.preview-notice {
+  display: flex;
+  flex: none;
+  flex-wrap: wrap;
+  justify-content: space-between;
+  gap: 4px 16px;
+  padding: 6px 24px;
+  border-bottom: 1px solid var(--ln);
+  background: var(--well-soft);
+  color: var(--t2);
+  font-size: 11px;
+}
+.preview-notice strong {
+  color: var(--t1);
+  font-weight: 500;
+}
+.actions {
+  display: flex;
+  gap: 16px;
+}
+.preview-notice a {
+  color: var(--t1);
+  text-underline-offset: 3px;
+}
+.preview-notice a:focus-visible {
+  outline: 2px solid var(--acc);
+  outline-offset: 3px;
+}

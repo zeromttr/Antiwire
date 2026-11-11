@@ -1,0 +1,38 @@
+[package]
+name = "netmetrics-windows"
+description = "Windows ETW backend for netmetrics"
+version.workspace = true
+edition = "2024"
+license.workspace = true
+rust-version.workspace = true
+
+[dependencies]
+netmetrics-core.workspace = true
+netmetrics-sys.workspace = true
+
+[target.'cfg(windows)'.dependencies]
+arc-swap = "1.7"
+ferrisetw = "1.2"
+sha2 = "0.10"
+socket2 = "0.6"
+# The official WinDivert package is fetched in-process: the Windows certificate
+# store and proxy settings, explicit timeouts, and no PowerShell.
+ureq = { version = "3.4", default-features = false, features = [
+    "rustls",
+    "platform-verifier",
+    "win-system-proxy",
+] }
+zip = { version = "9.0", default-features = false, features = ["deflate-flate2-zlib-rs"] }
+windows = { version = "0.57", features = [
+    "Win32_Foundation",
+    "Win32_NetworkManagement_IpHelper",
+    "Win32_NetworkManagement_Ndis",
+    "Win32_Networking_WinSock",
+    "Win32_System_Diagnostics_Etw",
+    "Win32_System_LibraryLoader",
+    "Win32_System_Performance",
+    "Win32_System_Threading",
+] }
+
+[lints]
+workspace = true

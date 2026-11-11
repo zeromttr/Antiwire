@@ -1,0 +1,62 @@
+[package]
+name = "antiwire-ipc"
+description = "gRPC IPC server, auth, and streaming hubs for the Antiwire daemon"
+version.workspace = true
+publish.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+repository.workspace = true
+
+[lints]
+workspace = true
+
+[features]
+# `TestService`, a gRPC service over a temporary store.
+test-support = [
+    "antiwire-enforce/test-support",
+    "antiwire-events/test-support",
+]
+
+[dependencies]
+antiwire-capture = { workspace = true }
+antiwire-dns = { workspace = true }
+antiwire-enforce = { workspace = true }
+antiwire-events = { workspace = true }
+antiwire-geo = { workspace = true, features = ["embedded-oui"] }
+antiwire-lookup = { workspace = true }
+antiwire-platform = { workspace = true }
+antiwire-policy = { workspace = true }
+antiwire-proto = { workspace = true }
+antiwire-secrets = { workspace = true }
+antiwire-services = { workspace = true }
+antiwire-store = { workspace = true }
+antiwire-tuning = { workspace = true }
+antiwire-update = { workspace = true }
+arc-swap = { workspace = true }
+atomic-write-file = { workspace = true }
+data-encoding = { workspace = true }
+directories = { workspace = true }
+getrandom = "0.4"
+parking_lot = { workspace = true }
+tempfile = { workspace = true }
+time = { workspace = true }
+tokio = { workspace = true }
+tokio-stream = "0.1"
+tokio-util = { workspace = true }
+tonic = { workspace = true }
+tracing = { workspace = true }
+rcgen = { workspace = true }
+subtle = { workspace = true }
+thiserror = { workspace = true }
+zeroize = { workspace = true }
+
+[dev-dependencies]
+antiwire-events = { workspace = true, features = ["test-support"] }
+antiwire-ipc = { workspace = true, features = ["test-support"] }
+antiwire-enforce = { workspace = true, features = ["test-support"] }
+tokio = { workspace = true }
+
+[target.'cfg(unix)'.dev-dependencies]
+hyper-util = { version = "0.1", features = ["tokio"] }
+tower = { workspace = true }

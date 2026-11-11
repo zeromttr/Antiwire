@@ -1,0 +1,130 @@
+.offline {
+  min-height: 310px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 26px;
+  padding: 42px;
+  overflow: hidden;
+  position: relative;
+}
+
+.offline-mark {
+  width: 66px;
+  height: 66px;
+  border-radius: 18px;
+  display: grid;
+  place-items: center;
+  flex: none;
+  color: var(--t2);
+  border: 1px solid var(--ln);
+  background: color-mix(in oklab, var(--t1) 4%, transparent);
+  /* GPU: inset blur removed — border + tint already define the tile without a per-paint blur. */
+}
+
+.offline-copy {
+  width: min(670px, 100%);
+  position: relative;
+  z-index: 1;
+}
+
+.eyebrow {
+  color: var(--t3);
+  font-size: 12px;
+  font-weight: 500;
+  display: flex;
+  align-items: center;
+  gap: 7px;
+}
+
+.eyebrow span {
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  background: var(--t3);
+  box-shadow: 0 0 0 3px color-mix(in oklab, var(--t3) 18%, transparent);
+}
+
+.offline h2 {
+  margin: 10px 0 8px;
+  font-size: 20px;
+  font-weight: 600;
+  letter-spacing: -0.02em;
+}
+
+.offline-copy > p {
+  max-width: 610px;
+  margin: 0;
+  color: var(--t2);
+  font-size: 12.5px;
+  line-height: 1.6;
+}
+
+.requirements {
+  display: grid;
+  grid-template-columns: repeat(3, 1fr);
+  gap: 8px;
+  margin: 20px 0;
+}
+
+.requirements > div {
+  min-width: 0;
+  display: flex;
+  align-items: flex-start;
+  gap: 9px;
+  padding: 11px;
+  border: 1px solid var(--ln);
+  border-radius: 9px;
+  color: var(--t3);
+  background: color-mix(in oklab, var(--t1) 2%, transparent);
+}
+
+.requirements :global(svg) {
+  flex: none;
+  color: var(--acc);
+}
+
+.requirements span {
+  min-width: 0;
+  font-size: 10px;
+  line-height: 1.35;
+}
+
+.requirements strong {
+  display: block;
+  margin-bottom: 2px;
+  color: var(--t1);
+  font-size: 10.5px;
+  font-weight: 500;
+}
+
+.spin {
+  display: inline-flex;
+  animation: rotate 0.8s linear infinite;
+}
+
+@keyframes rotate {
+  to {
+    transform: rotate(360deg);
+  }
+}
+
+@media (max-width: 700px) {
+  .requirements {
+    grid-template-columns: 1fr;
+  }
+  .offline {
+    align-items: flex-start;
+    padding: 28px;
+  }
+  .offline-mark {
+    display: none;
+  }
+}
+
+/* The retry button with the time of the next automatic attempt beside it. */
+.retry {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+}

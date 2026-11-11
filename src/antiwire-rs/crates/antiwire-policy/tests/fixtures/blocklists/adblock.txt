@@ -1,0 +1,7 @@
+! Adblock-style DNS blocklist fixture
+[Adblock Plus 2.0]
+||ad.xyz.com^
+||tracker.example.com^$important
+@@||allowed.example.com^
+/ads/
+example.com##.ad

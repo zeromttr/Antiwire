@@ -1,0 +1,678 @@
+name: Release
+
+# Publishes a GitHub release for a version tag (`v<version>`). Push the tag, or run this by
+# hand with the tag name. Bump the version in every source first; check-versions.mjs refuses
+# a tag that does not match them.
+#
+# Every asset is a plain file. For each platform:
+#   - the installer: AntiwireInstaller-<v>-windows-<arch>.exe, Antiwire-<v>-macos-aarch64.dmg,
+#     or the .deb and .rpm;
+#   - the portable archive of the plain files, antiwire-<v>-<os>-<arch>.zip on Windows and
+#     .tar.gz on macOS and Linux (scripts/package-archive.sh);
+#   - on Windows and macOS, the self-updater's daemon binary and client zip, which the signed
+#     manifest.json names.
+# SHA256SUMS covers all of them.
+#
+# Windows (x64 and ARM64), macOS (Apple silicon), and Linux (x64 and ARM64) build in
+# parallel; `publish` signs two manifests and creates the release. manifest.json lists the
+# Windows and macOS updater files. manifest-linux.json lists the .deb and .rpm, which a Linux
+# daemon installed from one of them installs with the package manager; a tarball install is
+# told about the update but not updated. The two stay separate because manifest.json rejects
+# unknown fields, so adding packages to it would break every daemon already installed.
+# Intel Macs get no build, and the daemon on one does not offer the update.
+#
+# Update channels (antiwire-update/src/channel.rs, scripts/release-channel.mjs): the version
+# picks the channel. vX.Y.Z is stable, vX.Y.Z-beta.N and vX.Y.Z-rc.N are beta, and
+# vX.Y.Z-nightly.DATE.RUN is nightly (nightly.yml tags and calls this workflow). Any other
+# prerelease label is refused in `prepare`. Stable daemons read GitHub's `latest` release,
+# which skips prereleases. Each other channel has a fixed `channel-beta` / `channel-nightly`
+# prerelease whose manifests `channel-feed` replaces with the channel's newest release. A
+# daemon reads the feeds of its channel and every more stable one and takes the newest.
+on:
+  push:
+    tags:
+      - "v*"
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: "Existing tag to release, e.g. v0.2.0"
+        required: true
+        type: string
+  workflow_call:
+    inputs:
+      tag:
+        description: "Existing tag to release"
+        required: true
+        type: string
+
+permissions:
+  contents: read
+
+# Two runs for one tag would race to create the same release. Let the first finish.
+concurrency:
+  group: release-${{ inputs.tag || github.ref_name }}
+  cancel-in-progress: false
+
+env:
+  RUST_BACKTRACE: "1"
+  TAG: ${{ github.event_name == 'push' && github.ref_name || inputs.tag }}
+
+jobs:
+  # Cheap checks before any long build.
+  prepare:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    outputs:
+      version: ${{ steps.version.outputs.version }}
+      channel: ${{ steps.channel.outputs.channel }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v7
+        with:
+          ref: ${{ github.event_name == 'push' && github.ref || format('refs/tags/{0}', inputs.tag) }}
+
+      - name: Read the version from the tag
+        id: version
+        run: |
+          set -euo pipefail
+          # Only a plain version tag gets past this, so the version is safe in the shell and
+          # file names below.
+          pattern='^v([0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z.-]+)?)$'
+          if [[ ! "$TAG" =~ $pattern ]]; then
+            echo "::error::Tag '$TAG' is not vX.Y.Z or vX.Y.Z-prerelease"
+            exit 1
+          fi
+          echo "version=${BASH_REMATCH[1]}" >> "$GITHUB_OUTPUT"
+
+      # A prerelease label no channel publishes would be a release no daemon is offered.
+      - name: Read the update channel from the version
+        id: channel
+        run: |
+          set -euo pipefail
+          CHANNEL="$(node scripts/release-channel.mjs channel "${{ steps.version.outputs.version }}")"
+          echo "channel=$CHANNEL" >> "$GITHUB_OUTPUT"
+          echo "Update channel: $CHANNEL"
+
+      - name: Check release configuration
+        env:
+          PUBLIC_KEY: ${{ vars.ANTIWIRE_UPDATE_PUBLIC_KEY }}
+          SIGNING_KEY: ${{ secrets.ANTIWIRE_UPDATE_SIGNING_KEY }}
+        run: |
+          set -euo pipefail
+          if [ -z "$PUBLIC_KEY" ]; then
+            echo "::error::Repository variable ANTIWIRE_UPDATE_PUBLIC_KEY is not set. Generate a key with scripts/release-manifest.mjs generate-key."
+            exit 1
+          fi
+          if [ -z "$SIGNING_KEY" ]; then
+            echo "::error::Secret ANTIWIRE_UPDATE_SIGNING_KEY is not set. Use the seed printed by scripts/release-manifest.mjs generate-key."
+            exit 1
+          fi
+
+      - name: Check versions match the tag
+        run: node scripts/check-versions.mjs --expect "${{ steps.version.outputs.version }}"
+
+      # The daemon looks for updates in the repository it was built with. After a move, a
+      # release from the new repository must not ship daemons that still look in the old one.
+      - name: Check the repository matches
+        run: node scripts/repository.mjs check "${{ github.repository }}"
+
+  windows:
+    needs: prepare
+    # ARM64 is cross-compiled on the x64 runner, which has the MSVC ARM64 tools and LLVM.
+    # Bun and Inno Setup then run natively, and both payloads take the same steps.
+    runs-on: windows-latest
+    # Release builds; a hung job would otherwise run for six hours.
+    timeout-minutes: 60
+    strategy:
+      fail-fast: true
+      matrix:
+        include:
+          # `platform` is the manifest's `{os}-{arch}`, as the daemon computes it from
+          # `std::env::consts`.
+          - target: x86_64-pc-windows-msvc
+            platform: windows-x86_64
+          - target: aarch64-pc-windows-msvc
+            platform: windows-aarch64
+    env:
+      VERSION: ${{ needs.prepare.outputs.version }}
+      TARGET: ${{ matrix.target }}
+      PLATFORM: ${{ matrix.platform }}
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v7
+        with:
+          ref: ${{ github.event_name == 'push' && github.ref || format('refs/tags/{0}', inputs.tag) }}
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: 1.90.0
+          targets: ${{ matrix.target }}
+
+      # ring assembles its ARM64 code with clang, which cl.exe cannot do.
+      - name: Put LLVM on PATH
+        if: matrix.target == 'aarch64-pc-windows-msvc'
+        run: echo "C:\Program Files\LLVM\bin" >> "$GITHUB_PATH"
+
+      - name: Install Bun
+        uses: oven-sh/setup-bun@v2
+
+      - name: Restore Bun packages
+        id: bun-cache
+        uses: actions/cache/restore@v6
+        with:
+          path: |
+            ~/.bun/install/cache
+            src/antiwire-client/node_modules
+          key: ${{ runner.os }}-bun-${{ hashFiles('src/antiwire-client/bun.lock') }}
+          restore-keys: |
+            ${{ runner.os }}-bun-
+
+      - name: Rust build cache
+        uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: |
+            src/antiwire-rs
+          # Release profile artifacts — separate from debug test caches.
+          # v4 drops archives saved before this repo's crates were included.
+          prefix-key: v4
+          shared-key: packages-release
+          key: ${{ matrix.target }}
+          cache-workspace-crates: true
+
+      - name: Build antiwire-daemon (release)
+        run: cargo build --release --target "$TARGET" -p antiwire-daemon
+        working-directory: src/antiwire-rs
+        env:
+          # Compiled into the daemon. The updater accepts only manifests this key verifies.
+          ANTIWIRE_UPDATE_PUBLIC_KEY: ${{ vars.ANTIWIRE_UPDATE_PUBLIC_KEY }}
+
+      - name: Install client frontend dependencies
+        run: bun install --frozen-lockfile
+        working-directory: src/antiwire-client
+
+      - name: Save Bun packages
+        if: github.ref == 'refs/heads/main' && steps.bun-cache.outputs.cache-hit != 'true'
+        continue-on-error: true
+        uses: actions/cache/save@v6
+        with:
+          path: |
+            ~/.bun/install/cache
+            src/antiwire-client/node_modules
+          key: ${{ runner.os }}-bun-${{ hashFiles('src/antiwire-client/bun.lock') }}
+
+      # The unpacked Electron app for this architecture; installer.iss packages the directory.
+      - name: Build Antiwire client (release)
+        run: bun run package:dir "--${{ matrix.target == 'aarch64-pc-windows-msvc' && 'arm64' || 'x64' }}"
+        working-directory: src/antiwire-client
+        env:
+          CSC_IDENTITY_AUTO_DISCOVERY: "false"
+
+      - name: Install Inno Setup
+        shell: pwsh
+        run: choco install innosetup -y --no-progress
+
+      # The version names the install tree, so it must be the one the payload was built as.
+      # The target picks the payload directory and the architecture the installer accepts.
+      - name: Compile installer.iss
+        shell: pwsh
+        run: '& "${env:ProgramFiles(x86)}\Inno Setup 6\ISCC.exe" "/DAppVersion=$env:VERSION" "/DTargetTriple=$env:TARGET" installer.iss'
+
+      # Three kinds of file: the installer, the portable zip of the plain files (daemon/ and
+      # ui/), and the self-updater's pair, which the signed manifest names.
+      - name: Stage release files
+        run: |
+          set -euo pipefail
+          mkdir -p stage
+          DAEMON="src/antiwire-rs/target/$TARGET/release/antiwire-daemon.exe"
+          if [ "$TARGET" = aarch64-pc-windows-msvc ]; then UNPACKED=win-arm64-unpacked; else UNPACKED=win-unpacked; fi
+          CLIENT="src/antiwire-client/dist/$UNPACKED"
+
+          cp Output/AntiwireInstaller.exe "stage/AntiwireInstaller-$VERSION-$PLATFORM.exe"
+          bash scripts/package-archive.sh --os windows --version "$VERSION" --platform "$PLATFORM" \
+            --daemon "$DAEMON" --client "$CLIENT" --out stage
+
+          cp "$DAEMON" "stage/antiwire-daemon-$VERSION-$PLATFORM.exe"
+          # The updater unpacks this zip into the version's ui directory (antiwire-update).
+          /c/Windows/System32/tar.exe -a -c -f "stage/antiwire-ui-$VERSION-$PLATFORM.zip" \
+            -C "$CLIENT" .
+
+      - name: Upload release files
+        uses: actions/upload-artifact@v7
+        with:
+          name: release-${{ matrix.platform }}
+          path: stage/*
+          if-no-files-found: error
+
+  macos:
+    needs: prepare
+    # Apple silicon. Its platform in the manifest is macos-aarch64, matching the daemon's
+    # `std::env::consts::ARCH`.
+    runs-on: macos-latest
+    # Release builds; a hung job would otherwise run for six hours.
+    timeout-minutes: 60
+    env:
+      VERSION: ${{ needs.prepare.outputs.version }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v7
+        with:
+          ref: ${{ github.event_name == 'push' && github.ref || format('refs/tags/{0}', inputs.tag) }}
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: 1.90.0
+
+      - name: Install Bun
+        uses: oven-sh/setup-bun@v2
+
+      - name: Restore Bun packages
+        id: bun-cache
+        uses: actions/cache/restore@v6
+        with:
+          path: |
+            ~/.bun/install/cache
+            src/antiwire-client/node_modules
+          key: ${{ runner.os }}-bun-${{ hashFiles('src/antiwire-client/bun.lock') }}
+          restore-keys: |
+            ${{ runner.os }}-bun-
+
+      - name: Rust build cache
+        uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: |
+            src/antiwire-rs
+          # v4 drops archives saved before this repo's crates were included.
+          prefix-key: v4
+          shared-key: packages-release
+          cache-workspace-crates: true
+
+      - name: Install build dependencies
+        run: brew install libpcap
+
+      - name: Build antiwire-daemon (release)
+        run: cargo build --release -p antiwire-daemon
+        working-directory: src/antiwire-rs
+        env:
+          ANTIWIRE_UPDATE_PUBLIC_KEY: ${{ vars.ANTIWIRE_UPDATE_PUBLIC_KEY }}
+
+      - name: Install client frontend dependencies
+        run: bun install --frozen-lockfile
+        working-directory: src/antiwire-client
+
+      - name: Save Bun packages
+        if: github.ref == 'refs/heads/main' && steps.bun-cache.outputs.cache-hit != 'true'
+        continue-on-error: true
+        uses: actions/cache/save@v6
+        with:
+          path: |
+            ~/.bun/install/cache
+            src/antiwire-client/node_modules
+          key: ${{ runner.os }}-bun-${{ hashFiles('src/antiwire-client/bun.lock') }}
+
+      # Ad-hoc signed by scripts/after-pack.mjs after the fuses are flipped.
+      - name: Build Antiwire.app (release)
+        run: bun run package:dir
+        working-directory: src/antiwire-client
+        env:
+          CSC_IDENTITY_AUTO_DISCOVERY: "false"
+
+      # The tarball holds the plain files and install.sh; the disk image holds the same
+      # directory. The updater takes the daemon binary and the app bundle zipped with ditto,
+      # which keeps the bundle's symlinks and signature.
+      - name: Stage release files
+        run: |
+          set -euo pipefail
+          PLATFORM="macos-aarch64"
+          APP_SRC="$(ls -d src/antiwire-client/dist/mac*/Antiwire.app | head -n 1)"
+          DAEMON_SRC="src/antiwire-rs/target/release/antiwire-daemon"
+          test -d "$APP_SRC"
+          test -x "$DAEMON_SRC"
+
+          mkdir -p stage package
+          ARCHIVE="$(bash scripts/package-archive.sh --os macos --version "$VERSION" \
+            --platform "$PLATFORM" --daemon "$DAEMON_SRC" --client "$APP_SRC" --out stage)"
+          tar -C package -xzf "$ARCHIVE"
+          hdiutil create -volname "Antiwire" -srcfolder "package/antiwire-$VERSION-$PLATFORM" \
+            -ov -format UDZO "stage/Antiwire-$VERSION-$PLATFORM.dmg"
+
+          cp "$DAEMON_SRC" "stage/antiwire-daemon-$VERSION-$PLATFORM"
+          ditto -c -k --keepParent "$APP_SRC" "stage/Antiwire-$VERSION-$PLATFORM.app.zip"
+
+      - name: Upload release files
+        uses: actions/upload-artifact@v7
+        with:
+          name: release-macos
+          path: stage/*
+          if-no-files-found: error
+
+  linux:
+    needs: prepare
+    # Native runners: the client links against the target's WebKitGTK, and the eBPF objects
+    # are compiled for the build machine's architecture (see ebpf/build.sh).
+    runs-on: ${{ matrix.runner }}
+    # Release builds; a hung job would otherwise run for six hours.
+    timeout-minutes: 60
+    strategy:
+      fail-fast: true
+      matrix:
+        include:
+          # `arch` is nfpm's Go name; it writes amd64/arm64 for deb and x86_64/aarch64 for rpm.
+          # `platform` names the tarball, as on the other platforms.
+          - runner: ubuntu-24.04
+            arch: amd64
+            platform: linux-x86_64
+          - runner: ubuntu-24.04-arm
+            arch: arm64
+            platform: linux-aarch64
+    env:
+      VERSION: ${{ needs.prepare.outputs.version }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v7
+        with:
+          ref: ${{ github.event_name == 'push' && github.ref || format('refs/tags/{0}', inputs.tag) }}
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: 1.90.0
+
+      - name: Install Bun
+        uses: oven-sh/setup-bun@v2
+
+      - name: Restore Bun packages
+        id: bun-cache
+        uses: actions/cache/restore@v6
+        with:
+          path: |
+            ~/.bun/install/cache
+            src/antiwire-client/node_modules
+          key: ${{ runner.os }}-${{ runner.arch }}-bun-${{ hashFiles('src/antiwire-client/bun.lock') }}
+          restore-keys: |
+            ${{ runner.os }}-${{ runner.arch }}-bun-
+
+      - name: Rust build cache
+        uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: |
+            src/antiwire-rs
+          # v4 drops archives saved before this repo's crates were included.
+          prefix-key: v4
+          shared-key: packages-release
+          key: linux-${{ matrix.arch }}
+          cache-workspace-crates: true
+
+      - name: Install build dependencies
+        run: |
+          set -euo pipefail
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            libwebkit2gtk-4.1-dev \
+            libayatana-appindicator3-dev \
+            librsvg2-dev \
+            patchelf \
+            clang \
+            libbpf-dev \
+            linux-tools-common \
+            linux-tools-generic \
+            pkg-config
+
+          if ! /usr/sbin/bpftool -V >/dev/null 2>&1; then
+            FALLBACK="$(find /usr/lib -type f -name bpftool -perm -111 2>/dev/null | sort -V | tail -n 1 || true)"
+            test -n "$FALLBACK"
+            sudo ln -sf "$FALLBACK" /usr/local/bin/bpftool
+          else
+            sudo ln -sf /usr/sbin/bpftool /usr/local/bin/bpftool
+          fi
+
+      - name: Build Linux eBPF objects
+        run: sh ./build.sh
+        working-directory: src/antiwire-rs/packages/netmet-rs/crates/netmetrics-linux/ebpf
+
+      # The key is compiled in as on the other platforms, although a packaged Linux daemon
+      # reports updates as unsupported today.
+      - name: Build antiwire-daemon (release)
+        run: cargo build --release -p antiwire-daemon
+        working-directory: src/antiwire-rs
+        env:
+          ANTIWIRE_UPDATE_PUBLIC_KEY: ${{ vars.ANTIWIRE_UPDATE_PUBLIC_KEY }}
+
+      - name: Build frontend
+        run: |
+          bun install --frozen-lockfile
+          bun run package:dir
+        working-directory: src/antiwire-client
+
+      - name: Save Bun packages
+        if: github.ref == 'refs/heads/main' && steps.bun-cache.outputs.cache-hit != 'true'
+        continue-on-error: true
+        uses: actions/cache/save@v6
+        with:
+          path: |
+            ~/.bun/install/cache
+            src/antiwire-client/node_modules
+          key: ${{ runner.os }}-${{ runner.arch }}-bun-${{ hashFiles('src/antiwire-client/bun.lock') }}
+
+
+      - name: Stage package files
+        run: |
+          set -euo pipefail
+          mkdir -p staging stage
+          cp src/antiwire-rs/target/release/antiwire-daemon staging/antiwire-daemon
+          cp -R src/antiwire-client/dist/linux-unpacked staging/antiwire-app
+          cp src/antiwire-client/resources/icons/128x128.png staging/antiwire.png
+          cp src/antiwire-rs/packages/netmet-rs/crates/netmetrics-linux/ebpf/netmetrics.bpf.o staging/netmetrics.bpf.o
+          cp src/antiwire-rs/packages/netmet-rs/crates/netmetrics-linux/ebpf/dns_filter.bpf.o staging/dns_filter.bpf.o
+
+      - name: Install Go
+        uses: actions/setup-go@v7
+        with:
+          go-version: "1.24.x"
+
+      - name: Install nfpm
+        run: |
+          go install github.com/goreleaser/nfpm/v2/cmd/nfpm@v2.43.0
+          echo "$(go env GOPATH)/bin" >> "$GITHUB_PATH"
+
+      # nfpm names each file with the version and architecture, so the four packages do not
+      # collide in the release. A prerelease version has a "~" in its file name, which GitHub
+      # renames in release assets; the signed manifest must name the file as it is uploaded.
+      - name: Build .deb and .rpm
+        run: |
+          set -euo pipefail
+          ANTIWIRE_REPOSITORY_URL="$(node scripts/repository.mjs url)"
+          export ANTIWIRE_REPOSITORY_URL
+          nfpm package -f packaging/linux/nfpm.yaml --packager deb --target stage
+          nfpm package -f packaging/linux/nfpm.yaml --packager rpm --target stage
+          for file in stage/*~*; do
+            [ -e "$file" ] || continue
+            mv "$file" "${file//\~/-}"
+          done
+        env:
+          ANTIWIRE_VERSION: ${{ needs.prepare.outputs.version }}
+          ANTIWIRE_ARCH: ${{ matrix.arch }}
+
+      # The same files as the packages, unpackaged, with install.sh for other distributions.
+      - name: Build tarball
+        run: |
+          set -euo pipefail
+          bash scripts/package-archive.sh --os linux --version "$VERSION" \
+            --platform "${{ matrix.platform }}" \
+            --daemon staging/antiwire-daemon --client staging/antiwire-app \
+            --ebpf src/antiwire-rs/packages/netmet-rs/crates/netmetrics-linux/ebpf \
+            --icon staging/antiwire.png --out stage
+
+      - name: Upload release files
+        uses: actions/upload-artifact@v7
+        with:
+          name: release-linux-${{ matrix.arch }}
+          path: stage/*
+          if-no-files-found: error
+
+  publish:
+    needs: [prepare, windows, macos, linux]
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    # Only this job writes to the repository: it creates the release and uploads its assets.
+    permissions:
+      contents: write
+    env:
+      VERSION: ${{ needs.prepare.outputs.version }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v7
+        with:
+          ref: ${{ github.event_name == 'push' && github.ref || format('refs/tags/{0}', inputs.tag) }}
+
+      - name: Download release files
+        uses: actions/download-artifact@v8
+        with:
+          pattern: release-*
+          path: stage
+          merge-multiple: true
+
+      # An annotated tag's message is the release notes. A lightweight tag has none, so the
+      # release gets a default line.
+      - name: Read release notes
+        run: |
+          set -euo pipefail
+          git fetch --force origin "refs/tags/$TAG:refs/tags/$TAG"
+          NOTES="$RUNNER_TEMP/release-notes.md"
+          : > "$NOTES"
+          if [ "$(git for-each-ref "refs/tags/$TAG" --format='%(objecttype)')" = tag ]; then
+            git for-each-ref "refs/tags/$TAG" --format='%(contents)' > "$NOTES"
+          fi
+          if [ -z "$(tr -d '[:space:]' < "$NOTES")" ]; then
+            echo "Antiwire $VERSION" > "$NOTES"
+          fi
+
+      - name: Sign release manifest
+        run: |
+          set -euo pipefail
+          node scripts/release-manifest.mjs build \
+            --version "$VERSION" \
+            --notes-file "$RUNNER_TEMP/release-notes.md" \
+            --out stage \
+            --platform windows-x86_64 \
+            --daemon "stage/antiwire-daemon-$VERSION-windows-x86_64.exe" \
+            --client "stage/antiwire-ui-$VERSION-windows-x86_64.zip" \
+            --platform windows-aarch64 \
+            --daemon "stage/antiwire-daemon-$VERSION-windows-aarch64.exe" \
+            --client "stage/antiwire-ui-$VERSION-windows-aarch64.zip" \
+            --platform macos-aarch64 \
+            --daemon "stage/antiwire-daemon-$VERSION-macos-aarch64" \
+            --client "stage/Antiwire-$VERSION-macos-aarch64.app.zip"
+        env:
+          ANTIWIRE_UPDATE_SIGNING_KEY: ${{ secrets.ANTIWIRE_UPDATE_SIGNING_KEY }}
+
+      # Linux daemons read their own manifest and install the release's .deb or .rpm with the
+      # package manager. nfpm chooses the package names, so each is found by its architecture,
+      # and exactly one must match.
+      - name: Sign Linux package manifest
+        run: |
+          set -euo pipefail
+          one() {
+            local matches=( $1 )
+            if [ "${#matches[@]}" -ne 1 ] || [ ! -f "${matches[0]}" ]; then
+              echo "::error::expected exactly one file matching $1, found: ${matches[*]}" >&2
+              exit 1
+            fi
+            echo "${matches[0]}"
+          }
+          # Assigned first: a failure inside an argument's $(...) would not stop the step.
+          DEB_X64="$(one 'stage/antiwire_*_amd64.deb')"
+          RPM_X64="$(one 'stage/antiwire-*.x86_64.rpm')"
+          DEB_ARM64="$(one 'stage/antiwire_*_arm64.deb')"
+          RPM_ARM64="$(one 'stage/antiwire-*.aarch64.rpm')"
+          node scripts/release-manifest.mjs packages \
+            --version "$VERSION" \
+            --notes-file "$RUNNER_TEMP/release-notes.md" \
+            --out stage \
+            --platform linux-x86_64 --deb "$DEB_X64" --rpm "$RPM_X64" \
+            --platform linux-aarch64 --deb "$DEB_ARM64" --rpm "$RPM_ARM64"
+        env:
+          ANTIWIRE_UPDATE_SIGNING_KEY: ${{ secrets.ANTIWIRE_UPDATE_SIGNING_KEY }}
+
+      # Written last, from the exact bytes that get uploaded, so it covers every asset,
+      # the manifest included. Verify with `sha256sum --check --ignore-missing SHA256SUMS`.
+      - name: Write checksums
+        run: |
+          set -euo pipefail
+          cd stage
+          find . -maxdepth 1 -type f ! -name SHA256SUMS -printf '%P\n' | LC_ALL=C sort \
+            | xargs -d '\n' sha256sum > SHA256SUMS
+          cat SHA256SUMS
+
+      # A prerelease is skipped by GitHub's `latest` redirect, which the daemon reads, so a
+      # beta never reaches stable installs.
+      - name: Create GitHub release
+        run: |
+          set -euo pipefail
+          PRERELEASE=()
+          if [[ "$VERSION" == *-* ]]; then
+            PRERELEASE=(--prerelease)
+          fi
+          gh release create "$TAG" \
+            --verify-tag \
+            --title "Antiwire $VERSION" \
+            --notes-file "$RUNNER_TEMP/release-notes.md" \
+            "${PRERELEASE[@]}" \
+            stage/*
+        env:
+          GH_TOKEN: ${{ github.token }}
+
+  # Points the beta or nightly feed at this release. Runs one at a time per channel, and only
+  # ever moves a feed forward, so two releases finishing together cannot leave it older.
+  channel-feed:
+    needs: [prepare, publish]
+    if: needs.prepare.outputs.channel != 'stable'
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    concurrency:
+      group: channel-feed-${{ needs.prepare.outputs.channel }}
+      cancel-in-progress: false
+    permissions:
+      contents: write
+    env:
+      VERSION: ${{ needs.prepare.outputs.version }}
+      FEED: channel-${{ needs.prepare.outputs.channel }}
+      GH_TOKEN: ${{ github.token }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v7
+        with:
+          ref: ${{ github.event_name == 'push' && github.ref || format('refs/tags/{0}', inputs.tag) }}
+
+      - name: Update the channel feed
+        run: |
+          set -euo pipefail
+          if ! gh release view "$FEED" >/dev/null 2>&1; then
+            gh release create "$FEED" \
+              --prerelease \
+              --target "$GITHUB_SHA" \
+              --title "Antiwire ${FEED#channel-} channel" \
+              --notes "Update feed for the ${FEED#channel-} channel. Its manifests are the newest ${FEED#channel-} release's; the release files are on that release. Do not download from here."
+          fi
+
+          CURRENT=""
+          if gh release download "$FEED" --pattern manifest.json --output "$RUNNER_TEMP/current.json" 2>/dev/null; then
+            CURRENT="$(jq -r .version "$RUNNER_TEMP/current.json")"
+          fi
+          if [ -n "$CURRENT" ] && ! node scripts/release-channel.mjs newer "$VERSION" "$CURRENT"; then
+            echo "$FEED already names $CURRENT, which is not older than $VERSION; leaving it."
+            exit 0
+          fi
+
+          mkdir -p feed
+          gh release download "$TAG" --dir feed \
+            --pattern manifest.json --pattern manifest.json.sig \
+            --pattern manifest-linux.json --pattern manifest-linux.json.sig
+          test "$(jq -r .version feed/manifest.json)" = "$VERSION"
+          test "$(jq -r .version feed/manifest-linux.json)" = "$VERSION"
+          gh release upload "$FEED" --clobber feed/*
+          echo "$FEED now names $VERSION (was ${CURRENT:-empty})."

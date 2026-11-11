@@ -1,0 +1,80 @@
+.skeleton-list {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.skeleton-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.sidebar-row {
+  min-height: 40px;
+  padding: 8px 10px;
+  border-radius: 9px;
+  border: 1px solid color-mix(in oklab, var(--t1) 4%, transparent);
+  background: var(--well-soft);
+}
+
+.avatar {
+  width: 24px;
+  height: 24px;
+  border-radius: 6px;
+  flex: none;
+}
+
+.line.name {
+  flex: 1;
+  height: 10px;
+  border-radius: 4px;
+}
+
+.line.count {
+  width: 28px;
+  height: 10px;
+  border-radius: 4px;
+  flex: none;
+}
+
+.grid-row {
+  display: grid;
+  grid-template-columns: 1.3fr 1.6fr 1fr 1fr 0.5fr 0.55fr 0.85fr 0.7fr 0.7fr 0.75fr 0.45fr;
+  gap: 8px;
+  min-height: 34px;
+  padding: 8px 12px;
+  border-bottom: 1px solid color-mix(in oklab, var(--t1) 4%, transparent);
+}
+
+.cell {
+  height: 10px;
+  border-radius: 4px;
+}
+
+.shimmer {
+  position: relative;
+  overflow: hidden;
+  background: color-mix(in oklab, var(--t1) 6%, transparent);
+}
+
+.shimmer::after {
+  content: '';
+  position: absolute;
+  inset: 0;
+  transform: translate3d(-100%, 0, 0);
+  /* GPU: no will-change — up to ~110 shimmer nodes would each pin a layer; transform animates on-compositor anyway. */
+  background: linear-gradient(
+    90deg,
+    transparent,
+    color-mix(in oklab, var(--t1) 8%, transparent),
+    transparent
+  );
+  animation: shimmer 1.2s var(--ease-in-out) infinite;
+}
+
+@keyframes shimmer {
+  100% {
+    transform: translate3d(100%, 0, 0);
+  }
+}

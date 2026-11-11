@@ -1,0 +1,37 @@
+.language-picker {
+  padding: 14px 0;
+  border-bottom: 1px solid var(--ln);
+}
+
+.language-picker.embedded {
+  padding: 0;
+  border-bottom: none;
+}
+
+.label {
+  font-size: 13px;
+  font-weight: 500;
+  color: var(--t1);
+}
+
+.desc {
+  font-size: 11px;
+  color: var(--t3);
+  margin-top: 4px;
+  margin-bottom: 12px;
+}
+
+/* Settings > Appearance: a flat section (was `.appearance :global(.language-picker)`). */
+.language-picker.appearance {
+  padding: 0;
+  border-bottom: none;
+  max-width: 420px;
+}
+
+.appearance .label {
+  font-weight: 600;
+}
+
+.appearance .desc {
+  font-size: 12.5px;
+}

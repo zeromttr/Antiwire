@@ -1,0 +1,56 @@
+[package]
+name = "antiwire-flow"
+description = "Netmetrics bridge and flow tracker with batched persistence"
+version.workspace = true
+publish.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+repository.workspace = true
+
+[lints]
+workspace = true
+
+[dependencies]
+antiwire-capture = { workspace = true }
+antiwire-dns = { workspace = true }
+antiwire-geo = { workspace = true }
+antiwire-events = { workspace = true }
+antiwire-platform = { workspace = true }
+antiwire-policy = { workspace = true }
+antiwire-store = { workspace = true }
+antiwire-tuning = { workspace = true }
+arc-swap = { workspace = true }
+futures-util = { workspace = true }
+netmetrics = { workspace = true }
+netmetrics-core = { workspace = true }
+moka = { workspace = true }
+lru = { workspace = true }
+parking_lot = { workspace = true }
+thiserror = { workspace = true }
+time = { workspace = true }
+tokio = { workspace = true }
+tokio-util = { workspace = true }
+tracing = { workspace = true }
+
+[target.'cfg(not(windows))'.dependencies]
+sysinfo = { workspace = true }
+
+[target.'cfg(windows)'.dependencies]
+windows = { workspace = true, features = [
+    "Win32_Foundation",
+    "Win32_Storage_FileSystem",
+    "Win32_System_Diagnostics_ToolHelp",
+    "Win32_System_Services",
+    "Win32_System_Threading",
+    # Command-line reads for rundll32 hosted-module attribution.
+    "Wdk_System_Threading",
+] }
+
+[dev-dependencies]
+antiwire-store = { workspace = true, features = ["test-support"] }
+antiwire-secrets = { workspace = true }
+rusqlite = { workspace = true }
+serde_json = { workspace = true }
+sysinfo = { workspace = true }
+tempfile = { workspace = true }

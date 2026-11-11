@@ -1,0 +1,476 @@
+name: CI
+
+# One workflow for every product. `plan` maps the changed files to areas
+# (scripts/ci-plan.mjs), one `deny` job checks the dependency policy for those areas,
+# and only then do the jobs for the changed areas start. An area with no changes runs
+# nothing. Runners by event:
+#   pull request: Ubuntu and Windows   push to main: Ubuntu
+#   nightly: macOS, for areas changed on main in the last 25 hours
+#   weekly: Windows, for areas changed in the last 8 days (publishes its caches)
+#   dispatch: the `os` input; `scope` picks changed areas (vs main) or all of them
+on:
+  push:
+    branches: [main]
+    # Coarse filter so unrelated commits do not start a runner. The plan does the rest.
+    paths:
+      - "src/antiwire-rs/**"
+      - "src/antiwire-client/**"
+      - "scripts/**"
+      - "!scripts/update-hagezi-abused-tlds*"
+      - ".github/workflows/ci.yml"
+      - ".github/workflows/packages.yml"
+      - "!**/*.md"
+  pull_request:
+    # Drafts skip CI (see the plan job `if`); marking a PR ready runs it.
+    types: [opened, synchronize, reopened, ready_for_review]
+    paths:
+      - "src/antiwire-rs/**"
+      - "src/antiwire-client/**"
+      - "scripts/**"
+      - "!scripts/update-hagezi-abused-tlds*"
+      - ".github/workflows/ci.yml"
+      - ".github/workflows/packages.yml"
+      - "!**/*.md"
+  schedule:
+    # These strings must match NIGHTLY and WEEKLY in scripts/ci-plan.mjs.
+    - cron: "0 3 * * *"
+    - cron: "0 4 * * 0"
+  workflow_dispatch:
+    inputs:
+      os:
+        description: Which runners to use
+        type: choice
+        options: [all, ubuntu, windows, macos]
+        default: all
+      scope:
+        description: Areas changed on this branch since main, or every area
+        type: choice
+        options: [changed, all]
+        default: changed
+  # packages.yml runs every area on every runner before it builds.
+  workflow_call:
+    inputs:
+      os:
+        type: string
+        default: all
+      scope:
+        type: string
+        default: all
+
+permissions:
+  contents: read
+  # Required for the Rust, sccache, Bun, and Docker Actions caches.
+  actions: write
+
+concurrency:
+  # A pull request's next commit replans against the whole PR, so its old run can go.
+  # A push plans only its own commits, so it must never be cancelled, or those changes
+  # go untested and their caches unsaved. A group holds one pending run and cancels the
+  # one before it, so each push gets its own group. The schedule keeps the two crons
+  # apart; github.workflow keeps a packages.yml call apart from a push to the same ref.
+  group: ci-${{ github.workflow }}-${{ github.event.schedule || github.event.pull_request.number || (github.event_name == 'push' && github.sha) || github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+env:
+  RUST_BACKTRACE: "1"
+  CARGO_PROFILE_DEV_DEBUG: "0"
+  CARGO_PROFILE_TEST_DEBUG: "0"
+
+jobs:
+  plan:
+    if: github.event.pull_request.draft != true
+    timeout-minutes: 5
+    runs-on: ubuntu-latest
+    outputs:
+      matrix: ${{ steps.plan.outputs.matrix }}
+      has_matrix: ${{ steps.plan.outputs.has_matrix }}
+      deny: ${{ steps.plan.outputs.deny }}
+      deny_rs: ${{ steps.plan.outputs.deny_rs }}
+      bun: ${{ steps.plan.outputs.bun }}
+      scripts: ${{ steps.plan.outputs.scripts }}
+      ebpf: ${{ steps.plan.outputs.ebpf }}
+      firew_live: ${{ steps.plan.outputs.firew_live }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v7
+        with:
+          # A pull request diffs its merge commit against the first parent. Other events
+          # compare against older history.
+          fetch-depth: ${{ github.event_name == 'pull_request' && 2 || 0 }}
+
+      - name: Plan
+        id: plan
+        run: node scripts/ci-plan.mjs
+        env:
+          EVENT_NAME: ${{ github.event_name }}
+          SCHEDULE: ${{ github.event.schedule }}
+          BEFORE: ${{ github.event.before }}
+          OS: ${{ inputs.os }}
+          SCOPE: ${{ inputs.scope }}
+
+  # The single gate. Every other job waits for it and does not start if it fails. It is
+  # skipped, and does not block, when no Rust dependency graph is affected.
+  deny:
+    needs: plan
+    if: needs.plan.outputs.deny == 'true'
+    timeout-minutes: 10
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v7
+
+      - name: Install cargo-deny
+        uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-deny
+
+      # netmet-rs and firew-rs have no policy of their own; the daemon's applies to them.
+      # Its skips and license list are written for the daemon's graph, so the "not
+      # encountered" warnings they raise for the smaller graphs are silenced.
+      - name: cargo deny (antiwire-rs, netmet-rs, firew-rs)
+        if: needs.plan.outputs.deny_rs != ''
+        working-directory: src/antiwire-rs
+        env:
+          MANIFESTS: ${{ needs.plan.outputs.deny_rs }}
+        run: |
+          set -euo pipefail
+          for manifest in $MANIFESTS; do
+            echo "::group::cargo deny $manifest"
+            if [ "$manifest" = Cargo.toml ]; then
+              cargo deny --manifest-path "$manifest" check
+            else
+              cargo deny --manifest-path "$manifest" check \
+                -A unmatched-skip -A unmatched-skip-root -A unnecessary-skip \
+                -A license-not-encountered -A advisory-not-detected
+            fi
+            echo "::endgroup::"
+          done
+
+  rust:
+    name: ${{ matrix.name }}
+    needs: [plan, deny]
+    if: >-
+      !cancelled() &&
+      needs.plan.outputs.has_matrix == 'true' &&
+      (needs.deny.result == 'success' || needs.deny.result == 'skipped')
+    strategy:
+      fail-fast: false
+      matrix: ${{ fromJSON(needs.plan.outputs.matrix) }}
+    timeout-minutes: ${{ matrix.timeout }}
+    runs-on: ${{ matrix.runner }}
+    env:
+      SCCACHE_GHA_ENABLED: "true"
+      RUSTC_WRAPPER: sccache
+      # Other refs read main's objects and write none. An entry saved on a pull request
+      # is readable only by that pull request, yet counts against the repository's cache
+      # limit and pushes main's archives out.
+      SCCACHE_GHA_RW_MODE: ${{ github.ref == 'refs/heads/main' && 'READ_WRITE' || 'READ_ONLY' }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v7
+
+      # Real-time scanning of every object file and linked test binary is a large share
+      # of Windows build time. The runner is a throwaway VM.
+      - name: Exclude builds from Defender scanning
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          try {
+            Set-MpPreference -DisableRealtimeMonitoring $true
+            Add-MpPreference -ExclusionPath $env:GITHUB_WORKSPACE, "$env:USERPROFILE\.cargo", "$env:USERPROFILE\.rustup"
+            "Defender real-time protection: $((Get-MpComputerStatus).RealTimeProtectionEnabled)"
+          } catch {
+            "Defender settings unchanged: $_"
+          }
+
+      # LLVM's linker, shipped with the toolchain, links the test binaries much faster
+      # than link.exe.
+      - name: Link with rust-lld
+        if: matrix.lld
+        shell: bash
+        run: echo "CARGO_TARGET_X86_64_PC_WINDOWS_MSVC_LINKER=rust-lld.exe" >> "$GITHUB_ENV"
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: 1.90.0
+
+      # Object cache for compilations the shared target archive cannot satisfy: a
+      # Cargo.lock that no longer matches it, and crates main changed since the archive
+      # was saved (an archive is never overwritten while its key still matches).
+      # Must precede rust-cache, whose cargo calls go through RUSTC_WRAPPER.
+      - name: Compilation cache
+        uses: mozilla-actions/sccache-action@v0.0.11
+        with:
+          # Pinned like the Rust toolchain; Dependabot bumps the action, not this.
+          version: v0.18.0
+
+      - name: Rust build cache
+        uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: ${{ matrix.cache_workspace }}
+          # v4 drops archives saved before this repo's crates were included. An exact
+          # key is never overwritten, so the old prefix would keep restoring a cache
+          # that rebuilds every local crate.
+          prefix-key: v4
+          shared-key: ${{ matrix.cache_key }}
+          cache-workspace-crates: true
+          # Only main publishes. A save on any other ref can evict the shared archive.
+          # Scheduled runs check out main, so they publish too.
+          save-if: ${{ github.ref == 'refs/heads/main' }}
+
+      # Do not apt-install bare `bpftool` on ubuntu-latest: it is a virtual package with
+      # no candidate on current Azure runner kernels. The ebpf job handles it.
+      - name: Install Linux build dependencies
+        if: matrix.apt != ''
+        env:
+          PACKAGES: ${{ matrix.apt }}
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends $PACKAGES
+
+      - name: Install macOS build dependencies
+        if: matrix.brew != ''
+        env:
+          PACKAGES: ${{ matrix.brew }}
+        run: brew install $PACKAGES
+
+      # A single test-profile build avoids recompiling dependencies that a dev-profile
+      # check cannot share with cargo test.
+      - name: Tests
+        shell: bash
+        working-directory: ${{ matrix.dir }}
+        env:
+          COMMAND: ${{ matrix.run }}
+        run: bash -c "$COMMAND"
+
+      - name: Build live macOS firewall tests
+        if: matrix.firew_live_macos
+        working-directory: src/antiwire-rs
+        run: >-
+          cargo test --manifest-path packages/firew-rs/Cargo.toml
+          -p firew-macos --test live_macos --no-run
+
+      - name: Run live macOS firewall tests as root
+        if: matrix.firew_live_macos
+        working-directory: src/antiwire-rs
+        # Invoke the test binary directly so sudo does not rewrite cargo's
+        # target/ as root (which breaks rust-cache upload/reuse).
+        run: |
+          set -euo pipefail
+          BIN="$(find packages/firew-rs/target/debug/deps -maxdepth 1 -type f \
+            -name 'live_macos-*' ! -name '*.d' -perm -111 | head -n 1)"
+          test -n "$BIN"
+          sudo -n env \
+            "HOME=$HOME" \
+            "PATH=$PATH" \
+            "RUST_BACKTRACE=$RUST_BACKTRACE" \
+            "$BIN" --ignored --test-threads=1 --nocapture
+
+      - name: Compilation cache stats
+        if: always()
+        shell: bash
+        run: sccache --show-stats
+
+  firew-live:
+    name: firew-rs live (Linux, NET_ADMIN)
+    needs: [plan, deny]
+    if: >-
+      !cancelled() &&
+      needs.plan.outputs.firew_live == 'true' &&
+      (needs.deny.result == 'success' || needs.deny.result == 'skipped')
+    timeout-minutes: 30
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v7
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v4
+
+      - name: Build Linux live-test image
+        uses: docker/build-push-action@v7
+        with:
+          context: src/antiwire-rs
+          file: src/antiwire-rs/docker/linux-test.Dockerfile
+          load: true
+          tags: antiwire-rs-linux-test:latest
+          build-args: |
+            PRECOMPILE=live
+          # The scope is shared by every branch. mode=min caches final layers only —
+          # mode=max hit ENOSPC on export. Only main publishes a new index.
+          cache-from: type=gha,scope=antiwire-rs-linux-test
+          cache-to: ${{ github.ref == 'refs/heads/main' && 'type=gha,mode=min,scope=antiwire-rs-linux-test' || '' }}
+
+      - name: Run live tests in container
+        run: docker run --rm --cap-add=NET_ADMIN -e RUST_BACKTRACE=1 antiwire-rs-linux-test:latest live
+
+  # cargo test does not load these objects; the Linux collector finds them at runtime.
+  ebpf:
+    name: netmet-rs eBPF objects
+    needs: [plan, deny]
+    if: >-
+      !cancelled() &&
+      needs.plan.outputs.ebpf == 'true' &&
+      (needs.deny.result == 'success' || needs.deny.result == 'skipped')
+    timeout-minutes: 10
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v7
+
+      - name: Install eBPF build dependencies
+        run: |
+          set -euo pipefail
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            clang \
+            llvm \
+            libbpf-dev \
+            linux-tools-common \
+            linux-tools-generic \
+            pkg-config
+          # ubuntu-latest Azure kernels often ship a bpftool wrapper without a
+          # matching kernel binary; link a generic tools payload into place.
+          if ! /usr/sbin/bpftool -V >/dev/null 2>&1; then
+            FALLBACK="$(find /usr/lib -type f -name bpftool -perm -111 2>/dev/null | sort -V | tail -n 1 || true)"
+            test -n "$FALLBACK"
+            sudo ln -sf "$FALLBACK" /usr/local/bin/bpftool
+          else
+            sudo ln -sf /usr/sbin/bpftool /usr/local/bin/bpftool
+          fi
+          bpftool -V
+
+      - name: Build Linux eBPF telemetry object
+        run: sh ./build.sh
+        working-directory: src/antiwire-rs/packages/netmet-rs/crates/netmetrics-linux/ebpf
+
+      - name: Upload eBPF object
+        uses: actions/upload-artifact@v7
+        with:
+          name: netmetrics-ebpf-x86_64
+          path: |
+            src/antiwire-rs/packages/netmet-rs/crates/netmetrics-linux/ebpf/netmetrics.bpf.o
+            src/antiwire-rs/packages/netmet-rs/crates/netmetrics-linux/ebpf/dns_filter.bpf.o
+          if-no-files-found: error
+
+  bun:
+    name: client Bun
+    needs: [plan, deny]
+    if: >-
+      !cancelled() &&
+      needs.plan.outputs.bun == 'true' &&
+      (needs.deny.result == 'success' || needs.deny.result == 'skipped')
+    timeout-minutes: 15
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: src/antiwire-client
+    env:
+      # Checks, tests and the bundle need no Electron binary; packaging fetches it.
+      ELECTRON_SKIP_BINARY_DOWNLOAD: "1"
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v7
+
+      - name: Install Bun
+        uses: oven-sh/setup-bun@v2
+        with:
+          # One Bun for CI and developers; `bun check` and `bun fmt` need 1.4 or newer.
+          bun-version-file: .bun-version
+
+      - name: Restore Bun packages
+        id: bun-cache
+        uses: actions/cache/restore@v6
+        with:
+          path: |
+            ~/.bun/install/cache
+            src/antiwire-client/node_modules
+          key: ${{ runner.os }}-bun-${{ hashFiles('src/antiwire-client/bun.lock') }}
+          restore-keys: |
+            ${{ runner.os }}-bun-
+
+      - name: Install frontend dependencies
+        run: bun install --frozen-lockfile
+
+      # Only main publishes. A pull request restore already reads that copy, and
+      # saving again would store a duplicate on refs/pull/N/merge.
+      - name: Save Bun packages
+        if: github.ref == 'refs/heads/main' && steps.bun-cache.outputs.cache-hit != 'true'
+        continue-on-error: true
+        uses: actions/cache/save@v6
+        with:
+          path: |
+            ~/.bun/install/cache
+            src/antiwire-client/node_modules
+          key: ${{ runner.os }}-bun-${{ hashFiles('src/antiwire-client/bun.lock') }}
+
+      - name: Type and lint checks
+        run: bun run check
+
+      - name: Unit tests
+        run: bun run test
+
+      - name: Build frontend
+        run: bun run build
+
+  # The product version is written in three places; a release is cut from a tag that
+  # must match all of them (see release.yml).
+  scripts:
+    name: Version consistency and script tests
+    needs: [plan, deny]
+    if: >-
+      !cancelled() &&
+      needs.plan.outputs.scripts == 'true' &&
+      (needs.deny.result == 'success' || needs.deny.result == 'skipped')
+    timeout-minutes: 5
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v7
+
+      - name: Version consistency
+        run: node scripts/check-versions.mjs
+
+      - name: Install Bun
+        uses: oven-sh/setup-bun@v2
+        with:
+          # One Bun for CI and developers; `bun check` and `bun fmt` need 1.4 or newer.
+          bun-version-file: .bun-version
+
+      - name: Script tests
+        run: bun test scripts/check-versions.test.mjs scripts/release-manifest.test.mjs scripts/ci-plan.test.mjs
+
+  # rust-cache and the Bun cache save a new archive when the lockfile, toolchain, or
+  # environment changes, and never delete the one it replaces. Those leftovers stay until
+  # GitHub evicts something, and over the 10 GB limit it evicts the least recently used,
+  # which can be a live archive. Keep only the newest per cache and runner OS. sccache and
+  # Docker entries are keyed by content and are left to GitHub's eviction.
+  prune-caches:
+    name: Prune superseded caches
+    needs: [plan, rust, bun]
+    if: >-
+      !cancelled() &&
+      github.ref == 'refs/heads/main' &&
+      (needs.rust.result != 'skipped' || needs.bun.result != 'skipped')
+    timeout-minutes: 5
+    runs-on: ubuntu-latest
+    env:
+      GH_TOKEN: ${{ github.token }}
+      GH_REPO: ${{ github.repository }}
+    steps:
+      - name: Delete all but the newest archive per cache
+        run: |
+          set -euo pipefail
+          # Rust: <prefix>-<shared-key>-<OS>-<arch>-<env hash>-<lock hash>. Bun: <OS>-bun-<hash>.
+          query='map(. + {group: ((.key | capture("^(?<g>v[0-9]+-.+-(Linux|Windows_NT|Darwin)-[A-Za-z0-9_]+)-").g) // (.key | capture("^(?<g>[A-Za-z_]+-bun)-").g) // null)})
+            | map(select(.group != null)) | group_by(.group)
+            | map(sort_by(.createdAt) | .[:-1][]) | .[] | "\(.id)\t\(.key)\t\(.sizeInBytes)"'
+          for prefix in v Linux-bun; do
+            gh cache list --ref refs/heads/main --key "$prefix" --limit 1000 \
+              --json id,key,createdAt,sizeInBytes --jq "$query"
+          done | while IFS=$'\t' read -r id key size; do
+            echo "Deleting $key ($((size / 1048576)) MB)"
+            # A concurrent run on main may have deleted it already.
+            gh cache delete "$id" || echo "  already gone"
+          done
