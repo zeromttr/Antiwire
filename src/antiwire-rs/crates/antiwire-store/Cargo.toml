@@ -15,7 +15,7 @@ workspace = true
 antiwire-policy = { workspace = true }
 antiwire-secrets = { workspace = true }
 antiwire-tuning = { workspace = true }
-aes = "0.8"
+aes = "0.9"
 aes-gcm = { workspace = true }
 base64 = "0.23"
 cbc = "0.1"
