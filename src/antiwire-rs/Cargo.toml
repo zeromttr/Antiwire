@@ -140,7 +140,7 @@ hickory-resolver = { version = "0.26.3", default-features = false, features = [
 hickory-proto = { version = "0.26.3", default-features = false, features = ["std"] }
 hickory-server = { version = "0.26.3", default-features = false }
 ipnet = "2.11"
-prefix-trie = { version = "0.9.4", default-features = false, features = ["ipnet"] }
+prefix-trie = { version = "0.10.2", default-features = false, features = ["ipnet"] }
 psl = "2"
 aes-gcm = "0.10"
 atomic-write-file = "0.3"

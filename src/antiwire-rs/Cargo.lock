@@ -458,7 +458,7 @@ dependencies = [
  "ipnet",
  "lru",
  "parking_lot",
- "prefix-trie 0.9.4",
+ "prefix-trie 0.10.2",
  "rpds",
  "serde",
  "sha2",
@@ -3014,9 +3014,9 @@ dependencies = [
 
 [[package]]
 name = "prefix-trie"
-version = "0.9.4"
+version = "0.10.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "3be1ea03ff63e842fa707c9cffedc9ff9fa4a0ab540af1a7693d2ff15fa03c65"
+checksum = "77fe9ec8fb906114b52bc2e9aa142ac11817d0fcd33a32fb2feb94d823ad9a4d"
 dependencies = [
  "array-const-fn-init",
  "either",
