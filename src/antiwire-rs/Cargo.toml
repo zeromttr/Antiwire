@@ -114,7 +114,7 @@ prost-types = "0.13"
 rustls = { version = "0.23.46", default-features = false, features = ["ring", "std", "tls12"] }
 async-stream = "0.3"
 async-trait = "0.1"
-sysinfo = "0.33"
+sysinfo = "0.38"
 maxminddb = "0.32"
 libloading = "0.8"
 rcgen = { version = "0.13", features = ["pem"] }
