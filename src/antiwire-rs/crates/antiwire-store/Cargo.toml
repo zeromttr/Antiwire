@@ -18,7 +18,7 @@ antiwire-tuning = { workspace = true }
 aes = "0.8"
 aes-gcm = { workspace = true }
 base64 = "0.23"
-cbc = "0.1"
+cbc = "0.2"
 getrandom = "0.4"
 parking_lot = { workspace = true }
 lru = { workspace = true }
