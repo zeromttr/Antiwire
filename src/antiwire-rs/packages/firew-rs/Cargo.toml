@@ -41,4 +41,4 @@ firew-windows = { version = "1.0.0", path = "crates/firew-windows" }
 firew-macos = { version = "1.0.0", path = "crates/firew-macos" }
 firew-rs = { version = "1.0.0", path = "crates/firew" }
 data-encoding = "2.6"
-sha2 = "0.10"
+sha2 = "0.11"
