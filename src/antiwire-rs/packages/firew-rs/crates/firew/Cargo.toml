@@ -15,7 +15,7 @@ workspace = true
 firew-core.workspace = true
 firew-sys.workspace = true
 ipnet = "2.11"
-parking_lot = "0.12"
+parking_lot = "0.13"
 
 [target.'cfg(target_os = "linux")'.dependencies]
 firew-linux = { workspace = true, optional = true }
