@@ -142,7 +142,7 @@ hickory-server = { version = "0.26.3", default-features = false }
 ipnet = "2.11"
 prefix-trie = { version = "0.9.4", default-features = false, features = ["ipnet"] }
 psl = "2"
-aes-gcm = "0.10"
+aes-gcm = "0.11"
 atomic-write-file = "0.3"
 lru = "0.19"
 rpds = "1.2.1"
