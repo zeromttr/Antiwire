@@ -1,0 +1,176 @@
+[workspace]
+resolver = "3"
+members = [
+    "crates/antiwire-tuning",
+    "crates/antiwire-runtime",
+    "crates/antiwire-daemon",
+    "crates/antiwire-proto",
+    "crates/antiwire-secrets",
+    "crates/antiwire-store",
+    "crates/antiwire-ipc",
+    "crates/antiwire-events",
+    "crates/antiwire-services",
+    "crates/antiwire-lookup",
+    "crates/antiwire-policy",
+    "crates/antiwire-enforce",
+    "crates/antiwire-dns",
+    "crates/antiwire-dns-os",
+    "crates/antiwire-dns-redirect",
+    "crates/antiwire-flow",
+    "crates/antiwire-platform",
+    "crates/antiwire-geo",
+    "crates/antiwire-netmap",
+    "crates/antiwire-capture",
+    "crates/antiwire-downloader",
+    "crates/antiwire-http",
+    "crates/antiwire-aibackend",
+    "crates/antiwire-ai",
+    "crates/antiwire-update",
+]
+default-members = ["crates/antiwire-daemon"]
+exclude = ["packages/firew-rs", "packages/netmet-rs"]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2021"
+license = "MIT"
+rust-version = "1.90"
+# The one place the project's GitHub repository is named. The daemon compiles it in as
+# its update source (antiwire-update/src/trust.rs), the client's build reads it
+# (vite.shared.ts), and the workflows read it with scripts/repository.mjs.
+repository = "https://github.com/zeromttr/antiwire"
+publish = false
+
+[workspace.dependencies]
+antiwire-tuning = { path = "crates/antiwire-tuning" }
+antiwire-runtime = { path = "crates/antiwire-runtime" }
+antiwire-proto = { path = "crates/antiwire-proto" }
+antiwire-secrets = { path = "crates/antiwire-secrets" }
+antiwire-store = { path = "crates/antiwire-store" }
+antiwire-ipc = { path = "crates/antiwire-ipc" }
+antiwire-events = { path = "crates/antiwire-events" }
+antiwire-services = { path = "crates/antiwire-services" }
+antiwire-lookup = { path = "crates/antiwire-lookup" }
+antiwire-policy = { path = "crates/antiwire-policy" }
+antiwire-enforce = { path = "crates/antiwire-enforce" }
+antiwire-dns = { path = "crates/antiwire-dns" }
+antiwire-dns-os = { path = "crates/antiwire-dns-os" }
+antiwire-dns-redirect = { path = "crates/antiwire-dns-redirect" }
+antiwire-flow = { path = "crates/antiwire-flow" }
+antiwire-platform = { path = "crates/antiwire-platform" }
+antiwire-geo = { path = "crates/antiwire-geo" }
+antiwire-netmap = { path = "crates/antiwire-netmap" }
+antiwire-capture = { path = "crates/antiwire-capture" }
+antiwire-downloader = { path = "crates/antiwire-downloader" }
+antiwire-http = { path = "crates/antiwire-http" }
+antiwire-aibackend = { path = "crates/antiwire-aibackend" }
+antiwire-ai = { path = "crates/antiwire-ai" }
+antiwire-update = { path = "crates/antiwire-update" }
+firew-rs = { version = "1.0.0", path = "packages/firew-rs/crates/firew", package = "firew-rs" }
+netmetrics = { version = "0.1.0", path = "packages/netmet-rs/crates/netmetrics" }
+netmetrics-core = { version = "0.1.0", path = "packages/netmet-rs/crates/netmetrics-core" }
+anyhow = "1.0"
+thiserror = "2.0"
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+serde_path_to_error = "0.1"
+tokio = { version = "1.43", features = [
+    "rt-multi-thread",
+    "macros",
+    "signal",
+    "time",
+    "sync",
+    "net",
+    "fs",
+    "io-util",
+] }
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+zeroize = { version = "1.8", features = ["derive"] }
+parking_lot = "0.12"
+ahash = "0.8"
+arc-swap = "1.7"
+xorf = "0.13.0"
+dashmap = "6.1"
+bytes = "1.9"
+smallvec = { version = "1.15", features = ["const_generics"] }
+moka = { version = "0.12" }
+time = { version = "0.3.47", features = ["serde", "formatting", "parsing"] }
+reqwest = { version = "0.12", default-features = false, features = ["rustls-tls", "gzip", "stream"] }
+futures-util = "0.3"
+tokio-util = { version = "0.7", features = ["io", "rt"] }
+tower = { version = "0.5", default-features = false, features = ["limit", "util"] }
+url = "2.5"
+tonic = { version = "0.12", features = ["tls", "transport"] }
+prost = "0.13"
+rustls = { version = "0.23.46", default-features = false, features = ["ring", "std", "tls12"] }
+async-trait = "0.1"
+sysinfo = "0.33"
+maxminddb = "0.32"
+libloading = "0.8"
+rcgen = { version = "0.13", features = ["pem"] }
+libc = "0.2"
+windows = { version = "0.62", features = ["Win32_Foundation", "Win32_System_Threading", "Win32_Security_Cryptography"] }
+tempfile = "3.14"
+windows-service = "0.8"
+clap = { version = "4.5", features = ["derive", "env"] }
+tonic-build = "0.12"
+protoc-bin-vendored = "3.1"
+tokio-stream = "0.1"
+rusqlite = { version = "0.41", features = ["bundled"] }
+hickory-resolver = { version = "0.26.3", default-features = false, features = [
+    "tokio",
+    "system-config",
+    "tls-ring",
+    "quic-ring",
+    "https-ring",
+    "h3-ring",
+    "rustls-platform-verifier",
+    "webpki-roots",
+] }
+hickory-proto = { version = "0.26.3", default-features = false, features = ["std"] }
+hickory-server = { version = "0.26.3", default-features = false }
+ipnet = "2.11"
+prefix-trie = { version = "0.9.4", default-features = false, features = ["ipnet"] }
+psl = "2"
+aes-gcm = "0.10"
+atomic-write-file = "0.3"
+lru = "0.19"
+rpds = "1.2.1"
+rustls-native-certs = "0.8"
+rustls-platform-verifier = "0.7"
+webpki-roots = "1"
+socket2 = "0.6"
+data-encoding = "2.6"
+sha2 = "0.10"
+semver = { version = "1.0", features = ["serde"] }
+# Verify only in the daemon; signing happens in the release workflow.
+ed25519-dalek = { version = "2.1", default-features = false, features = ["std"] }
+directories = "6.0"
+subtle = "2.6"
+flate2 = "1.1"
+
+[workspace.lints.rust]
+unsafe_code = "warn"
+
+[workspace.lints.clippy]
+all = { level = "warn", priority = -1 }
+pedantic = { level = "warn", priority = -1 }
+module_name_repetitions = "allow"
+must_use_candidate = "allow"
+
+[profile.dev]
+# Incremental compilation writes a session directory per crate per configuration, and Cargo
+# never prunes the ones a configuration stops using. Across three target triples and several
+# feature combinations that reached 476 directories and 18 GB. `[profile.test]` inherits from
+# here, so this covers test builds too.
+incremental = false
+
+[profile.release]
+# Measured on the daemon: about 8% smaller and up to 20% more DNS listener throughput than the
+# defaults, for roughly 45 s more on a clean build and 55 s more on a relink. Fat LTO costs more
+# build time for little extra. Keep `panic = "unwind"`: workers catch panics to stay isolated.
+# `[profile.bench]` inherits from here.
+lto = "thin"
+codegen-units = 1
+

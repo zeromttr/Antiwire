@@ -1,0 +1,22 @@
+[package]
+name = "netmetrics-core"
+description = "Platform-independent flow accounting primitives for netmetrics"
+version.workspace = true
+edition = "2024"
+license.workspace = true
+rust-version.workspace = true
+
+[features]
+# Packet fixtures for the tests of the crates that build on this one.
+test-support = []
+
+[dependencies]
+hickory-proto.workspace = true
+serde.workspace = true
+
+[dev-dependencies]
+proptest.workspace = true
+
+[lints]
+workspace = true
+

@@ -1,0 +1,175 @@
+//! Injectable classifier interface so tests control AI without network.
+//!
+//! Production classifies through [`antiwire_ai::AiBackend`], built from the
+//! saved API key with [`antiwire_ai::AiBackend::with_api_key`] rather than the
+//! environment-based `connect()`.
+
+use std::sync::Arc;
+use std::time::Duration;
+
+/// Classification failure, distinguishing retryable outages from permanent input errors.
+#[derive(Debug, Clone)]
+pub enum ClassifierError {
+    /// Timeout, overload, or provider error: fail open, retry in background.
+    Transient(String),
+    /// Invalid domain: do not retry as-is. An incomplete provider answer is
+    /// `Transient`, since asking again can succeed.
+    Permanent(String),
+    /// No configured client: retry only after settings change, not on a timer.
+    Unavailable(String),
+}
+
+impl ClassifierError {
+    #[must_use]
+    pub const fn is_retryable(&self) -> bool {
+        matches!(self, Self::Transient(_))
+    }
+}
+
+impl std::fmt::Display for ClassifierError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Transient(message) | Self::Permanent(message) | Self::Unavailable(message) => {
+                write!(f, "{message}")
+            }
+        }
+    }
+}
+
+/// Narrow classifier interface shared by proactive and retroactive paths.
+#[async_trait::async_trait]
+pub trait Classifier: Send + Sync {
+    async fn classify(
+        &self,
+        domain: &str,
+    ) -> Result<antiwire_ai::DomainAssessment, ClassifierError>;
+}
+
+/// Production classifier backed by [`antiwire_ai::AiBackend`].
+pub struct AiBackendClassifier {
+    backend: antiwire_ai::AiBackend,
+}
+
+impl AiBackendClassifier {
+    /// Builds the backend from the saved API key.
+    ///
+    /// # Errors
+    ///
+    /// Returns a description when the backend cannot be built (missing key,
+    /// bad timeout, ...).
+    pub fn from_settings(api_key: &str, background_timeout: Duration) -> Result<Self, String> {
+        antiwire_ai::AiBackend::with_api_key(api_key, background_timeout)
+            .map(|backend| Self { backend })
+            .map_err(|error| error.to_string())
+    }
+}
+
+#[async_trait::async_trait]
+impl Classifier for AiBackendClassifier {
+    async fn classify(
+        &self,
+        domain: &str,
+    ) -> Result<antiwire_ai::DomainAssessment, ClassifierError> {
+        self.backend.classify_domain(domain).await.map_err(|error| {
+            // Timeouts, transport failures, and incomplete answers are all
+            // transient for DNS purposes: fail open now, retry in background.
+            // Only invalid input is permanent.
+            match &error {
+                antiwire_ai::Error::InvalidDomain => ClassifierError::Permanent(error.to_string()),
+                _ => ClassifierError::Transient(error.to_string()),
+            }
+        })
+    }
+}
+
+/// Shared classifier handle used by the coordinator.
+pub type SharedClassifier = Arc<dyn Classifier>;
+
+#[cfg(test)]
+pub(crate) mod test_helpers {
+    use super::*;
+    use std::collections::HashMap;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    /// Controllable mock classifier with event recording and barriers.
+    pub struct MockClassifier {
+        calls: AtomicUsize,
+        handler: parking_lot::Mutex<HashMap<String, MockBehavior>>,
+        default: MockBehavior,
+    }
+
+    #[derive(Debug, Clone)]
+    pub enum MockBehavior {
+        Assess(antiwire_ai::DomainAssessment),
+        Transient(String),
+    }
+
+    impl MockClassifier {
+        pub fn with_assessment(
+            domain: &str,
+            assessment: antiwire_ai::DomainAssessment,
+        ) -> Arc<Self> {
+            let mock = Arc::new(Self {
+                calls: AtomicUsize::new(0),
+                handler: parking_lot::Mutex::new(HashMap::new()),
+                default: MockBehavior::Transient("no behavior".to_owned()),
+            });
+            mock.set(domain, MockBehavior::Assess(assessment));
+            mock
+        }
+
+        pub fn failing(message: &str) -> Arc<Self> {
+            Arc::new(Self {
+                calls: AtomicUsize::new(0),
+                handler: parking_lot::Mutex::new(HashMap::new()),
+                default: MockBehavior::Transient(message.to_owned()),
+            })
+        }
+
+        pub fn set(&self, domain: &str, behavior: MockBehavior) {
+            if let Some(key) = crate::ai::decision::canonical_ai_key(domain) {
+                self.handler.lock().insert(key, behavior);
+            }
+        }
+
+        pub fn call_count(&self) -> usize {
+            self.calls.load(Ordering::SeqCst)
+        }
+    }
+
+    pub fn assessment_for(domain: &str, malicious: f64) -> antiwire_ai::DomainAssessment {
+        antiwire_ai::DomainAssessment {
+            domain: domain.to_owned(),
+            model: "mock".to_owned(),
+            advertising: 0.01,
+            tracking: 0.01,
+            telemetry: 0.01,
+            analytics: 0.01,
+            malicious,
+            security_fraud: 0.01,
+            cryptomining: 0.01,
+            tunnel: 0.01,
+        }
+    }
+
+    #[async_trait::async_trait]
+    impl Classifier for MockClassifier {
+        async fn classify(
+            &self,
+            domain: &str,
+        ) -> Result<antiwire_ai::DomainAssessment, ClassifierError> {
+            self.calls.fetch_add(1, Ordering::SeqCst);
+            let key = crate::ai::decision::canonical_ai_key(domain).unwrap_or_default();
+            let behavior = self
+                .handler
+                .lock()
+                .get(&key)
+                .cloned()
+                .unwrap_or_else(|| self.default.clone());
+            match behavior {
+                MockBehavior::Assess(assessment) => Ok(assessment),
+                MockBehavior::Transient(message) => Err(ClassifierError::Transient(message)),
+            }
+        }
+    }
+}

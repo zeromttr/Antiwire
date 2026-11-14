@@ -1,0 +1,26 @@
+.scroll-fade {
+  --fade-top: 0px;
+  --fade-bottom: 0px;
+  max-height: calc(var(--visible-rows) * var(--row-height));
+  margin: 0 calc(var(--bleed) * -1);
+  padding: 0 var(--bleed);
+  overflow-y: auto;
+  overscroll-behavior: contain;
+  scrollbar-gutter: stable;
+  scrollbar-width: thin;
+  mask-image: linear-gradient(
+    to bottom,
+    transparent 0,
+    #000 var(--fade-top),
+    #000 calc(100% - var(--fade-bottom)),
+    transparent 100%
+  );
+}
+
+.scroll-fade.more-above {
+  --fade-top: 18px;
+}
+
+.scroll-fade.more-below {
+  --fade-bottom: 22px;
+}

@@ -1,0 +1,134 @@
+.countries-card {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+}
+
+.head {
+  display: flex;
+  align-items: baseline;
+  gap: 10px;
+}
+
+.head h2 {
+  margin: 0;
+  font-size: 13px;
+  font-weight: 600;
+  color: var(--t1);
+}
+
+.dim {
+  color: var(--t3);
+  font-size: 12px;
+}
+
+.geo-hint {
+  margin: 0;
+  font-size: 12px;
+  line-height: 1.45;
+  color: var(--t3);
+}
+
+.countries {
+  max-height: min(32vh, 280px);
+  overflow-y: auto;
+  display: flex;
+  flex-direction: column;
+}
+
+.countries li {
+  display: grid;
+  grid-template-columns: 30px minmax(0, 1fr) minmax(60px, 110px) 70px;
+  align-items: center;
+  gap: 10px;
+  height: 28px;
+  font-size: 13px;
+}
+
+.code {
+  justify-self: start;
+  display: inline-flex;
+  align-items: center;
+  height: 19px;
+  padding: 0 5px;
+  border-radius: 5px;
+  border: 1px solid var(--ln);
+  background: color-mix(in oklab, var(--t1) 5%, transparent);
+  color: var(--t2);
+  font-family: var(--font-mono);
+  font-size: 10.5px;
+}
+
+.name {
+  min-width: 0;
+  color: var(--t1);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.bar {
+  height: 4px;
+  border-radius: 2px;
+  background: var(--track);
+  overflow: hidden;
+}
+
+.bar span {
+  display: block;
+  height: 100%;
+  border-radius: 2px;
+  background: var(--acc-sub);
+  transform-origin: left center;
+  transform: scaleX(var(--pct, 0));
+  transition: transform var(--dur-data) var(--ease-standard);
+}
+
+.share {
+  color: var(--t2);
+  font-family: var(--font-mono);
+  font-size: 11.5px;
+  font-variant-numeric: tabular-nums;
+  text-align: right;
+}
+
+.unknown-row {
+  display: flex;
+  flex-direction: column;
+  gap: 7px;
+  padding-top: 10px;
+  border-top: 1px solid var(--ln);
+}
+
+.unknown-label {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 10px;
+  font-size: 12px;
+  color: var(--t2);
+}
+
+.unknown-bar {
+  height: 4px;
+  border-radius: 2px;
+  background: var(--track);
+  overflow: hidden;
+}
+
+.unknown-fill {
+  width: 100%;
+  height: 100%;
+  border-radius: 2px;
+  background: var(--t3);
+  transform-origin: left center;
+  transform: scaleX(var(--pct, 0));
+  transition: transform var(--dur-data) var(--ease-standard);
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .bar span,
+  .unknown-fill {
+    transition: none;
+  }
+}

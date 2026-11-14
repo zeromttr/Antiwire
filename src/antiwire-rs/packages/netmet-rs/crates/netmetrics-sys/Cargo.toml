@@ -1,0 +1,22 @@
+[package]
+name = "netmetrics-sys"
+description = "Private backend contract and native record decoders for netmetrics"
+version.workspace = true
+edition = "2024"
+license.workspace = true
+rust-version.workspace = true
+
+[dependencies]
+crossbeam-queue = "0.3"
+netmetrics-core.workspace = true
+
+[target.'cfg(unix)'.dependencies]
+libc = "0.2"
+
+[dev-dependencies]
+netmetrics-core = { workspace = true, features = ["test-support"] }
+proptest.workspace = true
+
+[lints]
+workspace = true
+

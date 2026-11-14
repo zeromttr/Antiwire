@@ -1,0 +1,383 @@
+.time-filter {
+  position: relative;
+  flex: none;
+}
+
+.trigger-wrap {
+  display: flex;
+  align-items: center;
+  height: 30px;
+  border: 1px solid var(--ln-strong);
+  border-radius: 8px;
+  background: var(--well);
+  transition:
+    border-color var(--dur-fast) var(--ease-standard),
+    background-color var(--dur-fast) var(--ease-standard);
+}
+
+.trigger-wrap:hover {
+  border-color: color-mix(in oklab, var(--t1) 20%, transparent);
+}
+
+.trigger-wrap.active {
+  border-color: color-mix(in oklab, var(--acc) 45%, transparent);
+  background: color-mix(in oklab, var(--acc) 8%, var(--well));
+}
+
+.trigger {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  height: 100%;
+  padding: 0 9px 0 10px;
+  border-radius: 7px;
+  color: var(--t2);
+  font-size: 12.5px;
+  font-weight: 500;
+  white-space: nowrap;
+}
+
+.trigger:hover,
+.active .trigger {
+  color: var(--t1);
+}
+
+.active .trigger {
+  padding-right: 4px;
+}
+
+.active .trigger :global(svg) {
+  color: var(--acc);
+}
+
+.trigger-label {
+  font-variant-numeric: tabular-nums;
+}
+
+.trigger:focus-visible,
+.clear:focus-visible {
+  outline: none;
+  box-shadow: var(--focus-ring);
+}
+
+.clear {
+  display: grid;
+  place-items: center;
+  width: 20px;
+  height: 20px;
+  margin-right: 4px;
+  border-radius: 5px;
+  color: var(--t3);
+}
+
+.clear:hover {
+  background: var(--hover);
+  color: var(--t1);
+}
+
+.popover {
+  position: absolute;
+  z-index: 20;
+  top: calc(100% + 8px);
+  left: 0;
+  width: 520px;
+  max-width: calc(100vw - 48px);
+  padding: 14px;
+  border: 1px solid var(--ln-strong);
+  border-radius: 12px;
+  background: var(--pop);
+  box-shadow: var(--sh-pop);
+  backdrop-filter: blur(16px);
+  -webkit-backdrop-filter: blur(16px);
+}
+
+.head {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 16px;
+  margin-bottom: 12px;
+}
+
+.head strong {
+  display: block;
+  color: var(--t1);
+  font-size: 13px;
+  font-weight: 600;
+}
+
+.head span {
+  display: block;
+  margin-top: 2px;
+  color: var(--t3);
+  font-size: 12px;
+}
+
+.legend {
+  display: flex;
+  align-items: center;
+  gap: 3px;
+  padding-top: 2px;
+}
+
+.legend span {
+  margin: 0 3px;
+  color: var(--t3);
+  font-size: 11px;
+}
+
+.legend i {
+  width: 10px;
+  height: 10px;
+  border-radius: 2px;
+}
+
+.week-nav {
+  display: grid;
+  grid-template-columns: 24px minmax(0, 1fr) 24px;
+  align-items: center;
+  gap: 6px;
+}
+
+.days {
+  display: grid;
+  grid-template-columns: repeat(7, minmax(0, 1fr));
+  gap: 5px;
+}
+
+.days button {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 2px;
+  min-width: 0;
+  padding: 6px 0 6px;
+  border: 1px solid var(--ln);
+  border-radius: 8px;
+  background: var(--well-soft);
+  color: var(--t2);
+  transition:
+    border-color var(--dur-fast) var(--ease-standard),
+    background-color var(--dur-fast) var(--ease-standard),
+    color var(--dur-fast) var(--ease-standard);
+}
+
+.days button:hover:not(.selected) {
+  border-color: var(--ln-strong);
+  background: var(--ctl);
+  color: var(--t1);
+}
+
+.days button.current {
+  color: var(--t1);
+}
+
+.days button.selected {
+  border-color: color-mix(in oklab, var(--acc) 60%, transparent);
+  background: color-mix(in oklab, var(--acc) 8%, var(--ctl));
+  color: var(--t1);
+}
+
+.weekday {
+  font-size: 11.5px;
+}
+
+.days strong {
+  font-size: 13px;
+  font-weight: 600;
+  font-variant-numeric: tabular-nums;
+}
+
+/* The day's traffic, in the heatmap's shading. */
+.days i {
+  width: calc(100% - 14px);
+  height: 5px;
+  margin-top: 3px;
+  border-radius: 2px;
+}
+
+.hours {
+  display: grid;
+  grid-template-columns: repeat(24, minmax(0, 1fr));
+  gap: 2px;
+  margin: 10px 0 12px;
+  padding: 0 30px;
+}
+
+.hours button {
+  display: flex;
+  flex-direction: column;
+  align-items: stretch;
+  gap: 3px;
+  min-width: 0;
+  padding: 0;
+  color: var(--t3);
+}
+
+.hours i {
+  height: 18px;
+  border-radius: 3px;
+  transition:
+    transform var(--dur-fast) var(--ease-out),
+    box-shadow var(--dur-fast) var(--ease-standard);
+}
+
+.hours button:hover i {
+  transform: translateY(-1px);
+  box-shadow: 0 0 0 1px var(--ln-strong);
+}
+
+.hours button.selected i {
+  box-shadow: 0 0 0 2px var(--t1);
+}
+
+.hours button:focus-visible {
+  outline: none;
+}
+
+.hours button:focus-visible i {
+  box-shadow: var(--focus-ring);
+}
+
+.hours span {
+  height: 10px;
+  font-size: 9.5px;
+  font-variant-numeric: tabular-nums;
+  text-align: left;
+}
+
+.days button:focus-visible {
+  outline: none;
+  box-shadow: var(--focus-ring);
+}
+
+.custom-time {
+  display: grid;
+  grid-template-columns: 1.3fr 1fr 1fr auto;
+  align-items: end;
+  gap: 7px;
+  padding-top: 12px;
+  border-top: 1px solid var(--ln);
+}
+
+.time-field span {
+  display: block;
+  margin: 0 0 4px 2px;
+  color: var(--t3);
+  font-size: 12px;
+}
+
+.time-error {
+  margin: 7px 0 0;
+  color: var(--bad);
+  font-size: 12px;
+}
+
+.foot {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  margin-top: 12px;
+}
+
+.showing {
+  min-width: 0;
+  color: var(--t2);
+  font-size: 12px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.tip {
+  position: fixed;
+  left: 0;
+  top: 0;
+  z-index: 220;
+  transform: translate3d(var(--tip-x, 0px), var(--tip-y, 0px), 0) translate(-50%, -100%);
+  pointer-events: none;
+  padding: 8px 11px;
+  border-radius: 8px;
+  border: 1px solid var(--ln-strong);
+  background: var(--pop);
+  min-width: 196px;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  animation: tipIn var(--dur-fast) var(--ease-out) both;
+}
+
+.tip.below {
+  transform: translate3d(var(--tip-x, 0px), var(--tip-y, 0px), 0) translate(-50%, 0);
+  animation-name: tipInBelow;
+}
+
+.tip-head {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  padding-bottom: 5px;
+  border-bottom: 1px solid var(--ln);
+}
+
+.tip-date {
+  color: var(--t2);
+  font-size: 11px;
+  line-height: 1.35;
+}
+
+.tip-range {
+  color: var(--t3);
+  font-size: 10.5px;
+  font-variant-numeric: tabular-nums;
+}
+
+.tip-row {
+  display: grid;
+  grid-template-columns: 8px 2.25rem 1fr;
+  align-items: center;
+  gap: 8px;
+}
+
+.tip-swatch {
+  width: 8px;
+  height: 8px;
+  border-radius: 2px;
+}
+
+.tip-swatch.down {
+  background: var(--heat-down);
+}
+
+.tip-swatch.up {
+  background: var(--heat-up);
+}
+
+.tip-label {
+  color: var(--t3);
+  font-size: 11.5px;
+  font-weight: 600;
+}
+
+.tip-value {
+  justify-self: end;
+  color: var(--t1);
+  font-size: 11px;
+  font-weight: 500;
+}
+
+@keyframes tipIn {
+  from {
+    opacity: 0;
+    transform: translate3d(var(--tip-x, 0px), var(--tip-y, 0px), 0)
+      translate(-50%, calc(-100% + 4px));
+  }
+}
+
+@keyframes tipInBelow {
+  from {
+    opacity: 0;
+    transform: translate3d(var(--tip-x, 0px), var(--tip-y, 0px), 0) translate(-50%, -4px);
+  }
+}

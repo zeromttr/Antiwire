@@ -1,0 +1,189 @@
+.throughput-chart {
+  width: 100%;
+  height: 220px;
+  overflow: hidden;
+  position: relative;
+  contain: content;
+}
+
+.svg {
+  display: block;
+  width: 100%;
+  height: 100%;
+  overflow: hidden;
+}
+
+.scrub-layer {
+  position: absolute;
+  inset: 0;
+  z-index: 6;
+  cursor: crosshair;
+  touch-action: none;
+}
+
+.grid-line {
+  stroke: color-mix(in oklab, var(--t1) 5%, transparent);
+  shape-rendering: crispEdges;
+}
+
+.y-tick {
+  font-family: var(--font-mono);
+  font-size: 9px;
+  font-weight: 500;
+  fill: var(--t3);
+  letter-spacing: 0.04em;
+}
+
+.rule-line {
+  stroke: color-mix(in oklab, var(--t1) 10%, transparent);
+  shape-rendering: crispEdges;
+}
+
+/* Moved by the glide (Web Animations) between samples. */
+.slide {
+  will-change: transform;
+}
+
+.line {
+  fill: none;
+  stroke-width: 2;
+  stroke-linecap: round;
+  stroke-linejoin: round;
+}
+
+/* Markers: 8px, ringed in the panel surface (panel-gradient) so they read where lines cross. */
+.dot {
+  stroke: var(--p-grad-to);
+  stroke-width: 2;
+  paint-order: stroke;
+}
+
+/* The newest sample: eases to each new value while the line glides in. */
+.live-dot {
+  transition: transform 700ms var(--ease-out);
+}
+
+.pulse {
+  transform-box: fill-box;
+  transform-origin: center;
+  opacity: 0;
+  animation: pulse 2.4s cubic-bezier(0.16, 1, 0.3, 1) infinite;
+}
+
+/* Upload's halo trails download's, so the two never pulse in lockstep. */
+.live-dot:first-child .pulse {
+  animation-delay: 1.2s;
+}
+
+@keyframes pulse {
+  0% {
+    opacity: 0.45;
+    transform: scale(1);
+  }
+  70%,
+  100% {
+    opacity: 0;
+    transform: scale(3.2);
+  }
+}
+
+/* Crosshair and hover dots; hidden until the pointer scrubs. */
+.hover {
+  visibility: hidden;
+  pointer-events: none;
+}
+
+.throughput-chart.scrubbing .hover {
+  visibility: visible;
+}
+
+.throughput-chart.scrubbing .live-dots {
+  opacity: 0.35;
+}
+
+.live-dots {
+  transition: opacity 150ms linear;
+}
+
+.crosshair {
+  stroke: color-mix(in oklab, var(--t1) 24%, transparent);
+  stroke-width: 1;
+  shape-rendering: crispEdges;
+}
+
+.chart-tip {
+  position: absolute;
+  left: 0;
+  top: 0;
+  z-index: 7;
+  padding: 8px 11px;
+  border-radius: 8px;
+  border: 1px solid var(--ln-strong);
+  background: var(--pop);
+  /* GPU: single small blur — this tip tracks pointermove, so every extra
+     shadow layer re-rasterizes per frame. Border already defines the edge. */
+  font-family: var(--font-mono);
+  pointer-events: none;
+  opacity: 0;
+  visibility: hidden;
+  transition:
+    opacity 100ms linear,
+    visibility 0s linear 100ms;
+}
+
+.chart-tip.tip-visible {
+  opacity: 1;
+  visibility: visible;
+  transition:
+    opacity 100ms linear,
+    visibility 0s;
+}
+
+.chart-tip-body {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  min-width: 118px;
+}
+
+.chart-tip-row {
+  display: grid;
+  grid-template-columns: 12px 2.25rem 1fr;
+  align-items: center;
+  gap: 8px;
+}
+
+/* A short stroke of the series colour: keys, not boxes, at tooltip density. */
+.chart-tip-key {
+  width: 12px;
+  height: 2px;
+  border-radius: 1px;
+  flex: none;
+}
+
+.chart-tip-label {
+  font-size: 11.5px;
+  font-weight: 600;
+  color: var(--t3);
+}
+
+.chart-tip-value {
+  justify-self: end;
+  color: var(--t1);
+  font-size: 11px;
+  font-weight: 500;
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .chart-tip,
+  .chart-tip.tip-visible,
+  .live-dot,
+  .live-dots {
+    transition: none;
+  }
+  .pulse {
+    animation: none;
+  }
+}

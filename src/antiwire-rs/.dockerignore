@@ -1,0 +1,23 @@
+# Keep the build context small and the image free of host artefacts.
+#
+# Without this, `docker build` from this directory streams the Windows target/ directories —
+# many gigabytes of .exe and .pdb files that are useless inside the Linux and Windows test containers and would be
+# rebuilt anyway.
+
+target/
+packages/*/target/
+packages/*/crates/*/target/
+
+# Host-built eBPF outputs; the image regenerates these against the container's BTF.
+packages/netmet-rs/crates/netmetrics-linux/ebpf/vmlinux.h
+packages/netmet-rs/crates/netmetrics-linux/ebpf/*.o
+
+.git/
+.antiwire/
+**/*.db
+**/*.db-wal
+**/*.db-shm
+
+# Docs / editor noise — not needed to compile tests.
+**/*.md
+**/.cursor/

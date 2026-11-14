@@ -1,0 +1,153 @@
+.topnav {
+  position: relative;
+  width: max-content;
+  height: 100%;
+  display: flex;
+  align-items: stretch;
+  gap: 2px;
+  user-select: none;
+  -webkit-user-select: none;
+}
+.nav-item {
+  position: relative;
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  padding: 0 11px;
+  white-space: nowrap;
+  color: var(--t2);
+  text-decoration: none;
+  font-size: 13px;
+  font-weight: 500;
+  -webkit-app-region: no-drag;
+  transition: color var(--dur-fast) var(--ease-standard);
+}
+/* Spans the active tab so it can glide between tabs; the visible 2px line
+ * is inset to the tab's content. */
+.selection {
+  position: absolute;
+  left: 0;
+  bottom: -1px;
+  height: 2px;
+  pointer-events: none;
+}
+.selection.settled {
+  transition:
+    transform var(--dur-slow) var(--ease-out),
+    width var(--dur-slow) var(--ease-out);
+}
+.selection::after {
+  content: '';
+  position: absolute;
+  inset: 0 11px;
+  border-radius: 2px 2px 0 0;
+  background: var(--t1);
+}
+.nav-item :global(.nav-icon) {
+  flex: none;
+  opacity: 0.8;
+  transition:
+    opacity var(--dur-fast) var(--ease-standard),
+    color var(--dur-fast) var(--ease-standard),
+    transform var(--dur-slow) var(--ease-out);
+}
+.nav-item:hover,
+.nav-item.active {
+  color: var(--t1);
+}
+.nav-item:hover :global(.nav-icon) {
+  opacity: 1;
+}
+.nav-item.active :global(.nav-icon) {
+  opacity: 1;
+  color: var(--acc);
+}
+.alert-badge {
+  flex: none;
+  min-width: 18px;
+  height: 18px;
+  margin-left: 1px;
+  padding: 0 5px;
+  display: grid;
+  place-items: center;
+  border-radius: 9px;
+  background: var(--bad);
+  color: var(--on-danger);
+  font-size: 10.5px;
+  font-weight: 600;
+  font-variant-numeric: tabular-nums;
+  line-height: 1;
+}
+.nav-item:active :global(.nav-icon) {
+  transform: scale(0.9);
+}
+.nav-item:focus-visible {
+  outline: 2px solid var(--acc);
+  outline-offset: -8px;
+  border-radius: 10px;
+}
+@media (max-width: 1100px) {
+  .nav-item {
+    padding: 0 9px;
+    gap: 6px;
+  }
+  .selection::after {
+    inset: 0 9px;
+  }
+}
+@media (max-width: 950px) {
+  .nav-item {
+    width: 40px;
+    justify-content: center;
+    padding: 0;
+  }
+  .label {
+    display: none;
+  }
+  .nav-item.active {
+    width: auto;
+    padding: 0 11px;
+  }
+  .nav-item.active .label {
+    display: inline;
+  }
+  .nav-item:not(.active) .alert-badge {
+    position: absolute;
+    top: 8px;
+    right: 2px;
+    min-width: 16px;
+    height: 16px;
+    padding: 0 4px;
+    font-size: 9.5px;
+  }
+}
+@media (max-width: 600px) {
+  .topnav {
+    width: max-content;
+    min-width: 100%;
+    justify-content: space-between;
+  }
+  .nav-item.active {
+    width: 32px;
+    padding: 0;
+  }
+  .nav-item {
+    width: 32px;
+  }
+  .nav-item.active .label {
+    display: none;
+  }
+  .selection::after {
+    inset: 0 6px;
+  }
+}
+@media (prefers-reduced-motion: reduce) {
+  .selection.settled,
+  .nav-item,
+  .nav-item :global(.nav-icon) {
+    transition: none;
+  }
+  .nav-item:active :global(.nav-icon) {
+    transform: none;
+  }
+}

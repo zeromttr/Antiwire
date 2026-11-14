@@ -1,0 +1,91 @@
+.driver-notice {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  margin-bottom: 14px;
+  padding: 12px 14px;
+  border: 1px solid color-mix(in oklab, var(--warn) 30%, transparent);
+  border-radius: 10px;
+  background: color-mix(in oklab, var(--warn) 8%, transparent);
+  color: var(--warn);
+}
+
+.driver-notice div {
+  flex: 1;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+
+.driver-notice strong {
+  color: var(--t1);
+  font-size: 13px;
+  font-weight: 500;
+}
+
+.driver-notice span {
+  color: var(--t2);
+  font-size: 12.5px;
+}
+
+.capture-head {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  min-height: 40px;
+  margin-bottom: 16px;
+}
+
+.capture-head h1 {
+  margin: 0;
+  font-size: 18px;
+  font-weight: 600;
+  letter-spacing: -0.02em;
+  color: var(--t1);
+}
+
+.capture-head :global(.live .dot) {
+  animation: live-pulse 1.8s var(--ease-in-out) infinite;
+}
+
+.elapsed {
+  color: var(--t2);
+  font-family: var(--font-mono);
+  font-size: 12px;
+  font-variant-numeric: tabular-nums;
+}
+
+.message {
+  flex: 1;
+  min-width: 0;
+  margin: 0;
+  color: var(--t3);
+  font-size: 12.5px;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.message.error {
+  color: var(--bad);
+}
+
+.actions {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex: none;
+}
+
+@keyframes live-pulse {
+  50% {
+    opacity: 0.35;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .capture-head :global(.live .dot) {
+    animation: none;
+  }
+}

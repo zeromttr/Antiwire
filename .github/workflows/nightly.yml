@@ -1,0 +1,114 @@
+name: Nightly
+
+# Publishes a nightly release of main for the nightly update channel. It runs only when a
+# developer starts it (Actions > Nightly > Run workflow, or `gh workflow run nightly.yml`):
+# there is no schedule, and every run publishes, whether or not main changed since the last.
+# Starting it needs write access to the repository.
+#
+# The version is the sources' version with a nightly prerelease
+# (scripts/release-channel.mjs nightly-version): 0.3.0-nightly.DATE.RUN while 0.3.0 is
+# unreleased, and 0.3.1-nightly.DATE.RUN once v0.3.0 exists, so a nightly always sorts
+# after the release it follows. The version is written into the sources on a commit that
+# only the nightly's tag points at, never on main, and release.yml builds and publishes that
+# tag like any other. Nightly releases older than the newest NIGHTLIES_KEPT are deleted with
+# their tags; a daemon that far behind updates without a rollback package on Linux.
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: nightly
+  cancel-in-progress: false
+
+env:
+  NIGHTLIES_KEPT: "14"
+
+jobs:
+  tag:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      # Pushes the nightly tag. A tag pushed with the workflow token does not start
+      # release.yml on its own; the `release` job below calls it.
+      contents: write
+    outputs:
+      tag: ${{ steps.version.outputs.tag }}
+    steps:
+      # The `release` job runs release.yml from the ref the run was started on, so a run
+      # started from another branch would build main with that branch's workflow.
+      - name: Require a run from main
+        if: github.ref != 'refs/heads/main'
+        run: |
+          echo "::error::Start the Nightly workflow from main, not $GITHUB_REF."
+          exit 1
+
+      - name: Checkout main
+        uses: actions/checkout@v7
+        with:
+          ref: main
+          fetch-depth: 0
+
+      - name: Choose the version
+        id: version
+        run: |
+          set -euo pipefail
+          node scripts/check-versions.mjs
+          BASE="$(node -p "require('./src/antiwire-client/package.json').version")"
+          RELEASED=()
+          if git rev-parse --verify --quiet "refs/tags/v$BASE" >/dev/null; then
+            RELEASED=(--released)
+          fi
+          VERSION="$(node scripts/release-channel.mjs nightly-version \
+            --base "$BASE" "${RELEASED[@]}" --date "$(date -u +%Y%m%d)" --run "$GITHUB_RUN_NUMBER")"
+          echo "version=$VERSION" >> "$GITHUB_OUTPUT"
+          echo "tag=v$VERSION" >> "$GITHUB_OUTPUT"
+          echo "Nightly version: $VERSION"
+
+      - name: Tag the nightly
+        env:
+          VERSION: ${{ steps.version.outputs.version }}
+          TAG: ${{ steps.version.outputs.tag }}
+        run: |
+          set -euo pipefail
+          SOURCE="$(git rev-parse HEAD)"
+          node scripts/set-version.mjs "$VERSION"
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git commit --quiet --all --message "Nightly $VERSION"
+          # The tag message becomes the release notes (release.yml).
+          git tag --annotate "$TAG" --message "Nightly build of main at ${SOURCE:0:12}, started by ${{ github.actor }}.
+
+          Changes: https://github.com/${{ github.repository }}/commits/$SOURCE"
+          git push origin "$TAG"
+
+  release:
+    needs: tag
+    uses: ./.github/workflows/release.yml
+    with:
+      tag: ${{ needs.tag.outputs.tag }}
+    secrets: inherit
+    permissions:
+      contents: write
+
+  prune:
+    needs: release
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: write
+    env:
+      GH_TOKEN: ${{ github.token }}
+      GH_REPO: ${{ github.repository }}
+    steps:
+      - name: Delete old nightlies
+        run: |
+          set -euo pipefail
+          gh release list --limit 500 --json tagName,createdAt \
+            --jq '[.[] | select(.tagName | test("^v[0-9]+[.][0-9]+[.][0-9]+-nightly[.]"))]
+                  | sort_by(.createdAt) | reverse | .[(env.NIGHTLIES_KEPT | tonumber):] | .[].tagName' \
+            | while read -r tag; do
+                echo "Deleting $tag"
+                gh release delete "$tag" --yes --cleanup-tag
+              done

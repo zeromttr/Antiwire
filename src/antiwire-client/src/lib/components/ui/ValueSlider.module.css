@@ -1,0 +1,108 @@
+.value-slider {
+  flex: 1 1 auto;
+  min-width: 0;
+}
+
+.slider-field {
+  --pct: 0;
+  --thumb-size: 26px;
+  --track-height: 6px;
+  position: relative;
+  width: 100%;
+}
+
+.value-input {
+  width: 100%;
+  height: 30px;
+  margin: 0;
+  appearance: none;
+  background: transparent;
+  cursor: pointer;
+}
+
+.value-input:focus-visible {
+  outline: none;
+}
+
+.value-input:disabled {
+  cursor: not-allowed;
+}
+
+.value-input::-webkit-slider-runnable-track {
+  height: var(--track-height);
+  border-radius: 999px;
+  background: linear-gradient(
+    to right,
+    var(--acc) 0,
+    var(--acc) calc(var(--pct) * 100%),
+    var(--track) calc(var(--pct) * 100%),
+    var(--track) 100%
+  );
+}
+
+/* The native thumb is the hit target only; the visible knob is `.value-knob`. */
+.value-input::-webkit-slider-thumb {
+  appearance: none;
+  width: var(--thumb-size);
+  height: var(--thumb-size);
+  margin-top: calc((var(--track-height) - var(--thumb-size)) / 2);
+  border: none;
+  background: transparent;
+  box-shadow: none;
+  cursor: grab;
+}
+
+.value-input:active::-webkit-slider-thumb {
+  cursor: grabbing;
+}
+
+.value-knob {
+  position: absolute;
+  top: 50%;
+  left: calc(var(--thumb-size) / 2 + var(--pct) * (100% - var(--thumb-size)));
+  transform: translate(-50%, -50%);
+  width: var(--thumb-size);
+  height: var(--thumb-size);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  border-radius: 50%;
+  background: var(--ctl);
+  color: var(--t1);
+  font-size: 9.5px;
+  font-weight: 600;
+  font-variant-numeric: tabular-nums;
+  line-height: 1;
+  pointer-events: none;
+  box-shadow:
+    0 0 0 1px var(--ln-strong),
+    0 2px 6px rgba(0, 0, 0, 0.3);
+  transition:
+    transform var(--dur-fast) var(--ease-standard),
+    box-shadow var(--dur-fast) var(--ease-standard);
+}
+
+.value-slider.has-suffix .value-knob {
+  font-size: 8.5px;
+  letter-spacing: -0.02em;
+}
+
+.value-slider:not(.disabled) .value-input:active ~ .value-knob {
+  transform: translate(-50%, -50%) scale(1.08);
+}
+
+.value-input:focus-visible ~ .value-knob {
+  box-shadow:
+    0 0 0 1px color-mix(in oklab, var(--acc) 60%, transparent),
+    var(--focus-ring);
+}
+
+.value-slider.disabled {
+  opacity: 0.45;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .value-knob {
+    transition: none;
+  }
+}

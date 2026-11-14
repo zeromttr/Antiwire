@@ -1,0 +1,162 @@
+.lookup {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  padding: 14px 18px 16px;
+  border-top: 1px solid var(--ln);
+}
+
+.head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  min-height: 26px;
+}
+
+.lookup h3 {
+  margin: 0;
+  color: var(--t1);
+  font-size: 12.5px;
+  font-weight: 600;
+}
+
+.lookup h4 {
+  display: flex;
+  align-items: baseline;
+  gap: 8px;
+  margin: 6px 0 -4px;
+  color: var(--t3);
+  font-size: 10.5px;
+  font-weight: 600;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+}
+
+.subject {
+  min-width: 0;
+  overflow: hidden;
+  color: var(--t3);
+  font-size: 10.5px;
+  font-weight: 400;
+  letter-spacing: 0;
+  text-overflow: ellipsis;
+  text-transform: none;
+  white-space: nowrap;
+}
+
+.note {
+  margin: 0;
+  color: var(--t3);
+  font-size: 12px;
+  line-height: 1.45;
+}
+
+.note.small {
+  font-size: 11px;
+}
+
+.loading {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  color: var(--t3);
+  font-size: 12px;
+}
+
+.validated {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  align-self: flex-start;
+  padding: 2px 8px;
+  border-radius: 999px;
+  background: color-mix(in oklab, var(--ok) 14%, transparent);
+  color: color-mix(in oklab, var(--ok) 85%, var(--t1));
+  font-size: 11px;
+  font-weight: 500;
+}
+
+.rows {
+  display: flex;
+  flex-direction: column;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.rows li {
+  display: grid;
+  grid-template-columns: 58px minmax(0, 1fr) auto;
+  align-items: baseline;
+  gap: 10px;
+  padding: 5px 0;
+  border-bottom: 1px solid color-mix(in oklab, var(--ln) 60%, transparent);
+}
+
+.rows li:last-child {
+  border-bottom: none;
+}
+
+.type {
+  justify-self: start;
+  padding: 1px 6px;
+  border: 1px solid var(--ln);
+  border-radius: 5px;
+  background: var(--s2);
+  color: var(--t2);
+  font-size: 10px;
+  font-weight: 600;
+  letter-spacing: 0.02em;
+}
+
+.value {
+  display: flex;
+  flex-direction: column;
+  gap: 1px;
+  min-width: 0;
+}
+
+.owner {
+  color: var(--t3);
+  font-size: 10.5px;
+  overflow-wrap: anywhere;
+}
+
+.data {
+  color: var(--t1);
+  font-size: 11.5px;
+  overflow-wrap: anywhere;
+  user-select: text;
+  -webkit-user-select: text;
+}
+
+.ttl {
+  color: var(--t3);
+  font-size: 10.5px;
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
+}
+
+.sr-only {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  overflow: hidden;
+  clip-path: inset(50%);
+  white-space: nowrap;
+}
+
+.sources {
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+  margin-top: 4px;
+}
+
+.sources p {
+  margin: 0;
+  color: var(--t3);
+  font-size: 11px;
+  overflow-wrap: anywhere;
+}

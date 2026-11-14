@@ -1,0 +1,114 @@
+.titlebar {
+  height: 48px;
+  flex: none;
+  display: grid;
+  grid-template-columns: auto minmax(0, 1fr) auto;
+  align-items: center;
+  padding: 0 8px;
+  position: relative;
+  z-index: 10;
+  background: var(--chrome);
+  border-bottom: 1px solid var(--ln);
+  user-select: none;
+  -webkit-user-select: none;
+  -webkit-app-region: drag;
+}
+.leading,
+.trailing,
+.center {
+  display: flex;
+  align-items: center;
+  height: 100%;
+  min-width: 0;
+}
+.trailing {
+  justify-content: flex-end;
+}
+.center {
+  justify-content: flex-start;
+}
+.brand {
+  display: flex;
+  align-items: center;
+  padding: 0 18px 0 8px;
+  height: 100%;
+}
+/* The icon is shown as-is: no badge, filters or blending. */
+.app-icon {
+  display: block;
+  width: 26px;
+  height: 26px;
+  flex: none;
+  pointer-events: none;
+}
+[data-platform='macos'] .brand {
+  padding-left: 12px;
+}
+[data-platform='macos'] .leading {
+  justify-content: space-between;
+}
+/* Room for the native traffic lights placed by TRAFFIC_LIGHT_POSITION
+ * (shared/window-frame.ts): 18px inset plus three 14px buttons and their gaps,
+ * less the bar's own 8px padding. */
+.traffic-lights {
+  width: 68px;
+  height: 100%;
+  flex: none;
+}
+.nav-slot {
+  height: 100%;
+  min-width: 0;
+  max-width: 100%;
+  overflow: hidden;
+  scrollbar-width: none;
+  -webkit-app-region: no-drag;
+}
+.nav-slot::-webkit-scrollbar {
+  display: none;
+}
+.window-label {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-size: 12px;
+  font-weight: 500;
+  color: var(--t2);
+}
+.window-error {
+  position: absolute;
+  top: 100%;
+  right: 8px;
+  max-width: calc(100vw - 16px);
+  padding: 12px 16px;
+  border: 1px solid var(--bad);
+  border-radius: 8px;
+  background: var(--p1);
+  color: var(--t1);
+  font-size: 12px;
+  -webkit-app-region: no-drag;
+}
+@media (max-width: 600px) {
+  .titlebar,
+  .titlebar[data-platform='macos'] {
+    height: auto;
+    min-height: 86px;
+    grid-template-columns: 1fr 1fr;
+    grid-template-rows: 40px 46px;
+  }
+  .leading {
+    grid-column: 1;
+    grid-row: 1;
+  }
+  .trailing {
+    grid-column: 2;
+    grid-row: 1;
+  }
+  .center {
+    grid-column: 1 / -1;
+    grid-row: 2;
+  }
+  .nav-slot {
+    width: 100%;
+    overflow: hidden;
+  }
+}

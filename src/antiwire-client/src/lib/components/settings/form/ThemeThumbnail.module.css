@@ -1,0 +1,123 @@
+.thumb {
+  position: relative;
+  display: block;
+  height: 92px;
+  border-radius: 8px;
+  overflow: hidden;
+  box-shadow: inset 0 0 0 1px rgba(128, 128, 128, 0.18);
+}
+
+.half {
+  position: absolute;
+  inset: 0;
+  clip-path: inset(0 0 0 50%);
+}
+
+.mini {
+  --m-bg: #0c0d0f;
+  --m-card: #15161b;
+  --m-ink: rgba(236, 236, 239, 0.16);
+  --m-ink-strong: rgba(236, 236, 239, 0.5);
+  --m-line: var(--acc-base);
+  position: absolute;
+  inset: 0;
+  display: flex;
+  flex-direction: column;
+  background: var(--m-bg);
+}
+
+.mini.light {
+  --m-bg: #eeede9;
+  --m-card: #f8f7f5;
+  --m-ink: rgba(40, 35, 25, 0.12);
+  --m-ink-strong: rgba(40, 35, 25, 0.45);
+  --m-line: oklch(from var(--acc-base) min(l, 0.5) min(c, 0.2) h);
+}
+
+.bar {
+  display: flex;
+  align-items: center;
+  gap: 5px;
+  height: 16px;
+  padding: 0 7px;
+  border-bottom: 1px solid var(--m-ink);
+}
+
+.logo {
+  width: 6px;
+  height: 6px;
+  margin-right: 3px;
+  border-radius: 2px;
+  background: var(--acc-base);
+}
+
+.tab {
+  width: 14px;
+  height: 3px;
+  border-radius: 2px;
+  background: var(--m-ink);
+}
+
+.tab.on {
+  background: var(--m-ink-strong);
+}
+
+.body {
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  gap: 5px;
+  padding: 6px 7px 7px;
+}
+
+.stats {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 4px;
+}
+
+.stat {
+  height: 17px;
+  padding: 5px 5px 0;
+  border-radius: 3px;
+  background: var(--m-card);
+}
+
+.value {
+  display: block;
+  width: 70%;
+  height: 4px;
+  border-radius: 2px;
+  background: var(--m-ink-strong);
+}
+
+.value.short {
+  width: 45%;
+}
+
+.chart {
+  position: relative;
+  flex: 1;
+  border-radius: 3px;
+  background: var(--m-card);
+  overflow: hidden;
+}
+
+.chart svg {
+  position: absolute;
+  inset: 4px 0 0;
+  width: 100%;
+  height: calc(100% - 4px);
+}
+
+.area {
+  fill: var(--m-line);
+  opacity: 0.16;
+}
+
+.line {
+  fill: none;
+  stroke: var(--m-line);
+  stroke-width: 1.6;
+  vector-effect: non-scaling-stroke;
+}

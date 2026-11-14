@@ -1,0 +1,194 @@
+.about-tab {
+  min-width: 0;
+}
+
+.hero {
+  display: flex;
+  flex-direction: column;
+  gap: 14px;
+  padding: 22px 22px 20px;
+  border-radius: 12px;
+}
+
+.hero-top {
+  display: flex;
+  align-items: center;
+  gap: 16px;
+}
+
+.hero-logo,
+.hero-fallback {
+  flex: none;
+  width: 64px;
+  height: 64px;
+}
+
+.hero-fallback {
+  display: grid;
+  place-items: center;
+  color: var(--t2);
+}
+
+.hero-title {
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+}
+
+.product-name {
+  margin: 0;
+  color: var(--t1);
+  font-size: 20px;
+  font-weight: 600;
+  letter-spacing: -0.02em;
+}
+
+.product-version {
+  margin: 0;
+  color: var(--t3);
+  font-size: 11.5px;
+}
+
+.product-tagline {
+  margin: 0;
+  color: var(--t2);
+  font-size: 13px;
+}
+
+.product-description {
+  margin: 0;
+  color: var(--t2);
+  font-size: 12.5px;
+  line-height: 1.55;
+}
+
+.product-meta {
+  margin: 0;
+  color: var(--t3);
+  font-size: 11.5px;
+}
+
+.tag {
+  flex: none;
+  align-self: flex-start;
+  padding: 2px 8px;
+  border: 1px solid var(--ln);
+  border-radius: 6px;
+  background: var(--s2);
+  color: var(--t2);
+  font-size: 10.5px;
+  white-space: nowrap;
+}
+
+.license {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  padding: 16px 0;
+}
+
+.license-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+}
+
+.license-head .tag {
+  align-self: center;
+}
+
+.license-text {
+  max-height: 180px;
+  overflow: auto;
+  margin: 0;
+  padding: 12px 14px;
+  border: 1px solid var(--ln);
+  border-radius: 8px;
+  background: var(--well);
+  color: var(--t2);
+  font-size: 11px;
+  line-height: 1.55;
+  white-space: pre-wrap;
+  user-select: text;
+  -webkit-user-select: text;
+}
+
+.credits {
+  margin: 0;
+  padding: 4px 0;
+  list-style: none;
+}
+
+.credit {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 16px;
+  padding: 12px 0;
+  border-bottom: 1px solid var(--ln);
+}
+
+.credit:last-child {
+  border-bottom: 0;
+}
+
+.credit-main {
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 2px;
+}
+
+.credit-name {
+  color: var(--t1);
+  font-size: 13px;
+  font-weight: 500;
+}
+
+.credit-role {
+  color: var(--t3);
+  font-size: 12px;
+}
+
+.credit-link {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  margin-top: 2px;
+  color: var(--acc);
+  font-size: 12px;
+  text-decoration: none;
+  overflow-wrap: anywhere;
+}
+
+.credit-link:hover {
+  text-decoration: underline;
+}
+
+.credit-link:focus-visible {
+  outline: 2px solid color-mix(in oklab, var(--acc) 55%, transparent);
+  outline-offset: 2px;
+  border-radius: 3px;
+}
+
+.credit-note {
+  margin: 4px 0 0;
+  color: var(--t3);
+  font-size: 11.5px;
+  line-height: 1.5;
+}
+
+.legal {
+  margin: 0;
+  color: var(--t3);
+  font-size: 11.5px;
+  line-height: 1.55;
+}
+
+.legal strong {
+  color: var(--t2);
+  font-weight: 600;
+}

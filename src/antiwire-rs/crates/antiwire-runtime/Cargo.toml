@@ -1,0 +1,41 @@
+[package]
+name = "antiwire-runtime"
+version.workspace = true
+publish.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+description = "Antiwire daemon lifecycle orchestration"
+
+[lints]
+workspace = true
+
+[dependencies]
+antiwire-capture = { workspace = true }
+antiwire-dns = { workspace = true }
+antiwire-dns-redirect = { workspace = true }
+antiwire-enforce = { workspace = true }
+antiwire-flow = { workspace = true }
+antiwire-events = { workspace = true }
+antiwire-ipc = { workspace = true }
+antiwire-services = { workspace = true }
+antiwire-platform = { workspace = true }
+antiwire-policy = { workspace = true }
+antiwire-secrets = { workspace = true }
+antiwire-store = { workspace = true }
+antiwire-tuning = { workspace = true }
+antiwire-update = { workspace = true }
+anyhow = { workspace = true }
+arc-swap = { workspace = true }
+parking_lot = { workspace = true }
+tokio = { workspace = true }
+tokio-util = { workspace = true }
+tracing = { workspace = true }
+
+antiwire-geo = { workspace = true, features = ["embedded-oui"] }
+
+[dev-dependencies]
+antiwire-enforce = { workspace = true, features = ["test-support"] }
+tokio = { workspace = true }
+tempfile = { workspace = true }
+time = { workspace = true }
