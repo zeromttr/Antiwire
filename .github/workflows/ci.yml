@@ -106,7 +106,7 @@ jobs:
       firew_live: ${{ steps.plan.outputs.firew_live }}
     steps:
       - name: Checkout
-        uses: actions/checkout@v7
+        uses: useblacksmith/checkout@v1
         with:
           # A pull request diffs its merge commit against the first parent. Other events
           # compare against older history.
@@ -132,7 +132,7 @@ jobs:
     runs-on: blacksmith-2vcpu-ubuntu-2404
     steps:
       - name: Checkout
-        uses: actions/checkout@v7
+        uses: useblacksmith/checkout@v1
 
       - name: Install cargo-deny
         uses: taiki-e/install-action@v2
@@ -277,13 +277,13 @@ jobs:
     runs-on: blacksmith-4vcpu-ubuntu-2404
     steps:
       - name: Checkout
-        uses: actions/checkout@v7
+        uses: useblacksmith/checkout@v1
 
-      - name: Set up Docker Buildx
-        uses: docker/setup-buildx-action@v4
+      - name: Setup Blacksmith Builder
+        uses: useblacksmith/setup-docker-builder@v1
 
       - name: Build Linux live-test image
-        uses: docker/build-push-action@v7
+        uses: useblacksmith/build-push-action@v2
         with:
           context: src/antiwire-rs
           file: src/antiwire-rs/docker/linux-test.Dockerfile
@@ -293,8 +293,6 @@ jobs:
             PRECOMPILE=live
           # The scope is shared by every branch. mode=min caches final layers only —
           # mode=max hit ENOSPC on export. Only main publishes a new index.
-          cache-from: type=gha,scope=antiwire-rs-linux-test
-          cache-to: ${{ github.ref == 'refs/heads/main' && 'type=gha,mode=min,scope=antiwire-rs-linux-test' || '' }}
 
       - name: Run live tests in container
         run: docker run --rm --cap-add=NET_ADMIN -e RUST_BACKTRACE=1 antiwire-rs-linux-test:latest live
@@ -311,7 +309,7 @@ jobs:
     runs-on: blacksmith-2vcpu-ubuntu-2404
     steps:
       - name: Checkout
-        uses: actions/checkout@v7
+        uses: useblacksmith/checkout@v1
 
       - name: Install eBPF build dependencies
         run: bash src/antiwire-rs/scripts/ci-install-ebpf-deps.sh
@@ -346,7 +344,7 @@ jobs:
       ELECTRON_SKIP_BINARY_DOWNLOAD: "1"
     steps:
       - name: Checkout
-        uses: actions/checkout@v7
+        uses: useblacksmith/checkout@v1
 
       - name: Install Bun
         uses: oven-sh/setup-bun@v2
@@ -402,7 +400,7 @@ jobs:
     runs-on: blacksmith-2vcpu-ubuntu-2404
     steps:
       - name: Checkout
-        uses: actions/checkout@v7
+        uses: useblacksmith/checkout@v1
 
       - name: Version consistency
         run: node scripts/check-versions.mjs
