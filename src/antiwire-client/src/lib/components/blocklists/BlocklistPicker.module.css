@@ -1,0 +1,169 @@
+.picker {
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  min-height: 26px;
+}
+
+.head-actions {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+}
+
+.count {
+  font-size: 12px;
+  font-variant-numeric: tabular-nums;
+  color: var(--t3);
+}
+
+.count.has-selection {
+  color: var(--t1);
+}
+
+/*
+ * Sections are divided by their headings, not boxed. The lists stay inside
+ * their container's width, so nothing ever scrolls sideways.
+ */
+.groups {
+  min-height: 0;
+  border-top: 1px solid var(--ln);
+  border-bottom: 1px solid var(--ln);
+}
+
+.scrollable .groups {
+  flex: 1;
+  max-height: min(56vh, 440px);
+  overflow-x: hidden;
+  overflow-y: auto;
+}
+
+.group + .group {
+  border-top: 1px solid var(--ln);
+}
+
+/* Lined up with the rows' checkboxes, which sit 8px in from the hover edge. */
+.group-head {
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+  padding: 14px 8px 4px;
+}
+
+.group-head h3 {
+  margin: 0;
+  color: var(--t3);
+  font-size: 10.5px;
+  font-weight: 600;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+}
+
+.group-hint {
+  color: var(--t3);
+  font-size: 11.5px;
+  line-height: 1.4;
+}
+
+.list {
+  list-style: none;
+  margin: 0;
+  padding: 0 0 8px;
+}
+
+.item {
+  width: 100%;
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  padding: 9px 8px;
+  border: none;
+  border-radius: 8px;
+  background: transparent;
+  color: var(--t2);
+  font: inherit;
+  text-align: left;
+  cursor: pointer;
+  transition: background var(--dur-fast) var(--ease-out);
+}
+
+.item:hover {
+  background: var(--hover);
+}
+
+/* Inset, so a scrolling container's edge cannot clip it. */
+.item:focus-visible {
+  outline: none;
+  box-shadow: inset 0 0 0 2px color-mix(in oklab, var(--acc) 55%, transparent);
+}
+
+.mark {
+  display: flex;
+  flex: none;
+}
+
+.item-text {
+  flex: 1;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+
+.item-name {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px;
+  color: var(--t1);
+  font-size: 13px;
+  font-weight: 500;
+}
+
+.tag {
+  padding: 1px 7px;
+  border-radius: 999px;
+  background: color-mix(in oklab, var(--acc) 14%, transparent);
+  color: color-mix(in oklab, var(--acc) 85%, var(--t1));
+  font-size: 10.5px;
+  font-weight: 500;
+}
+
+.item-desc {
+  color: var(--t3);
+  font-size: 12px;
+  line-height: 1.4;
+}
+
+/* Blocking strength, drawn like the app's sparklines: rising bars, filled to the level. */
+.strength {
+  flex: none;
+  display: flex;
+  align-items: flex-end;
+  gap: 2px;
+  height: 16px;
+}
+
+/* From 36% to full height, so the lowest level still reads as a bar. */
+.bar {
+  width: 3px;
+  height: calc(20% + var(--level) * 80%);
+  border-radius: 1px;
+  background: color-mix(in oklab, var(--t1) 18%, transparent);
+}
+
+.bar.on {
+  background: var(--t3);
+}
+
+.item.selected .bar.on {
+  background: var(--acc);
+}

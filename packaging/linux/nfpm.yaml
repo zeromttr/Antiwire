@@ -1,0 +1,105 @@
+# Builds Debian and RPM packages that install the daemon, systemd service, and UI
+# client together (same role as installer.iss on Windows).
+#
+#   nfpm package -f packaging/linux/nfpm.yaml --packager deb --target dist
+#   nfpm package -f packaging/linux/nfpm.yaml --packager rpm --target dist
+#
+# Set ANTIWIRE_VERSION (e.g. 0.1.0) and ANTIWIRE_ARCH (Go names: amd64 or arm64; nfpm
+# translates them for rpm), and ensure staging/ contains release binaries built for that
+# architecture before packaging — see .github/workflows/packages.yml and release.yml.
+
+name: antiwire
+arch: "${ANTIWIRE_ARCH}"
+platform: linux
+version: "${ANTIWIRE_VERSION}"
+# semver splits a prerelease (0.3.1-nightly.20261102.41) into the form both formats sort
+# before the release: 0.3.1~nightly.20261102.41. Written as is, the "-" would be a Debian
+# revision that sorts after 0.3.1, and is not allowed in an RPM version at all. The daemon
+# maps "~" back when it compares the installed version (package_install.rs).
+version_schema: semver
+section: net
+priority: optional
+maintainer: Antiwire Contributors
+vendor: Antiwire (zeromttr)
+# Set from [workspace.package] repository by the workflows (scripts/repository.mjs url).
+homepage: "${ANTIWIRE_REPOSITORY_URL}"
+description: Antiwire network monitor and firewall (daemon + desktop client)
+license: MIT
+# The daemon needs the firewall tools, and libpcap for packet capture; the desktop client,
+# an Electron app, needs the system libraries Electron links against. Those have different
+# package names in each format, so each list is whole: an override replaces `depends`, it
+# does not add to it. The client's names are the ones electron-builder declares for its own
+# .deb and .rpm, plus the sound and graphics-buffer libraries, which Electron loads at start
+# and a system without a desktop lacks.
+overrides:
+  deb:
+    depends:
+      - nftables
+      - iptables
+      - ipset
+      - libgtk-3-0
+      - libnotify4
+      - libnss3
+      - libxss1
+      - libxtst6
+      - xdg-utils
+      - libatspi2.0-0
+      - libuuid1
+      - libsecret-1-0
+      - libasound2
+      - libgbm1
+      - libpcap0.8
+  rpm:
+    depends:
+      - nftables
+      - iptables
+      - ipset
+      - gtk3
+      - libnotify
+      - nss
+      - libXScrnSaver
+      - (libXtst or libXtst6)
+      - xdg-utils
+      - at-spi2-core
+      - (libuuid or libuuid1)
+      - (alsa-lib or libasound2)
+      - (mesa-libgbm or libgbm1)
+      - (libpcap or libpcap1)
+
+contents:
+  - src: staging/antiwire-daemon
+    dst: /usr/bin/antiwire-daemon
+    file_info:
+      mode: 0755
+  # The Electron client is a directory; /usr/bin/antiwire links to its executable.
+  - src: staging/antiwire-app
+    dst: /usr/lib/antiwire
+    type: tree
+  - src: /usr/lib/antiwire/antiwire
+    dst: /usr/bin/antiwire
+    type: symlink
+  - src: packaging/linux/antiwire-daemon.service
+    dst: /usr/lib/systemd/system/antiwire-daemon.service
+  - src: packaging/linux/antiwire.desktop
+    dst: /usr/share/applications/antiwire.desktop
+  - src: staging/antiwire.png
+    dst: /usr/share/icons/hicolor/128x128/apps/antiwire.png
+  - src: staging/netmetrics.bpf.o
+    dst: /usr/lib/netmetrics/netmetrics.bpf.o
+    file_info:
+      mode: 0644
+  - src: staging/dns_filter.bpf.o
+    dst: /usr/lib/netmetrics/dns_filter.bpf.o
+    file_info:
+      mode: 0644
+
+scripts:
+  postinstall: packaging/linux/postinstall.sh
+  preremove: packaging/linux/preremove.sh
+  postremove: packaging/linux/postremove.sh
+
+deb:
+  compression: gzip
+
+rpm:
+  compression: gzip

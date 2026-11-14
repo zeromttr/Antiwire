@@ -1,0 +1,83 @@
+# Packaging for the Electron client. Build first (`bun run build`), then
+# `electron-builder --config electron-builder.yml` (see `bun run package`).
+appId: com.antiwire.client
+productName: Antiwire
+# installer.iss, packaging/linux/nfpm.yaml and the macOS staging expect `antiwire`.
+executableName: antiwire
+copyright: Copyright © Antiwire (zeromttr)
+
+directories:
+  output: dist
+  buildResources: resources
+
+# Only the built bundles and the icons the windows, tray and notifications load
+# at runtime. Production dependencies (@grpc/*) are added by electron-builder.
+files:
+  - package.json
+  - out/**
+  - resources/icons/*.png
+asar: true
+
+# Chromium's own UI strings (context menus, native dialogs) only for the
+# languages the app is translated into (project.inlang/settings.json); en-US is
+# Chromium's fallback. Drops about 30 MB of locale packs.
+electronLanguages:
+  [
+    bg,
+    cs,
+    da,
+    de,
+    el,
+    en-US,
+    es,
+    et,
+    fi,
+    fr,
+    hr,
+    hu,
+    it,
+    lt,
+    lv,
+    nb,
+    nl,
+    pl,
+    pt-BR,
+    pt-PT,
+    ro,
+    sk,
+    sl,
+    sv,
+    uk,
+  ]
+
+# The daemon's proto travels inside app.asar as out/main/antiwire.proto (see
+# electron.vite.config.ts), where the asar integrity fuse covers it.
+
+# Flips the Electron fuses before signing (see scripts/after-pack.mjs).
+afterPack: ./scripts/after-pack.mjs
+
+win:
+  icon: resources/icons/icon.ico
+  target:
+    - nsis
+nsis:
+  oneClick: false
+  perMachine: false
+  allowToChangeInstallationDirectory: true
+  # The Start Menu shortcut carries the appId as its AppUserModelID, which
+  # attributes toast notifications to Antiwire.
+  createStartMenuShortcut: true
+  shortcutName: Antiwire
+
+mac:
+  icon: resources/icons/icon.icns
+  category: public.app-category.utilities
+  target:
+    - dmg
+
+linux:
+  icon: resources/icons
+  category: Network
+  target:
+    - AppImage
+    - deb

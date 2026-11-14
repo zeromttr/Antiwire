@@ -1,0 +1,17 @@
+[
+  {
+    "event": "degraded",
+    "data": {
+      "reason": {
+        "kind": "snapshot_only",
+        "source": "macos-socket-table"
+      }
+    }
+  },
+  {
+    "event": "restored",
+    "data": {
+      "source": "macos-socket-table"
+    }
+  }
+]

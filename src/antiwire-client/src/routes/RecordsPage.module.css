@@ -1,0 +1,45 @@
+.page {
+  flex: 1;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+  user-select: none;
+  -webkit-user-select: none;
+}
+.scroll {
+  flex: 1;
+  min-height: 0;
+  overflow: hidden;
+  padding: 16px 24px 22px;
+  display: flex;
+  flex-direction: column;
+}
+/* One container: the applications, the records and the inspector are its columns. */
+.grid {
+  /* The band across the top of every column; its lower edge is one line. */
+  --records-band-height: 46px;
+  --records-band-fill: color-mix(in oklab, var(--t1) 3%, transparent);
+  display: grid;
+  grid-template-columns: 272px minmax(0, 1fr);
+  grid-template-rows: minmax(0, 1fr);
+  flex: 1;
+  min-height: 0;
+  border-radius: 13px;
+  border: 1px solid var(--ln);
+  background: var(--p1);
+  overflow: hidden;
+  transform: translateZ(0);
+}
+.grid.inspecting {
+  grid-template-columns: 272px minmax(0, 1fr) 320px;
+}
+.inspector-slot {
+  grid-column: 3;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+  border-left: 1px solid var(--ln);
+}
+.inspector-slot > :global(*) {
+  flex: 1;
+}

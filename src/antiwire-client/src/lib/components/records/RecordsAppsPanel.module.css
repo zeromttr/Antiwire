@@ -1,0 +1,383 @@
+.app-tip {
+  position: fixed;
+  left: 0;
+  top: 0;
+  z-index: 220;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  min-width: 200px;
+  max-width: 340px;
+  padding: 8px 11px;
+  border: 1px solid var(--ln-strong);
+  border-radius: 8px;
+  background: var(--pop);
+  backdrop-filter: blur(12px);
+  -webkit-backdrop-filter: blur(12px);
+  pointer-events: none;
+  transform: translate3d(var(--tip-x, 0px), var(--tip-y, 0px), 0) translate(-50%, -100%);
+  animation: appTipIn var(--dur-fast) var(--ease-out) both;
+}
+.app-tip.below {
+  transform: translate3d(var(--tip-x, 0px), var(--tip-y, 0px), 0) translate(-50%, 0);
+  animation-name: appTipInBelow;
+}
+.tip-head {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 12px;
+}
+.tip-name {
+  min-width: 0;
+  overflow: hidden;
+  color: var(--t1);
+  font-size: 12px;
+  font-weight: 600;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.tip-live {
+  flex: none;
+  color: var(--ok);
+  font-size: 11px;
+}
+.tip-path {
+  padding-bottom: 6px;
+  border-bottom: 1px solid var(--ln);
+  color: var(--t3);
+  font-family: var(--font-mono);
+  font-size: 11px;
+  overflow-wrap: anywhere;
+}
+.tip-stats {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  color: var(--t2);
+  font-size: 11.5px;
+  font-variant-numeric: tabular-nums;
+}
+.tip-blocked {
+  color: color-mix(in oklab, var(--bad) 80%, var(--t2));
+}
+/* Live rates sit at the right of the stats line, in the traffic colors. */
+.tip-rates {
+  display: inline-flex;
+  align-items: center;
+  gap: 10px;
+  margin-left: auto;
+  padding-left: 8px;
+}
+.tip-rates span {
+  display: inline-flex;
+  align-items: center;
+  gap: 3px;
+  font-family: var(--font-mono);
+  font-size: 11px;
+  white-space: nowrap;
+}
+.rate-down {
+  color: var(--acc);
+}
+.rate-up {
+  color: var(--acc-sub);
+}
+@keyframes appTipIn {
+  from {
+    opacity: 0;
+    transform: translate3d(var(--tip-x, 0px), var(--tip-y, 0px), 0)
+      translate(-50%, calc(-100% + 4px));
+  }
+}
+@keyframes appTipInBelow {
+  from {
+    opacity: 0;
+    transform: translate3d(var(--tip-x, 0px), var(--tip-y, 0px), 0) translate(-50%, -4px);
+  }
+}
+
+/* The first column of the records container. */
+.panel {
+  grid-column: 1;
+  min-width: 0;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+  border-right: 1px solid var(--ln);
+}
+
+/* Names the scope: every application, or the selected one with a way back. */
+.band {
+  flex: none;
+  display: flex;
+  align-items: center;
+  min-width: 0;
+  height: var(--records-band-height);
+  padding: 0 14px;
+  border-bottom: 1px solid var(--ln);
+  background: var(--records-band-fill);
+}
+
+.band-title {
+  overflow: hidden;
+  color: var(--t1);
+  font-size: 13.5px;
+  font-weight: 600;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 7px;
+  max-width: 100%;
+  height: 26px;
+  padding: 0 4px 0 11px;
+  border: 1px solid color-mix(in oklab, var(--acc) 28%, transparent);
+  border-radius: 13px;
+  background: color-mix(in oklab, var(--acc) 12%, transparent);
+  color: var(--acc);
+  font-size: 12.5px;
+  font-weight: 500;
+}
+
+.chip-text {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.chip-close {
+  flex: none;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 18px;
+  height: 18px;
+  padding: 0;
+  border: none;
+  border-radius: 50%;
+  background: color-mix(in oklab, var(--acc) 18%, transparent);
+  color: inherit;
+  cursor: pointer;
+  transition: background-color var(--dur-fast) var(--ease-standard);
+}
+
+.chip-close:hover {
+  background: color-mix(in oklab, var(--acc) 32%, transparent);
+}
+
+.chip-close:focus-visible {
+  outline: none;
+  box-shadow: var(--focus-ring);
+}
+
+.controls {
+  flex: none;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  padding: 9px 10px;
+  border-bottom: 1px solid var(--ln);
+}
+
+/* SearchBox is `flex: 1` for a toolbar row. In this column that would be its height,
+   which collapses to the text; here it keeps its own height and fills the width. */
+.controls > div.search {
+  flex: none;
+  max-width: none;
+}
+
+.app-list {
+  flex: 1;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+  outline: none;
+}
+
+.loading {
+  padding: 8px;
+}
+
+/* Selection reads the same as a selected record: a tint with an accent edge. */
+.app-item {
+  display: grid;
+  grid-template-columns: 26px minmax(0, 1fr) auto;
+  align-items: center;
+  gap: 10px;
+  width: 100%;
+  height: 48px;
+  padding: 0 14px;
+  border: none;
+  border-bottom: 1px solid color-mix(in oklab, var(--t1) 4%, transparent);
+  background: transparent;
+  color: var(--t2);
+  text-align: left;
+  cursor: pointer;
+  transition: background-color var(--dur-fast) var(--ease-standard);
+}
+
+.app-item:hover:not(.active) {
+  background: color-mix(in oklab, var(--t1) 5%, transparent);
+  color: var(--t1);
+}
+
+.app-item.active {
+  background: color-mix(in oklab, var(--acc) 10%, transparent);
+  box-shadow: inset 2px 0 0 var(--acc);
+  color: var(--t1);
+}
+
+.app-item:focus-visible,
+.app-list:focus-visible .app-item.active {
+  outline: 2px solid color-mix(in oklab, var(--acc) 55%, transparent);
+  outline-offset: -2px;
+}
+
+.avatar {
+  position: relative;
+  display: flex;
+}
+
+/* Live connections right now. */
+.live-dot {
+  position: absolute;
+  right: -3px;
+  bottom: -3px;
+  width: 10px;
+  height: 10px;
+  border: 2px solid var(--p1);
+  border-radius: 50%;
+  background: var(--ok);
+}
+
+/*
+ * The ripple is a ring that scales and fades: transform and opacity only, so
+ * the compositor runs it without repainting the list every frame. Starts on
+ * the dot's outer edge (14px) and ends 5px beyond it (24px).
+ */
+.live-dot::after {
+  content: '';
+  position: absolute;
+  inset: -2px;
+  border: 2px solid color-mix(in oklab, var(--ok) 55%, transparent);
+  border-radius: 50%;
+  opacity: 0;
+  pointer-events: none;
+  animation: live-ring 2.2s var(--ease-out) infinite;
+}
+
+@keyframes live-ring {
+  0% {
+    opacity: 1;
+    transform: scale(1);
+  }
+  70%,
+  100% {
+    opacity: 0;
+    transform: scale(1.72);
+  }
+}
+
+.meta {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  min-width: 0;
+}
+
+.app-name,
+.sub {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.app-name {
+  font-size: 13px;
+  font-weight: 500;
+}
+
+.sub {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  color: var(--t3);
+  font-size: 11.5px;
+}
+
+.sub.live {
+  color: var(--ok);
+}
+
+.rate {
+  display: inline-flex;
+  align-items: center;
+  gap: 2px;
+  color: var(--t2);
+  font-family: var(--font-mono);
+  font-size: 11px;
+  font-variant-numeric: tabular-nums;
+}
+
+.sub.blocked {
+  color: color-mix(in oklab, var(--bad) 80%, var(--t2));
+}
+
+.sub.path {
+  display: block;
+  font-family: var(--font-mono);
+  font-size: 10.5px;
+}
+
+/* The record count over its share of the largest application's. */
+.tally {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-end;
+  gap: 5px;
+  min-width: 40px;
+}
+
+.app-count {
+  color: var(--t3);
+  font-family: var(--font-mono);
+  font-size: 11px;
+  font-variant-numeric: tabular-nums;
+}
+
+.app-item.active .app-count {
+  color: var(--t2);
+}
+
+.share {
+  display: flex;
+  justify-content: flex-end;
+  width: 100%;
+  height: 2px;
+  border-radius: 1px;
+  background: var(--track);
+}
+
+.share span {
+  width: var(--share, 0%);
+  border-radius: 1px;
+  background: var(--t3);
+}
+
+.app-item.active .share span {
+  background: var(--acc);
+}
+
+.no-match {
+  padding: 16px 10px;
+  color: var(--t3);
+  font-size: 12px;
+  line-height: 1.6;
+  text-align: center;
+  white-space: pre-line;
+}

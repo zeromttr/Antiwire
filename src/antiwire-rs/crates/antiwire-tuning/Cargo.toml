@@ -1,0 +1,11 @@
+[package]
+name = "antiwire-tuning"
+description = "Centralized tuning parameters for antiwire daemon caches, timeouts, and queues"
+version.workspace = true
+publish.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+
+[lints]
+workspace = true

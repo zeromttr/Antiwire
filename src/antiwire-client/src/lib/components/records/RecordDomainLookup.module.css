@@ -1,0 +1,219 @@
+.lookup {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  padding: 14px 18px 16px;
+  border-top: 1px solid var(--ln);
+}
+
+.head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  min-height: 26px;
+}
+
+.head-actions {
+  display: flex;
+  align-items: center;
+  gap: 2px;
+}
+
+.lookup h3 {
+  margin: 0;
+  color: var(--t1);
+  font-size: 12.5px;
+  font-weight: 600;
+}
+
+.note {
+  margin: 0;
+  color: var(--t3);
+  font-size: 12px;
+  line-height: 1.45;
+}
+
+.note.inferred {
+  padding: 7px 10px;
+  border-radius: 7px;
+  background: color-mix(in oklab, var(--warn) 10%, transparent);
+  color: var(--t2);
+}
+
+.note.failure {
+  color: var(--t2);
+}
+
+.loading {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  color: var(--t3);
+  font-size: 12px;
+}
+
+.record-for {
+  margin: 0;
+  color: var(--t2);
+  font-size: 12px;
+}
+
+.badges {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+}
+
+.badge {
+  padding: 2px 8px;
+  border-radius: 999px;
+  font-size: 11px;
+  font-weight: 500;
+}
+
+.badge.warn {
+  background: color-mix(in oklab, var(--warn) 16%, transparent);
+  color: color-mix(in oklab, var(--warn) 85%, var(--t1));
+}
+
+.badge.bad {
+  background: color-mix(in oklab, var(--bad) 14%, transparent);
+  color: color-mix(in oklab, var(--bad) 85%, var(--t1));
+}
+
+.facts {
+  margin: 0;
+}
+
+.facts div {
+  display: grid;
+  grid-template-columns: 96px minmax(0, 1fr);
+  gap: 12px;
+  padding: 5px 0;
+}
+
+.facts dt {
+  color: var(--t3);
+  font-size: 12px;
+}
+
+.facts dd {
+  margin: 0;
+  overflow-wrap: anywhere;
+  color: var(--t1);
+  font-size: 12.5px;
+  user-select: text;
+  -webkit-user-select: text;
+}
+
+.facts dd.warn {
+  color: color-mix(in oklab, var(--warn) 85%, var(--t1));
+}
+
+.facts dd.bad {
+  color: color-mix(in oklab, var(--bad) 85%, var(--t1));
+}
+
+.facts dd.list {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  font-size: 11.5px;
+}
+
+.chips {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px;
+}
+
+.chip {
+  padding: 1px 7px;
+  border: 1px solid var(--ln);
+  border-radius: 6px;
+  background: var(--s2);
+  color: var(--t2);
+  font-size: 11px;
+}
+
+.chip.hold {
+  border-color: color-mix(in oklab, var(--bad) 40%, var(--ln));
+  color: color-mix(in oklab, var(--bad) 85%, var(--t1));
+}
+
+.lookup h4 {
+  margin: 6px 0 -4px;
+  color: var(--t3);
+  font-size: 10.5px;
+  font-weight: 600;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+}
+
+.facts dd.small {
+  font-size: 12px;
+}
+
+.aside {
+  display: block;
+  color: var(--t3);
+  font-size: 11px;
+}
+
+.link {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  color: var(--acc);
+  text-decoration: none;
+  overflow-wrap: anywhere;
+}
+
+.link:hover {
+  text-decoration: underline;
+}
+
+.link:focus-visible {
+  outline: 2px solid color-mix(in oklab, var(--acc) 55%, transparent);
+  outline-offset: 2px;
+  border-radius: 3px;
+}
+
+.ds {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+
+.digest {
+  color: var(--t3);
+  font-size: 10.5px;
+  word-break: break-all;
+}
+
+.glue {
+  display: block;
+  padding-left: 10px;
+  color: var(--t3);
+  font-size: 11px;
+}
+
+.sources {
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+  margin-top: 4px;
+}
+
+.sources p {
+  margin: 0;
+  color: var(--t3);
+  font-size: 11px;
+}
+
+.source-links {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px 12px;
+}

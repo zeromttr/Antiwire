@@ -1,0 +1,26 @@
+/* Session settings on the left; everything the capture produces on the right. */
+.workspace {
+  display: grid;
+  grid-template-columns: 300px minmax(0, 1fr);
+  gap: 16px;
+  /* Both columns take the taller one's height; the packet list absorbs the difference. */
+  align-items: stretch;
+}
+
+.live {
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 16px;
+}
+
+/* Was `:global(.telemetry)`: the telemetry panel is the column's last child. */
+.live > :last-child {
+  flex: 1;
+}
+
+@media (max-width: 980px) {
+  .workspace {
+    grid-template-columns: 1fr;
+  }
+}

@@ -1,0 +1,5 @@
+# dnsmasq blocklist fixture
+local=/ad.xyz.com/
+address=/blocked.example.com/0.0.0.0
+address=/*.google.com/
+server=/forwarded.example.com/#

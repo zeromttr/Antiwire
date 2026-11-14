@@ -1,0 +1,38 @@
+.app-avatar {
+  flex: none;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  font-weight: 600;
+  letter-spacing: 0;
+  line-height: 1;
+  overflow: hidden;
+  --tint: var(--app-tint, var(--t3));
+  background: color-mix(in oklab, var(--tint) 16%, transparent);
+  box-shadow: inset 0 0 0 1px color-mix(in oklab, var(--tint) 26%, transparent);
+  color: var(--tint);
+}
+
+:global([data-theme='light']) .app-avatar {
+  background: color-mix(in oklab, var(--tint) 18%, #fff);
+  color: color-mix(in oklab, var(--tint) 58%, #000);
+}
+
+.app-avatar.all {
+  background: transparent;
+  box-shadow: inset 0 0 0 1px var(--ln-strong);
+  color: var(--t3);
+}
+
+.app-avatar.has-icon {
+  background: transparent;
+  box-shadow: none;
+  color: transparent;
+}
+
+.app-avatar img {
+  width: 100%;
+  height: 100%;
+  object-fit: contain;
+  display: block;
+}

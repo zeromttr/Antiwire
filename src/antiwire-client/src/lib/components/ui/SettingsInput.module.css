@@ -1,0 +1,123 @@
+.settings-input {
+  width: 100%;
+  min-width: 0;
+  height: 32px;
+  padding: 0 11px;
+  border-radius: 8px;
+  border: 1px solid var(--ln-strong);
+  background: var(--well);
+  color: var(--t1);
+  font-size: 12px;
+  outline: none;
+  transition:
+    border-color var(--dur-fast) var(--ease-standard),
+    box-shadow var(--dur-fast) var(--ease-standard);
+  user-select: text;
+  -webkit-user-select: text;
+}
+
+.settings-input-number {
+  padding-right: 34px;
+  -moz-appearance: textfield;
+  appearance: textfield;
+}
+
+.settings-input-number::-webkit-inner-spin-button,
+.settings-input-number::-webkit-outer-spin-button {
+  -webkit-appearance: none;
+  margin: 0;
+}
+
+.settings-number-wrap {
+  position: relative;
+  width: 100%;
+  min-width: 0;
+}
+
+.steppers {
+  position: absolute;
+  top: 50%;
+  right: 5px;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  transform: translateY(-50%);
+  pointer-events: none;
+}
+
+.stepper-btn {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 24px;
+  height: 13px;
+  padding: 0;
+  border: none;
+  border-radius: 4px;
+  background: var(--hover);
+  color: var(--t3);
+  cursor: pointer;
+  pointer-events: auto;
+}
+
+.stepper-btn:hover:not(:disabled) {
+  background: color-mix(in oklab, var(--t1) 10%, transparent);
+  color: var(--t1);
+}
+
+.stepper-btn:active:not(:disabled) {
+  background: color-mix(in oklab, var(--t1) 14%, transparent);
+  color: var(--t1);
+}
+
+.stepper-btn:disabled {
+  opacity: 0.3;
+  cursor: default;
+}
+
+.settings-number-wrap.disabled .stepper-btn {
+  pointer-events: none;
+}
+
+.settings-input:-webkit-autofill,
+.settings-input:-webkit-autofill:hover,
+.settings-input:-webkit-autofill:focus {
+  -webkit-text-fill-color: var(--t1);
+  caret-color: var(--t1);
+  transition: background-color 99999s var(--ease-out);
+  -webkit-box-shadow: 0 0 0 1000px var(--well) inset;
+  box-shadow: 0 0 0 1000px var(--well) inset;
+}
+
+.settings-input::placeholder {
+  color: var(--t3);
+}
+
+.settings-input:disabled {
+  opacity: 0.55;
+  cursor: not-allowed;
+}
+
+.settings-input:focus {
+  border-color: color-mix(in oklab, var(--acc) 60%, transparent);
+  box-shadow: var(--focus-ring);
+}
+
+.settings-input.invalid {
+  border-color: color-mix(in oklab, var(--bad) 60%, transparent);
+}
+
+.settings-input.invalid:focus {
+  box-shadow: 0 0 0 3px color-mix(in oklab, var(--bad) 20%, transparent);
+}
+
+.settings-input:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .settings-input {
+    transition: none;
+  }
+}

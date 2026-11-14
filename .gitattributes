@@ -1,0 +1,5 @@
+# Auto detect text files and perform LF normalization
+* text=auto
+# Shell scripts run under bash on every runner, including Windows, where checkout would
+# otherwise convert them to CRLF. They also ship inside the release tarballs.
+*.sh text eol=lf

@@ -1,0 +1,71 @@
+.checkbox {
+  display: inline-grid;
+  place-items: center;
+  flex: none;
+  width: 16px;
+  height: 16px;
+  padding: 0;
+  border: 1.5px solid var(--ln-strong);
+  border-radius: 5px;
+  background: var(--ctl);
+  color: var(--on-acc);
+  cursor: pointer;
+  transition:
+    background-color var(--dur-fast) var(--ease-standard),
+    border-color var(--dur-fast) var(--ease-standard),
+    transform var(--dur-fast) var(--ease-out);
+}
+
+button.checkbox:hover:not(:disabled) {
+  border-color: color-mix(in oklab, var(--t1) 30%, transparent);
+}
+
+.checkbox.on {
+  background: var(--acc-fill);
+  border-color: var(--acc-fill);
+}
+
+button.checkbox:active:not(:disabled) {
+  transform: scale(0.9);
+}
+
+.mark {
+  display: grid;
+  place-items: center;
+  animation: mark-pop var(--dur-slow) var(--ease-pop) both;
+}
+
+@keyframes mark-pop {
+  from {
+    opacity: 0;
+    transform: scale(0.4);
+  }
+}
+
+.checkbox.round {
+  border-radius: 50%;
+}
+
+.pip {
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  background: var(--on-acc);
+}
+
+.checkbox:focus-visible {
+  outline: none;
+  box-shadow: var(--focus-ring);
+}
+
+.checkbox:disabled,
+.checkbox.disabled {
+  opacity: 0.45;
+  cursor: not-allowed;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .checkbox {
+    transition: none;
+  }
+}

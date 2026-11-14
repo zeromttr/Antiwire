@@ -1,0 +1,48 @@
+.status {
+  display: inline-flex;
+  align-items: center;
+  gap: 7px;
+  min-width: 0;
+  font-size: 12px;
+  font-weight: 500;
+  line-height: 1.2;
+  white-space: nowrap;
+  color: var(--tone);
+}
+
+.status.quiet {
+  color: var(--t2);
+}
+
+.dot {
+  flex: none;
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  background: var(--tone);
+  box-shadow: 0 0 0 3px color-mix(in oklab, var(--tone) 18%, transparent);
+}
+
+.text {
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.ok {
+  --tone: var(--ok);
+}
+.bad {
+  --tone: var(--bad);
+}
+.warn {
+  --tone: var(--warn);
+}
+.info {
+  --tone: var(--acc-sub);
+}
+.accent {
+  --tone: var(--acc);
+}
+.idle {
+  --tone: var(--t3);
+}

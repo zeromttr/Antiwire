@@ -1,0 +1,97 @@
+.body {
+  display: flex;
+  flex-direction: column;
+}
+
+.intro {
+  margin: 0 0 16px;
+  color: var(--t2);
+  font-size: 12.5px;
+  line-height: 1.55;
+}
+
+.device-details {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 12px 18px;
+  margin: 0 0 18px;
+  padding: 13px 14px;
+  border: 1px solid color-mix(in oklab, var(--t1) 7%, transparent);
+  border-radius: 10px;
+  background: var(--well-soft);
+}
+
+.device-details div {
+  min-width: 0;
+}
+
+.device-details dt {
+  margin-bottom: 4px;
+  color: var(--t3);
+  font-size: 11.5px;
+}
+
+.device-details dd {
+  overflow: hidden;
+  margin: 0;
+  color: var(--t1);
+  font-size: 10.5px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.interval-fieldset {
+  min-width: 0;
+  margin: 0;
+  padding: 0;
+  border: none;
+}
+
+.interval-fieldset legend {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  margin-bottom: 10px;
+  color: var(--t2);
+  font-size: 11px;
+  font-weight: 600;
+}
+
+.interval-grid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 8px;
+}
+
+.interval-grid .interval-option {
+  justify-content: space-between;
+  gap: 8px;
+  padding: 10px 12px;
+  font-size: 12.5px;
+}
+
+.interval-grid .interval-option:last-child {
+  grid-column: 1 / -1;
+}
+
+.interval-grid small {
+  color: var(--t3);
+  font-size: 11.5px;
+  white-space: nowrap;
+}
+
+.interval-fieldset:disabled {
+  cursor: default;
+  opacity: 0.55;
+}
+
+@media (max-width: 560px) {
+  .device-details,
+  .interval-grid {
+    grid-template-columns: 1fr;
+  }
+
+  .interval-grid .interval-option:last-child {
+    grid-column: auto;
+  }
+}

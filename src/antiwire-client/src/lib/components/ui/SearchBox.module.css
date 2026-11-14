@@ -1,0 +1,133 @@
+.search-box {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.search-box.field {
+  height: 30px;
+  padding: 0 8px 0 10px;
+  border-radius: 8px;
+  flex: 1;
+  min-width: 0;
+  max-width: 300px;
+  background: var(--well);
+  border: 1px solid var(--ln-strong);
+  transition:
+    border-color var(--dur-fast) var(--ease-standard),
+    box-shadow var(--dur-fast) var(--ease-standard);
+}
+
+/* Chips need room; the text part still shrinks before they do. */
+.search-box.field.has-prefix {
+  max-width: 440px;
+}
+
+.search-box.field:focus-within {
+  border-color: color-mix(in oklab, var(--acc) 60%, transparent);
+  box-shadow: var(--focus-ring);
+}
+
+.search-box.panel-header {
+  width: calc(100% + 2px);
+  margin: -1px -1px 0;
+  height: 38px;
+  padding: 0 12px;
+  flex: none;
+  border-radius: 12px 12px 0 0;
+  border: 1px solid transparent;
+  border-bottom: 1px solid var(--ln);
+  background: transparent;
+  position: relative;
+  z-index: 1;
+}
+
+.search-box.panel-header:focus-within {
+  border-bottom-color: color-mix(in oklab, var(--acc) 60%, var(--ln));
+}
+
+.search-box :global(.search-glyph) {
+  flex: none;
+  color: var(--t3);
+  transition: color var(--dur-fast) var(--ease-standard);
+}
+
+.search-box:focus-within :global(.search-glyph) {
+  color: var(--t2);
+}
+
+.search-input {
+  flex: 1;
+  min-width: 0;
+  background: none;
+  border: none;
+  outline: none;
+  color: var(--t1);
+  font-size: 12.5px;
+  user-select: text;
+  -webkit-user-select: text;
+}
+
+.search-input::placeholder {
+  color: var(--t3);
+}
+
+.clear,
+.disclosure {
+  flex: none;
+  display: grid;
+  place-items: center;
+  width: 20px;
+  height: 20px;
+  padding: 0;
+  border: 0;
+  border-radius: 5px;
+  background: transparent;
+  color: var(--t3);
+  cursor: pointer;
+}
+
+.disclosure {
+  width: 24px;
+  height: 24px;
+  margin-right: -4px;
+  border-radius: 6px;
+}
+
+/* A control that belongs to the field, set off from the text by a rule. */
+.suffix {
+  flex: none;
+  display: flex;
+  align-items: center;
+  margin-right: -4px;
+  padding-left: 4px;
+  border-left: 1px solid var(--ln);
+}
+
+.clear:hover,
+.disclosure:hover,
+.disclosure.open {
+  background: var(--hover);
+  color: var(--t1);
+}
+
+.disclosure :global(svg) {
+  transition: transform var(--dur-base) var(--ease-out);
+}
+
+.disclosure.open :global(svg) {
+  transform: rotate(180deg);
+}
+
+.clear:focus-visible,
+.disclosure:focus-visible {
+  outline: none;
+  box-shadow: var(--focus-ring);
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .search-box.field,
+  .disclosure :global(svg) {
+    transition: none;
+  }
+}

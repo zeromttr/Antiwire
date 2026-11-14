@@ -1,0 +1,39 @@
+.bar-spark {
+  display: flex;
+  align-items: flex-end;
+  flex: none;
+}
+
+.bar {
+  flex: 1 1 0;
+  min-width: 1px;
+  height: 100%;
+  border-radius: 1.5px 1.5px 0.5px 0.5px;
+  background: var(--bar-color);
+  opacity: 0.38;
+  transform-origin: bottom;
+  /* A floor keeps empty buckets visible as a tick on the baseline. */
+  transform: scaleY(max(var(--fraction), 0.05));
+}
+
+/*
+ * Each update shifts the history one slot left, so every bar changes. Only
+ * the newest bar grows in; the rest step, which reads as the chart advancing
+ * rather than every bar wobbling, and keeps one transition per update.
+ */
+.bar:last-child {
+  transition: transform var(--dur-data) var(--ease-out);
+  /* Its own layer: the compositor scales it without repainting the card. */
+  will-change: transform;
+}
+
+.bar-spark:not(.highlight) .bar,
+.highlight .bar:last-child {
+  opacity: 1;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .bar {
+    transition: none;
+  }
+}

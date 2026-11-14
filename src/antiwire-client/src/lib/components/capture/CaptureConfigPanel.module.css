@@ -1,0 +1,177 @@
+.configuration {
+  padding: 16px;
+  display: flex;
+  flex-direction: column;
+}
+
+/* Was `:global(.toggle-row)`: the ToggleRow root is this wrapper's only child. */
+.configuration .toggle-wrap > * {
+  padding: 14px 0 12px;
+}
+
+.panel-heading {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  margin-bottom: 4px;
+}
+
+.panel-heading h2 {
+  margin: 0;
+  font-size: 13px;
+  font-weight: 600;
+  color: var(--t1);
+}
+
+.form-section {
+  padding: 12px 0;
+  border-bottom: 1px solid var(--ln);
+}
+
+.form-section > label,
+.field-label,
+.field-heading > label,
+.limit-fields label {
+  display: block;
+  margin-bottom: 7px;
+  color: var(--t2);
+  font-size: 12px;
+  font-weight: 500;
+}
+
+.field-heading {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  margin-bottom: 7px;
+}
+
+.field-heading > label {
+  margin-bottom: 0;
+}
+
+.field-meta {
+  display: flex;
+  justify-content: space-between;
+  gap: 8px;
+  margin-top: 6px;
+  color: var(--t3);
+  font-size: 11.5px;
+}
+
+.field-meta span:last-child {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.help {
+  margin: 6px 0 0;
+  color: var(--t3);
+  font-size: 11.5px;
+  line-height: 1.45;
+}
+
+.limit {
+  margin-top: 4px;
+  padding-top: 12px;
+  border-top: 1px solid var(--ln);
+  display: flex;
+  flex-direction: column;
+  gap: 7px;
+}
+
+.limit-head {
+  display: flex;
+  justify-content: space-between;
+  font-size: 12px;
+  color: var(--t2);
+}
+
+.limit-value {
+  color: var(--t3);
+  font-family: var(--font-mono);
+  font-variant-numeric: tabular-nums;
+}
+
+.limit-track {
+  height: 4px;
+  border-radius: 2px;
+  background: var(--track);
+  overflow: hidden;
+}
+
+.limit-track span {
+  display: block;
+  height: 100%;
+  background: var(--acc);
+  border-radius: 2px;
+  transform-origin: left center;
+  transform: scaleX(var(--pct, 0));
+  transition: transform var(--dur-slow) var(--ease-standard);
+}
+
+.preset-grid {
+  display: grid;
+  grid-template-columns: repeat(3, 1fr);
+  gap: 5px;
+  margin-bottom: 7px;
+}
+
+.preset-grid .preset {
+  justify-content: center;
+  min-height: 30px;
+  padding: 0 6px;
+  border-radius: 8px;
+  font-size: 12px;
+  text-align: center;
+}
+
+.snap-grid {
+  display: grid;
+  grid-template-columns: repeat(3, 1fr);
+  gap: 5px;
+}
+
+.snap-grid .snap {
+  flex-direction: column;
+  justify-content: center;
+  gap: 3px;
+  min-height: 45px;
+  padding: 6px 4px;
+  text-align: center;
+}
+
+.snap-grid strong {
+  font-size: 12px;
+  font-weight: 500;
+}
+
+.snap-grid span {
+  color: var(--t3);
+  font-size: 11px;
+}
+
+.limit-fields {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 7px;
+}
+
+.spin {
+  display: inline-flex;
+  animation: rotate 0.8s linear infinite;
+}
+
+@keyframes rotate {
+  to {
+    transform: rotate(360deg);
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .limit-track span {
+    transition: none;
+  }
+}

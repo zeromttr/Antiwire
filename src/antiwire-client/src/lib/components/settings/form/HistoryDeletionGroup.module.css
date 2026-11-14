@@ -1,0 +1,58 @@
+/* Matches ToggleRow, with controls in place of the toggle. */
+.row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  flex-wrap: wrap;
+  gap: 12px 16px;
+  padding: 14px 0;
+  border-bottom: 1px solid var(--ln);
+}
+
+.row:last-child {
+  border-bottom: 0;
+}
+
+.row.invalid {
+  align-items: flex-start;
+}
+
+.text {
+  flex: 1 1 220px;
+  min-width: 0;
+}
+
+.label {
+  font-size: 13px;
+  font-weight: 500;
+  color: var(--t1);
+}
+
+.desc {
+  margin-top: 3px;
+  font-size: 12px;
+  line-height: 1.45;
+  color: var(--t3);
+}
+
+.error {
+  margin: 8px 0 0;
+  font-size: 12px;
+  color: var(--bad);
+}
+
+.controls {
+  flex: none;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+/* Was `:global(.settings-number-wrap)`: the number input's wrapper is the only child. */
+.amount > * {
+  width: 80px;
+}
+
+.unit {
+  width: 120px;
+}

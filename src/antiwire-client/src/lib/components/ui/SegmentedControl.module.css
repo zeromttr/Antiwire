@@ -1,0 +1,134 @@
+.segmented {
+  display: inline-flex;
+  align-items: center;
+  flex: none;
+  height: 30px;
+  padding: 2px;
+  border-radius: 8px;
+  background: var(--well);
+  border: 1px solid var(--ln);
+}
+
+:global([data-theme='light']) .segmented {
+  background: color-mix(in oklab, var(--t1) 5%, var(--bg));
+}
+
+.track {
+  position: relative;
+  display: flex;
+  gap: 2px;
+  align-items: stretch;
+  height: 24px;
+}
+
+.indicator {
+  position: absolute;
+  top: 0;
+  left: 0;
+  height: 100%;
+  border-radius: 6px;
+  --segment-tone: var(--t1);
+  background: var(--ctl);
+  box-shadow:
+    0 0 0 1px var(--ln-strong),
+    var(--sh-ctl);
+  opacity: 0;
+  z-index: 0;
+  pointer-events: none;
+}
+
+.indicator.glide {
+  /* Retargetable CSS transitions keep rapid clicks fluid instead of queuing moves. */
+  transition:
+    transform var(--dur-data) var(--ease-out),
+    width var(--dur-data) var(--ease-out);
+}
+
+.indicator.ready {
+  opacity: 1;
+}
+
+/* Toned options keep a hint of their meaning on the selected segment. */
+.indicator.ok {
+  box-shadow:
+    0 0 0 1px color-mix(in oklab, var(--ok) 40%, var(--ln-strong)),
+    var(--sh-ctl);
+}
+
+.indicator.bad {
+  box-shadow:
+    0 0 0 1px color-mix(in oklab, var(--bad) 40%, var(--ln-strong)),
+    var(--sh-ctl);
+}
+
+.chip {
+  position: relative;
+  z-index: 1;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 6px;
+  height: 24px;
+  min-width: 24px;
+  margin: 0;
+  padding: 0 10px;
+  border: none;
+  border-radius: 6px;
+  appearance: none;
+  cursor: pointer;
+  background: transparent;
+  color: var(--t2);
+  font-family: var(--font-sans);
+  transition: color var(--dur-fast) var(--ease-standard);
+}
+
+.label {
+  display: block;
+  font-size: 12px;
+  font-weight: 500;
+  line-height: 1;
+  white-space: nowrap;
+}
+
+.count {
+  color: var(--t3);
+  font-size: 11px;
+  font-variant-numeric: tabular-nums;
+  line-height: 1;
+}
+
+.segmented.disabled {
+  opacity: 0.5;
+}
+
+.chip:disabled {
+  cursor: not-allowed;
+}
+
+.chip:hover:not(.active):not(:disabled) {
+  color: var(--t1);
+}
+
+.chip:focus-visible {
+  outline: none;
+  box-shadow: var(--focus-ring);
+}
+
+.chip.active {
+  color: var(--t1);
+}
+
+.chip.active.on-ok {
+  color: var(--ok);
+}
+
+.chip.active.on-bad {
+  color: var(--bad);
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .indicator.glide,
+  .chip {
+    transition: none;
+  }
+}

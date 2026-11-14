@@ -1,0 +1,184 @@
+.picker {
+  position: relative;
+  min-width: 0;
+}
+
+.field {
+  width: 100%;
+  height: 30px;
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 0 7px 0 8px;
+  border: 1px solid var(--ln-strong);
+  border-radius: 7px;
+  background: var(--well);
+  color: var(--t1);
+  font-size: 11.5px;
+  font-weight: 500;
+  text-align: left;
+  cursor: pointer;
+  transition:
+    border-color var(--dur-base) var(--ease-standard),
+    background var(--dur-base) var(--ease-standard),
+    box-shadow var(--dur-base) var(--ease-standard);
+}
+
+.picker:not(.open) .field:hover {
+  border-color: color-mix(in oklab, var(--t1) 22%, transparent);
+  background: var(--well);
+}
+
+.picker.open .field {
+  border-color: color-mix(in oklab, var(--acc) 60%, transparent);
+  box-shadow: var(--focus-ring);
+}
+
+.picker.bare .field {
+  border-color: transparent;
+  background: transparent;
+  box-shadow: none;
+}
+
+.picker.bare:not(.open) .field:hover {
+  border-color: transparent;
+  background: var(--hover);
+}
+
+.picker.bare.open .field {
+  border-color: transparent;
+  background: var(--hover);
+  box-shadow: none;
+}
+
+.field:focus-visible {
+  outline: 2px solid var(--acc);
+  outline-offset: 2px;
+}
+
+.field :global(.glyph) {
+  flex: none;
+  color: var(--t3);
+  transition:
+    color var(--dur-base) var(--ease-standard),
+    transform var(--dur-slow) var(--ease-out);
+}
+
+.field:hover :global(.glyph),
+.picker.open .field :global(.glyph) {
+  color: var(--acc);
+}
+
+.picker.open .field :global(.glyph) {
+  transform: scale(1.08);
+}
+
+.value {
+  min-width: 0;
+  flex: 1;
+  overflow: hidden;
+}
+
+.value-text {
+  display: block;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  animation: valueIn var(--dur-base) var(--ease-out) both;
+}
+
+.field :global(.chevron) {
+  flex: none;
+  color: var(--t3);
+  transition:
+    transform var(--dur-slow) var(--ease-out),
+    color var(--dur-base) var(--ease-standard);
+}
+
+.picker.open .field :global(.chevron) {
+  color: var(--acc);
+  transform: rotate(180deg);
+}
+
+.panel {
+  position: absolute;
+  z-index: 30;
+  left: 0;
+  bottom: calc(100% + 8px);
+  padding: 10px;
+  border: 1px solid var(--ln-strong);
+  border-radius: 12px;
+  background: var(--pop);
+  box-shadow: var(--sh-pop);
+  backdrop-filter: blur(12px);
+  -webkit-backdrop-filter: blur(12px);
+  opacity: 0;
+  visibility: hidden;
+  pointer-events: none;
+  transform: translateY(6px) scale(0.97);
+  transform-origin: bottom left;
+  transition:
+    opacity var(--dur-base) var(--ease-standard),
+    transform var(--dur-base) var(--ease-out),
+    visibility 0s linear 200ms;
+}
+
+.panel.below {
+  bottom: auto;
+  top: calc(100% + 8px);
+  transform: translateY(-6px) scale(0.97);
+  transform-origin: top left;
+}
+
+.picker.open .panel {
+  opacity: 1;
+  visibility: visible;
+  pointer-events: auto;
+  transform: translateY(0) scale(1);
+  transition:
+    opacity var(--dur-base) var(--ease-standard),
+    transform var(--dur-slow) var(--ease-out),
+    visibility 0s;
+}
+
+.panel::after {
+  content: '';
+  position: absolute;
+  inset: auto 16px -1px;
+  height: 1px;
+  background: linear-gradient(
+    90deg,
+    transparent,
+    color-mix(in oklab, var(--acc) 55%, transparent),
+    transparent
+  );
+  opacity: 0;
+  transition: opacity var(--dur-slow) var(--ease-standard);
+}
+
+.panel.below::after {
+  inset: -1px 16px auto;
+}
+
+.picker.open .panel::after {
+  opacity: 1;
+}
+
+@keyframes valueIn {
+  from {
+    opacity: 0;
+    transform: translateY(5px);
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .field,
+  .field :global(.glyph),
+  .field :global(.chevron),
+  .value-text,
+  .panel,
+  .panel::after {
+    animation: none;
+    transition: none;
+  }
+}

@@ -1,0 +1,9 @@
+[Desktop Entry]
+Type=Application
+Name=Antiwire
+Comment=Network monitor and firewall
+Exec=/usr/bin/antiwire
+Icon=antiwire
+Terminal=false
+Categories=Network;Security;
+StartupWMClass=antiwire
