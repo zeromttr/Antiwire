@@ -274,7 +274,7 @@ jobs:
     timeout-minutes: 60
     steps:
       - name: Checkout
-        uses: actions/checkout@v7
+        uses: useblacksmith/checkout@v1
 
       - name: Install Rust
         uses: dtolnay/rust-toolchain@stable

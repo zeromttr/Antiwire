@@ -27,7 +27,7 @@ env:
 
 jobs:
   tag:
-    runs-on: ubuntu-latest
+    runs-on: blacksmith-4vcpu-ubuntu-2404
     timeout-minutes: 10
     permissions:
       # Pushes the nightly tag. A tag pushed with the workflow token does not start
@@ -45,7 +45,7 @@ jobs:
           exit 1
 
       - name: Checkout main
-        uses: actions/checkout@v7
+        uses: useblacksmith/checkout@v1
         with:
           ref: main
           fetch-depth: 0
@@ -94,7 +94,7 @@ jobs:
 
   prune:
     needs: release
-    runs-on: ubuntu-latest
+    runs-on: blacksmith-4vcpu-ubuntu-2404
     timeout-minutes: 10
     permissions:
       contents: write

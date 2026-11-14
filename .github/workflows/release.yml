@@ -66,7 +66,7 @@ jobs:
   # can read. This job and `publish` name it. The builds do not, so they are never handed the
   # signing key; they get the public key, which is not a secret, as this job's output.
   prepare:
-    runs-on: ubuntu-latest
+    runs-on: blacksmith-4vcpu-ubuntu-2404
     timeout-minutes: 10
     environment: release
     outputs:
@@ -75,7 +75,7 @@ jobs:
       public_key: ${{ vars.ANTIWIRE_UPDATE_PUBLIC_KEY }}
     steps:
       - name: Checkout
-        uses: actions/checkout@v7
+        uses: useblacksmith/checkout@v1
         with:
           ref: ${{ github.event_name == 'push' && github.ref || format('refs/tags/{0}', inputs.tag) }}
 
@@ -388,7 +388,7 @@ jobs:
       VERSION: ${{ needs.prepare.outputs.version }}
     steps:
       - name: Checkout
-        uses: actions/checkout@v7
+        uses: useblacksmith/checkout@v1
         with:
           ref: ${{ github.event_name == 'push' && github.ref || format('refs/tags/{0}', inputs.tag) }}
 
@@ -535,7 +535,7 @@ jobs:
 
   publish:
     needs: [prepare, windows, macos, linux]
-    runs-on: ubuntu-latest
+    runs-on: blacksmith-4vcpu-ubuntu-2404
     timeout-minutes: 15
     # For the signing key (see `prepare`).
     environment: release
@@ -546,7 +546,7 @@ jobs:
       VERSION: ${{ needs.prepare.outputs.version }}
     steps:
       - name: Checkout
-        uses: actions/checkout@v7
+        uses: useblacksmith/checkout@v1
         with:
           ref: ${{ github.event_name == 'push' && github.ref || format('refs/tags/{0}', inputs.tag) }}
 
@@ -652,7 +652,7 @@ jobs:
   channel-feed:
     needs: [prepare, publish]
     if: needs.prepare.outputs.channel != 'stable'
-    runs-on: ubuntu-latest
+    runs-on: blacksmith-4vcpu-ubuntu-2404
     timeout-minutes: 10
     concurrency:
       group: channel-feed-${{ needs.prepare.outputs.channel }}
@@ -665,7 +665,7 @@ jobs:
       GH_TOKEN: ${{ github.token }}
     steps:
       - name: Checkout
-        uses: actions/checkout@v7
+        uses: useblacksmith/checkout@v1
         with:
           ref: ${{ github.event_name == 'push' && github.ref || format('refs/tags/{0}', inputs.tag) }}
 
