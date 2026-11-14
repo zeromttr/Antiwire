@@ -1,0 +1,418 @@
+name: CI
+
+# One workflow for every product. `plan` maps the changed files to areas
+# (scripts/ci-plan.mjs), one `deny` job checks the dependency policy for those areas,
+# and only then do the jobs for the changed areas start. An area with no changes runs
+# nothing. Runners by event:
+#   pull request: Ubuntu and Windows   push to main: Ubuntu
+#   nightly: macOS, for areas changed on main in the last 25 hours
+#   weekly: Windows, for areas changed in the last 8 days (publishes its caches)
+#   dispatch: the `os` input; `scope` picks changed areas (vs main) or all of them.
+#     `windows-arm` and `linux-arm` run the Rust suites natively on ARM64 Windows and
+#     ARM64 Linux, and only when chosen: `all` and every other event leave them out.
+#     `elevated` runs the elevated tests, as an Administrator or root on the throwaway
+#     runner, instead of the usual jobs. Nothing else runs them.
+# Jobs run on Blacksmith machines (the `blacksmith-*` labels), which need the Blacksmith
+# GitHub App installed on this repository; without it a job waits in the queue. The Rust
+# and Bun archives go to Blacksmith's cache, which drops an entry only after seven days
+# unused. The Docker layers stay in GitHub's cache. The `windows-arm` leg is the exception:
+# Blacksmith has no ARM64 Windows machine, so it runs on GitHub's `windows-11-arm` and
+# reads GitHub's cache, where nothing publishes for it.
+on:
+  push:
+    branches: [main]
+    # Coarse filter so unrelated commits do not start a runner. The plan does the rest.
+    paths:
+      - "src/antiwire-rs/**"
+      - "src/antiwire-client/**"
+      - "scripts/**"
+      - "!scripts/update-hagezi-abused-tlds*"
+      - ".bun-version"
+      - ".github/workflows/ci.yml"
+      - ".github/workflows/packages.yml"
+      - "!**/*.md"
+  pull_request:
+    # Drafts skip CI (see the plan job `if`); marking a PR ready runs it.
+    types: [opened, synchronize, reopened, ready_for_review]
+    paths:
+      - "src/antiwire-rs/**"
+      - "src/antiwire-client/**"
+      - "scripts/**"
+      - "!scripts/update-hagezi-abused-tlds*"
+      - ".bun-version"
+      - ".github/workflows/ci.yml"
+      - ".github/workflows/packages.yml"
+      - "!**/*.md"
+  schedule:
+    # These strings must match NIGHTLY and WEEKLY in scripts/ci-plan.mjs.
+    - cron: "0 3 * * *"
+    - cron: "0 4 * * 0"
+  workflow_dispatch:
+    inputs:
+      os:
+        description: Which runners to use
+        type: choice
+        options: [all, ubuntu, windows, macos, windows-arm, linux-arm]
+        default: all
+      scope:
+        description: Areas changed on this branch since main, or every area
+        type: choice
+        options: [changed, all]
+        default: changed
+      elevated:
+        description: Run only the elevated tests (Administrator or root) instead of the usual jobs
+        type: boolean
+        default: false
+  # packages.yml runs every area on every runner before it builds.
+  workflow_call:
+    inputs:
+      os:
+        type: string
+        default: all
+      scope:
+        type: string
+        default: all
+
+permissions:
+  contents: read
+
+concurrency:
+  # A pull request's next commit replans against the whole PR, so its old run can go.
+  # A push plans only its own commits, so it must never be cancelled, or those changes
+  # go untested and their caches unsaved. A group holds one pending run and cancels the
+  # one before it, so each push gets its own group. The schedule keeps the two crons
+  # apart; github.workflow keeps a packages.yml call apart from a push to the same ref.
+  group: ci-${{ github.workflow }}-${{ github.event.schedule || github.event.pull_request.number || (github.event_name == 'push' && github.sha) || github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+env:
+  RUST_BACKTRACE: "1"
+  CARGO_PROFILE_DEV_DEBUG: "0"
+  CARGO_PROFILE_TEST_DEBUG: "0"
+
+jobs:
+  plan:
+    if: github.event.pull_request.draft != true
+    timeout-minutes: 5
+    runs-on: blacksmith-2vcpu-ubuntu-2404
+    outputs:
+      matrix: ${{ steps.plan.outputs.matrix }}
+      has_matrix: ${{ steps.plan.outputs.has_matrix }}
+      deny: ${{ steps.plan.outputs.deny }}
+      deny_rs: ${{ steps.plan.outputs.deny_rs }}
+      bun: ${{ steps.plan.outputs.bun }}
+      scripts: ${{ steps.plan.outputs.scripts }}
+      ebpf: ${{ steps.plan.outputs.ebpf }}
+      firew_live: ${{ steps.plan.outputs.firew_live }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v7
+        with:
+          # A pull request diffs its merge commit against the first parent. Other events
+          # compare against older history.
+          fetch-depth: ${{ github.event_name == 'pull_request' && 2 || 0 }}
+
+      - name: Plan
+        id: plan
+        run: node scripts/ci-plan.mjs
+        env:
+          EVENT_NAME: ${{ github.event_name }}
+          SCHEDULE: ${{ github.event.schedule }}
+          BEFORE: ${{ github.event.before }}
+          OS: ${{ inputs.os }}
+          SCOPE: ${{ inputs.scope }}
+          ELEVATED: ${{ inputs.elevated }}
+
+  # The single gate. Every other job waits for it and does not start if it fails. It is
+  # skipped, and does not block, when no Rust dependency graph is affected.
+  deny:
+    needs: plan
+    if: needs.plan.outputs.deny == 'true'
+    timeout-minutes: 10
+    runs-on: blacksmith-2vcpu-ubuntu-2404
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v7
+
+      - name: Install cargo-deny
+        uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-deny
+
+      # netmet-rs and firew-rs have no policy of their own; the daemon's applies to them.
+      # Its skips and license list are written for the daemon's graph, so the "not
+      # encountered" warnings they raise for the smaller graphs are silenced.
+      - name: cargo deny (antiwire-rs, netmet-rs, firew-rs)
+        if: needs.plan.outputs.deny_rs != ''
+        working-directory: src/antiwire-rs
+        env:
+          MANIFESTS: ${{ needs.plan.outputs.deny_rs }}
+        run: |
+          set -euo pipefail
+          for manifest in $MANIFESTS; do
+            echo "::group::cargo deny $manifest"
+            if [ "$manifest" = Cargo.toml ]; then
+              cargo deny --manifest-path "$manifest" check
+            else
+              cargo deny --manifest-path "$manifest" check \
+                -A unmatched-skip -A unmatched-skip-root -A unnecessary-skip \
+                -A license-not-encountered -A advisory-not-detected
+            fi
+            echo "::endgroup::"
+          done
+
+  rust:
+    name: ${{ matrix.name }}
+    needs: [plan, deny]
+    if: >-
+      !cancelled() &&
+      needs.plan.outputs.has_matrix == 'true' &&
+      (needs.deny.result == 'success' || needs.deny.result == 'skipped')
+    strategy:
+      fail-fast: false
+      matrix: ${{ fromJSON(needs.plan.outputs.matrix) }}
+    timeout-minutes: ${{ matrix.timeout }}
+    runs-on: ${{ matrix.runner }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v7
+
+      # Real-time scanning of every object file and linked test binary is a large share
+      # of Windows build time. The runner is a throwaway VM.
+      - name: Exclude builds from Defender scanning
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          try {
+            Set-MpPreference -DisableRealtimeMonitoring $true
+            Add-MpPreference -ExclusionPath $env:GITHUB_WORKSPACE, "$env:USERPROFILE\.cargo", "$env:USERPROFILE\.rustup"
+            "Defender real-time protection: $((Get-MpComputerStatus).RealTimeProtectionEnabled)"
+          } catch {
+            "Defender settings unchanged: $_"
+          }
+
+      # LLVM's linker, shipped with the toolchain, links the test binaries much faster
+      # than link.exe.
+      - name: Link with rust-lld
+        if: matrix.lld
+        shell: bash
+        run: echo "CARGO_TARGET_X86_64_PC_WINDOWS_MSVC_LINKER=rust-lld.exe" >> "$GITHUB_ENV"
+
+      # The ARM64 image does not promise rustup; install the native ARM64 build when missing.
+      - name: Install rustup (ARM64 Windows)
+        if: matrix.windows_arm
+        shell: pwsh
+        run: |
+          if (-not (Get-Command rustup -ErrorAction SilentlyContinue)) {
+            $init = Join-Path $env:RUNNER_TEMP 'rustup-init.exe'
+            Invoke-WebRequest https://static.rust-lang.org/rustup/dist/aarch64-pc-windows-msvc/rustup-init.exe -OutFile $init
+            & $init -y --profile minimal --default-toolchain none
+            if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+            Add-Content $env:GITHUB_PATH "$env:USERPROFILE\.cargo\bin"
+          }
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: 1.100.0
+
+      - name: Put LLVM on PATH (ARM64 Windows)
+        if: matrix.windows_arm
+        shell: pwsh
+        run: |
+          ./src/antiwire-rs/scripts/ci-windows-arm64-llvm.ps1
+          rustc -vV
+
+      - name: Rust build cache
+        uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: ${{ matrix.cache_workspace }}
+          # v4 drops archives saved before this repo's crates were included. An exact
+          # key is never overwritten, so the old prefix would keep restoring a cache
+          # that rebuilds every local crate.
+          prefix-key: v4
+          shared-key: ${{ matrix.cache_key }}
+          cache-workspace-crates: true
+          # Only main publishes. A save on any other ref can evict the shared archive.
+          # Scheduled runs check out main, so they publish too. Hand-run legs (ARM64,
+          # elevated) never do.
+          save-if: ${{ github.ref == 'refs/heads/main' && matrix.publish }}
+
+      # Do not apt-install bare `bpftool` on ubuntu-latest: it is a virtual package with
+      # no candidate on current Azure runner kernels. The ebpf job handles it.
+      - name: Install Linux build dependencies
+        if: matrix.apt != ''
+        env:
+          PACKAGES: ${{ matrix.apt }}
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends $PACKAGES
+
+      - name: Install macOS build dependencies
+        if: matrix.brew != ''
+        env:
+          PACKAGES: ${{ matrix.brew }}
+        run: brew install $PACKAGES
+
+      # A single test-profile build avoids recompiling dependencies that a dev-profile
+      # check cannot share with cargo test. In an elevated run this runs the elevated tests
+      # only; the Windows entrypoint reads the source tree from ANTIWIRE_SRC.
+      - name: Tests
+        shell: bash
+        working-directory: ${{ matrix.dir }}
+        env:
+          COMMAND: ${{ matrix.run }}
+          ANTIWIRE_SRC: ${{ github.workspace }}/src/antiwire-rs
+        run: bash -c "$COMMAND"
+
+  # The Linux firew-rs elevated tests, in the privileged image. Only an elevated dispatch runs it.
+  firew-live:
+    name: firew-rs elevated (Linux, NET_ADMIN)
+    needs: [plan, deny]
+    if: >-
+      !cancelled() &&
+      needs.plan.outputs.firew_live == 'true' &&
+      (needs.deny.result == 'success' || needs.deny.result == 'skipped')
+    timeout-minutes: 30
+    runs-on: blacksmith-4vcpu-ubuntu-2404
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v7
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v4
+
+      - name: Build Linux live-test image
+        uses: docker/build-push-action@v7
+        with:
+          context: src/antiwire-rs
+          file: src/antiwire-rs/docker/linux-test.Dockerfile
+          load: true
+          tags: antiwire-rs-linux-test:latest
+          build-args: |
+            PRECOMPILE=live
+          # The scope is shared by every branch. mode=min caches final layers only —
+          # mode=max hit ENOSPC on export. Only main publishes a new index.
+          cache-from: type=gha,scope=antiwire-rs-linux-test
+          cache-to: ${{ github.ref == 'refs/heads/main' && 'type=gha,mode=min,scope=antiwire-rs-linux-test' || '' }}
+
+      - name: Run live tests in container
+        run: docker run --rm --cap-add=NET_ADMIN -e RUST_BACKTRACE=1 antiwire-rs-linux-test:latest live
+
+  # cargo test does not load these objects; the Linux collector finds them at runtime.
+  ebpf:
+    name: netmet-rs eBPF objects
+    needs: [plan, deny]
+    if: >-
+      !cancelled() &&
+      needs.plan.outputs.ebpf == 'true' &&
+      (needs.deny.result == 'success' || needs.deny.result == 'skipped')
+    timeout-minutes: 10
+    runs-on: blacksmith-2vcpu-ubuntu-2404
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v7
+
+      - name: Install eBPF build dependencies
+        run: bash src/antiwire-rs/scripts/ci-install-ebpf-deps.sh
+
+      - name: Build Linux eBPF telemetry object
+        run: sh ./build.sh
+        working-directory: src/antiwire-rs/packages/netmet-rs/crates/netmetrics-linux/ebpf
+
+      - name: Upload eBPF object
+        uses: actions/upload-artifact@v7
+        with:
+          name: netmetrics-ebpf-x86_64
+          path: |
+            src/antiwire-rs/packages/netmet-rs/crates/netmetrics-linux/ebpf/netmetrics.bpf.o
+            src/antiwire-rs/packages/netmet-rs/crates/netmetrics-linux/ebpf/dns_filter.bpf.o
+          if-no-files-found: error
+
+  bun:
+    name: client Bun
+    needs: [plan, deny]
+    if: >-
+      !cancelled() &&
+      needs.plan.outputs.bun == 'true' &&
+      (needs.deny.result == 'success' || needs.deny.result == 'skipped')
+    timeout-minutes: 15
+    runs-on: blacksmith-4vcpu-ubuntu-2404
+    defaults:
+      run:
+        working-directory: src/antiwire-client
+    env:
+      # Checks, tests and the bundle need no Electron binary; packaging fetches it.
+      ELECTRON_SKIP_BINARY_DOWNLOAD: "1"
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v7
+
+      - name: Install Bun
+        uses: oven-sh/setup-bun@v2
+        with:
+          # One Bun for CI and developers; `bun check` and `bun fmt` need 1.4 or newer.
+          bun-version-file: .bun-version
+
+      - name: Restore Bun packages
+        id: bun-cache
+        uses: actions/cache/restore@v6
+        with:
+          path: |
+            ~/.bun/install/cache
+            src/antiwire-client/node_modules
+          key: ${{ runner.os }}-bun-${{ hashFiles('src/antiwire-client/bun.lock') }}
+          restore-keys: |
+            ${{ runner.os }}-bun-
+
+      - name: Install frontend dependencies
+        run: bun install --frozen-lockfile
+
+      # Only main publishes. A pull request restore already reads that copy, and
+      # saving again would store a duplicate on refs/pull/N/merge.
+      - name: Save Bun packages
+        if: github.ref == 'refs/heads/main' && steps.bun-cache.outputs.cache-hit != 'true'
+        continue-on-error: true
+        uses: actions/cache/save@v6
+        with:
+          path: |
+            ~/.bun/install/cache
+            src/antiwire-client/node_modules
+          key: ${{ runner.os }}-bun-${{ hashFiles('src/antiwire-client/bun.lock') }}
+
+      - name: Type and lint checks
+        run: bun run check
+
+      - name: Unit tests
+        run: bun run test
+
+      - name: Build frontend
+        run: bun run build
+
+  # The product version is written in three places; a release is cut from a tag that
+  # must match all of them (see release.yml).
+  scripts:
+    name: Version consistency and script tests
+    needs: [plan, deny]
+    if: >-
+      !cancelled() &&
+      needs.plan.outputs.scripts == 'true' &&
+      (needs.deny.result == 'success' || needs.deny.result == 'skipped')
+    timeout-minutes: 5
+    runs-on: blacksmith-2vcpu-ubuntu-2404
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v7
+
+      - name: Version consistency
+        run: node scripts/check-versions.mjs
+
+      - name: Install Bun
+        uses: oven-sh/setup-bun@v2
+        with:
+          # One Bun for CI and developers; `bun check` and `bun fmt` need 1.4 or newer.
+          bun-version-file: .bun-version
+
+      # The whole directory, so a new test file cannot be left out.
+      - name: Script tests
+        run: bun test ./scripts

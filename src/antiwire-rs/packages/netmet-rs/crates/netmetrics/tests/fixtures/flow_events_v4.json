@@ -1,0 +1,12 @@
+[
+  {
+    "event": "finishing",
+    "data": {
+      "protocol": "tcp",
+      "local_addr": "192.0.2.10",
+      "local_port": 50000,
+      "remote_addr": "198.51.100.20",
+      "remote_port": 443
+    }
+  }
+]

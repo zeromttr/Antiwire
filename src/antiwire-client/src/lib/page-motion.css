@@ -1,0 +1,97 @@
+/* Page changes.
+ *
+ * Where the View Transitions API exists (every webview Antiwire ships in), the
+ * layout snapshots the page area only: the outgoing page drifts away and fades
+ * while the incoming one slides in from the side the user is heading towards
+ * along the tab bar. The title bar and footer stay perfectly still.
+ *
+ * Without the API, pages fall back to a short rise-and-fade on arrival.
+ * Stage hooks stagger a page's major sections; they belong on stable sections,
+ * never live rows or telemetry values. Only opacity and transform animate. */
+
+:root {
+  /* Kept for components that still reference it. */
+  --motion-settle: var(--ease-out);
+  --nav-dir: 0;
+}
+
+::view-transition-old(root),
+::view-transition-new(root) {
+  animation: none;
+}
+
+::view-transition-group(page) {
+  animation-duration: var(--dur-slow);
+  animation-timing-function: var(--ease-out);
+}
+
+::view-transition-old(page) {
+  animation: page-out var(--dur-exit) var(--ease-in) both;
+  mix-blend-mode: normal;
+}
+
+::view-transition-new(page) {
+  animation: page-in var(--dur-slow) var(--ease-out) both;
+  mix-blend-mode: normal;
+}
+
+@keyframes page-out {
+  to {
+    opacity: 0;
+    transform: translate3d(calc(var(--nav-dir) * -16px), 0, 0);
+  }
+}
+
+@keyframes page-in {
+  from {
+    opacity: 0;
+    /* Sideways when moving between tabs; a small rise otherwise. */
+    transform: translate3d(
+      calc(var(--nav-dir) * 28px),
+      calc((1 - var(--nav-dir) * var(--nav-dir)) * 6px),
+      0
+    );
+  }
+}
+
+@media (prefers-reduced-motion: no-preference) {
+  html:not(.has-view-transitions) [data-page-motion] {
+    animation: page-rise var(--dur-slow) var(--ease-out) backwards;
+  }
+
+  [data-page-motion] [data-motion-stage] {
+    animation: section-rise var(--dur-slow) var(--ease-out) var(--stage-delay, 0ms) backwards;
+  }
+
+  [data-motion-stage='1'] {
+    --stage-delay: 40ms;
+  }
+  [data-motion-stage='2'] {
+    --stage-delay: 80ms;
+  }
+  [data-motion-stage='3'] {
+    --stage-delay: 120ms;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  ::view-transition-group(page),
+  ::view-transition-old(page),
+  ::view-transition-new(page) {
+    animation: none;
+  }
+}
+
+@keyframes page-rise {
+  from {
+    opacity: 0;
+    transform: translate3d(0, 6px, 0);
+  }
+}
+
+@keyframes section-rise {
+  from {
+    opacity: 0;
+    transform: translate3d(0, 8px, 0);
+  }
+}

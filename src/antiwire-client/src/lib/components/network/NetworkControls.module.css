@@ -1,0 +1,187 @@
+.scan-head {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  min-height: 40px;
+}
+
+.scan-head h1 {
+  margin: 0;
+  font-size: 18px;
+  font-weight: 600;
+  letter-spacing: -0.02em;
+  color: var(--t1);
+}
+
+.scan-head .live :global(.dot) {
+  animation: live-pulse 1.8s var(--ease-in-out) infinite;
+}
+
+.copy {
+  flex: 1;
+  min-width: 0;
+  margin: 0;
+  color: var(--t3);
+  font-size: 12.5px;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.actions {
+  flex: none;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.networks {
+  padding: 16px;
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+}
+
+.networks-head {
+  display: flex;
+  align-items: baseline;
+  gap: 10px;
+}
+
+.networks h2 {
+  margin: 0;
+  font-size: 13px;
+  font-weight: 600;
+  color: var(--t1);
+}
+
+.hint {
+  color: var(--t3);
+  font-size: 12px;
+}
+
+.range-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(340px, 1fr));
+  gap: 10px;
+}
+
+.range-grid .range {
+  min-height: 52px;
+  padding: 8px 12px;
+  color: var(--t1);
+}
+
+.class-tag {
+  flex: none;
+  display: inline-flex;
+  align-items: center;
+  height: 19px;
+  padding: 0 6px;
+  border-radius: 5px;
+  border: 1px solid var(--ln);
+  background: color-mix(in oklab, var(--t1) 5%, transparent);
+  color: var(--t2);
+  font-size: 11px;
+  font-weight: 500;
+  white-space: nowrap;
+}
+
+.range-copy {
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 1px;
+}
+
+.range-name {
+  font-size: 13px;
+  font-weight: 500;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.range-cidr {
+  color: var(--t3);
+  font-family: var(--font-mono);
+  font-size: 11.5px;
+}
+
+.range-help {
+  margin-left: auto;
+  min-width: 0;
+  color: var(--t3);
+  font-size: 12px;
+  text-align: right;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.custom {
+  min-width: 0;
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  min-height: 52px;
+  padding: 0 12px;
+  border: 1px dashed var(--ln-strong);
+  border-radius: 10px;
+  color: var(--t3);
+  cursor: text;
+  transition:
+    border-color var(--dur-fast) var(--ease-standard),
+    box-shadow var(--dur-fast) var(--ease-standard);
+}
+
+.custom.filled {
+  border-style: solid;
+  background: var(--well);
+}
+
+.custom:focus-within {
+  border-style: solid;
+  border-color: color-mix(in oklab, var(--acc) 60%, transparent);
+  box-shadow: var(--focus-ring);
+}
+
+.custom input {
+  flex: 1;
+  min-width: 0;
+  border: 0;
+  outline: none;
+  background: transparent;
+  color: var(--t1);
+  font-family: var(--font-mono);
+  font-size: 12px;
+  user-select: text;
+  -webkit-user-select: text;
+}
+
+.custom input::placeholder {
+  color: var(--t3);
+  font-family: var(--font-sans);
+  font-size: 12.5px;
+}
+
+.message {
+  margin: 0;
+  color: var(--t2);
+  font-size: 12px;
+}
+
+@keyframes live-pulse {
+  50% {
+    opacity: 0.35;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .scan-head .live :global(.dot) {
+    animation: none;
+  }
+  .custom {
+    transition: none;
+  }
+}

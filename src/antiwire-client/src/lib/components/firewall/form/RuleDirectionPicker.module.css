@@ -1,0 +1,110 @@
+.direction-picker {
+  display: inline-flex;
+  align-self: flex-start;
+  gap: 2px;
+  padding: 2px;
+  border-radius: 7px;
+  background: var(--well);
+  border: 1px solid var(--ln);
+}
+
+.dir-chip {
+  width: 26px;
+  height: 22px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  border: none;
+  border-radius: 5px;
+  cursor: pointer;
+  background: transparent;
+  color: var(--t3);
+  transition:
+    color var(--dur-fast) var(--ease-standard),
+    background-color var(--dur-fast) var(--ease-standard);
+}
+
+.dir-chip:hover:not(:disabled) {
+  color: var(--t1);
+}
+
+.dir-chip:focus-visible {
+  outline: none;
+  box-shadow: var(--focus-ring);
+}
+
+.dir-chip.active {
+  background: var(--ctl);
+  color: var(--t1);
+  box-shadow:
+    0 0 0 1px var(--ln-strong),
+    var(--sh-ctl);
+}
+
+.dir-chip.active {
+  color: var(--acc);
+}
+
+.dir-chip:disabled {
+  opacity: 0.45;
+  cursor: not-allowed;
+}
+
+.tip {
+  position: fixed;
+  left: 0;
+  top: 0;
+  z-index: 220;
+  transform: translate3d(var(--tip-x, 0px), var(--tip-y, 0px), 0) translate(-50%, -100%);
+  pointer-events: none;
+  padding: 8px 11px;
+  border-radius: 8px;
+  border: 1px solid var(--ln-strong);
+  background: var(--pop);
+  max-width: min(280px, calc(100vw - 16px));
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+  animation: tipIn var(--dur-fast) var(--ease-out) both;
+}
+
+.tip.below {
+  transform: translate3d(var(--tip-x, 0px), var(--tip-y, 0px), 0) translate(-50%, 0);
+  animation-name: tipInBelow;
+}
+
+.tip-label {
+  font-size: 12px;
+  font-weight: 500;
+  color: var(--acc);
+}
+
+.tip-text {
+  font-size: 12px;
+  line-height: 1.45;
+  color: var(--t2);
+  white-space: normal;
+}
+
+@keyframes tipIn {
+  from {
+    opacity: 0;
+    transform: translate3d(var(--tip-x, 0px), var(--tip-y, 0px), 0)
+      translate(-50%, calc(-100% + 4px));
+  }
+  to {
+    opacity: 1;
+    transform: translate3d(var(--tip-x, 0px), var(--tip-y, 0px), 0) translate(-50%, -100%);
+  }
+}
+
+@keyframes tipInBelow {
+  from {
+    opacity: 0;
+    transform: translate3d(var(--tip-x, 0px), var(--tip-y, 0px), 0) translate(-50%, -4px);
+  }
+  to {
+    opacity: 1;
+    transform: translate3d(var(--tip-x, 0px), var(--tip-y, 0px), 0) translate(-50%, 0);
+  }
+}

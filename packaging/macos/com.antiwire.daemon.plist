@@ -1,0 +1,30 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+	<key>Label</key>
+	<string>com.antiwire.daemon</string>
+	<key>ProgramArguments</key>
+	<array>
+		<string>/usr/local/libexec/antiwire-daemon</string>
+		<string>--data-dir</string>
+		<string>/var/lib/antiwire</string>
+	</array>
+	<key>RunAtLoad</key>
+	<true/>
+	<key>KeepAlive</key>
+	<true/>
+	<!-- launchd sends SIGKILL 20s after SIGTERM by default. The daemon's clean stop
+	     (the reverts and the drain together within SHUTDOWN_DRAIN_TIMEOUT 15s, then
+	     up to PROCESS_EXIT_BLOCKING_TIMEOUT 5s for blocking work) can use all of
+	     that, and a kill mid-revert leaves DNS pointed at a dead resolver. -->
+	<key>ExitTimeOut</key>
+	<integer>60</integer>
+	<key>ProcessType</key>
+	<string>Interactive</string>
+	<key>StandardOutPath</key>
+	<string>/var/log/antiwire-daemon.log</string>
+	<key>StandardErrorPath</key>
+	<string>/var/log/antiwire-daemon.log</string>
+</dict>
+</plist>

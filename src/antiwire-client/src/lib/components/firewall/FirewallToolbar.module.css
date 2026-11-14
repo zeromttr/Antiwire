@@ -1,0 +1,13 @@
+.filter-row {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  flex-wrap: wrap;
+  flex: none;
+}
+.count {
+  margin-left: auto;
+  color: var(--t3);
+  font-size: 12px;
+  font-variant-numeric: tabular-nums;
+}

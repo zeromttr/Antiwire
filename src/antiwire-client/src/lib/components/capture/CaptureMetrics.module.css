@@ -1,0 +1,25 @@
+.metrics {
+  display: grid;
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+}
+
+/* Was `:global(.stat-cell + .stat-cell)`: every child is a StatCell. */
+.metrics > * + * {
+  border-left: 1px solid var(--ln);
+}
+
+.warn {
+  color: var(--warn);
+}
+
+@media (max-width: 980px) {
+  .metrics {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+  .metrics > :nth-child(3) {
+    border-left: 0;
+  }
+  .metrics > :nth-child(n + 3) {
+    border-top: 1px solid var(--ln);
+  }
+}

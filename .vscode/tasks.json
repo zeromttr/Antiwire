@@ -1,0 +1,28 @@
+{
+    "version": "2.0.0",
+    "tasks": [
+        {
+            "label": "build_daemon_debug",
+            "detail": "cargo build -p antiwire-daemon (the reaper runs from this same binary)",
+            "type": "process",
+            "command": "cargo",
+            "args": ["build", "-p", "antiwire-daemon"],
+            "options": {
+                "cwd": "${workspaceFolder}/src/antiwire-rs"
+            },
+            "problemMatcher": "$rustc",
+            "group": "build"
+        },
+        {
+            "label": "client_paraglide",
+            "detail": "Compile the client's i18n messages, which electron-vite dev expects to exist",
+            "type": "process",
+            "command": "bun",
+            "args": ["run", "paraglide"],
+            "options": {
+                "cwd": "${workspaceFolder}/src/antiwire-client"
+            },
+            "problemMatcher": []
+        }
+    ]
+}

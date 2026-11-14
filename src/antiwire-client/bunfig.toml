@@ -1,0 +1,7 @@
+[test]
+root = "."
+preload = ["./src/lib/i18n/preload-test.ts"]
+
+[fmt]
+singleQuote = true
+printWidth = 100

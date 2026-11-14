@@ -1,0 +1,37 @@
+.notice {
+  display: flex;
+  gap: 12px;
+  align-items: flex-start;
+  padding: 12px 14px;
+  margin-bottom: 14px;
+  border: 1px solid color-mix(in oklab, var(--warn) 30%, transparent);
+  background: color-mix(in oklab, var(--warn) 8%, transparent);
+  border-radius: 10px;
+}
+
+.dot {
+  width: 6px;
+  height: 6px;
+  margin-top: 6px;
+  flex: none;
+  border-radius: 50%;
+  background: var(--warn);
+  box-shadow: 0 0 0 3px color-mix(in oklab, var(--warn) 20%, transparent);
+}
+
+.body {
+  min-width: 0;
+}
+
+.title {
+  font-size: 13px;
+  font-weight: 500;
+  color: var(--t1);
+}
+
+.detail {
+  margin-top: 2px;
+  font-size: 12.5px;
+  line-height: 1.5;
+  color: var(--t2);
+}

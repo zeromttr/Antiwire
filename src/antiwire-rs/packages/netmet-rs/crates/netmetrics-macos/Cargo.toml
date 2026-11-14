@@ -1,0 +1,23 @@
+[package]
+name = "netmetrics-macos"
+description = "macOS PKTAP backend for netmetrics"
+version.workspace = true
+edition = "2024"
+license.workspace = true
+rust-version.workspace = true
+
+[dependencies]
+netmetrics-core.workspace = true
+netmetrics-sys.workspace = true
+
+[target.'cfg(target_os = "macos")'.dependencies]
+libc = "0.2"
+netstat2 = "0.11"
+
+[dev-dependencies]
+netmetrics-core = { workspace = true, features = ["test-support"] }
+proptest.workspace = true
+
+[lints]
+workspace = true
+

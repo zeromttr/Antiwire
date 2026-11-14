@@ -1,0 +1,103 @@
+.wrap {
+  position: relative;
+}
+
+.trigger .chevron {
+  color: var(--t3);
+  transition: transform var(--dur-fast) var(--ease-out);
+}
+
+.trigger .chevron.open {
+  transform: rotate(180deg);
+}
+
+.menu {
+  position: fixed;
+  /* Above the records table (a transformed layer inside the page). Toasts
+     sit at 100 and dialogs at 200, so this stays under those. */
+  z-index: 80;
+  display: flex;
+  flex-direction: column;
+  gap: 1px;
+  width: 280px;
+  max-width: calc(100vw - 24px);
+  padding: 5px;
+  overflow-y: auto;
+  overscroll-behavior: contain;
+  border: 1px solid var(--ln-strong);
+  border-radius: 11px;
+  background: var(--pop);
+  box-shadow: var(--sh-pop);
+  backdrop-filter: blur(12px);
+  -webkit-backdrop-filter: blur(12px);
+}
+
+.caption {
+  margin: 0;
+  padding: 5px 8px 7px;
+  overflow: hidden;
+  color: var(--t3);
+  font-size: 11.5px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.item {
+  display: flex;
+  flex: none;
+  align-items: center;
+  gap: 10px;
+  width: 100%;
+  padding: 7px 8px;
+  border: none;
+  border-radius: 7px;
+  background: transparent;
+  color: var(--t1);
+  font: inherit;
+  text-align: left;
+  cursor: pointer;
+  transition: background var(--dur-fast) var(--ease-out);
+}
+
+.text {
+  display: flex;
+  flex: 1;
+  flex-direction: column;
+  gap: 1px;
+  min-width: 0;
+}
+
+.name {
+  font-size: 12.5px;
+  font-weight: 600;
+}
+
+.desc {
+  overflow: hidden;
+  color: var(--t3);
+  font-size: 11.5px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.item :global(svg) {
+  flex: none;
+  color: var(--t3);
+  opacity: 0;
+  transition: opacity var(--dur-fast) var(--ease-out);
+}
+
+.item:hover,
+.item:focus-visible {
+  background: var(--hover);
+  outline: none;
+}
+
+.item:hover :global(svg),
+.item:focus-visible :global(svg) {
+  opacity: 1;
+}
+
+.item:focus-visible {
+  box-shadow: inset 0 0 0 2px color-mix(in oklab, var(--acc) 55%, transparent);
+}

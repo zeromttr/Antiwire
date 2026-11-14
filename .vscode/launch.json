@@ -1,0 +1,176 @@
+{
+    // Rust configs use CodeLLDB (vadimcn.vscode-lldb). The client configs use VS Code's
+    // built-in JavaScript debugger.
+    //
+    // Antiwire enforces nothing without Administrator/root (see AGENTS.md). The "Debug ..."
+    // Rust configs run with VS Code's own rights, so start VS Code elevated to debug real
+    // enforcement, DNS redirection, or a reaper/heal revert.
+    "version": "0.2.0",
+    "configurations": [
+        // ---------------------------------------------------------------- Client
+        {
+            "name": "Client: Electron main",
+            "type": "node",
+            "request": "launch",
+            "preLaunchTask": "client_paraglide",
+            "cwd": "${workspaceFolder}/src/antiwire-client",
+            "program": "${workspaceFolder}/src/antiwire-client/node_modules/electron-vite/bin/electron-vite.js",
+            "args": ["dev", "--sourcemap"],
+            "env": {
+                // Lets the renderer config below attach to the window's DevTools target.
+                "REMOTE_DEBUGGING_PORT": "9222",
+                // Inherited from Electron-based hosts; Electron would start as plain Node.
+                "ELECTRON_RUN_AS_NODE": null
+            },
+            // electron-vite spawns Electron; this attaches the debugger to its main process.
+            "autoAttachChildProcesses": true,
+            "outFiles": ["${workspaceFolder}/src/antiwire-client/out/**/*.js"],
+            "skipFiles": ["<node_internals>/**"],
+            "console": "integratedTerminal"
+        },
+        {
+            "name": "Client: Electron renderer",
+            "type": "chrome",
+            "request": "attach",
+            "port": 9222,
+            "webRoot": "${workspaceFolder}/src/antiwire-client",
+            "timeout": 60000,
+            "presentation": { "hidden": true }
+        },
+        {
+            "name": "Client: browser preview (no daemon)",
+            "type": "node-terminal",
+            "request": "launch",
+            "cwd": "${workspaceFolder}/src/antiwire-client",
+            "command": "bun run dev:web"
+        },
+
+        // ---------------------------------------------------------------- Daemon
+        {
+            // Starts and serves the client, but enforces nothing and reports zero bytes.
+            "name": "Daemon: run (not elevated)",
+            "type": "node-terminal",
+            "request": "launch",
+            "preLaunchTask": "build_daemon_debug",
+            "cwd": "${workspaceFolder}/src/antiwire-rs",
+            "command": "./target/debug/antiwire-daemon --foreground",
+            "windows": {
+                "command": "target\\debug\\antiwire-daemon.exe --no-service --foreground"
+            }
+        },
+        {
+            "name": "Daemon: run elevated",
+            "type": "node-terminal",
+            "request": "launch",
+            "preLaunchTask": "build_daemon_debug",
+            "cwd": "${workspaceFolder}/src/antiwire-rs",
+            // Unix hosts prompt for the current user's password in the integrated terminal.
+            "command": "sudo ./target/debug/antiwire-daemon --foreground",
+            "windows": {
+                // Windows 11 sudo. In this machine's Force New Window mode the daemon logs to its
+                // own elevated console; in Inline mode it logs here in the terminal.
+                "command": "sudo target\\debug\\antiwire-daemon.exe --no-service --foreground"
+            }
+        },
+        {
+            "name": "Daemon: debug (run VS Code elevated)",
+            "type": "lldb",
+            "request": "launch",
+            "preLaunchTask": "build_daemon_debug",
+            "program": "${workspaceFolder}/src/antiwire-rs/target/debug/antiwire-daemon",
+            "windows": {
+                "program": "${workspaceFolder}/src/antiwire-rs/target/debug/antiwire-daemon.exe"
+            },
+            // --foreground keeps the daemon in this debug session instead of re-spawning detached.
+            "args": ["--no-service", "--foreground"],
+            "cwd": "${workspaceFolder}/src/antiwire-rs",
+            "env": { "RUST_LOG": "info" },
+            "sourceLanguages": ["rust"]
+        },
+
+        // ---------------------------------------------------------------- Reaper / heal
+        {
+            // Runs the reaper the way the daemon spawns it: it waits for the chosen pid to exit,
+            // then reverts DNS, the port-53 divert and non-persistent firewall rules from the
+            // data dir. Pick a daemon you started, or any throwaway process to trigger a revert
+            // on demand. It does nothing while another daemon holds the single-instance lock.
+            "name": "Reaper: debug, watching a pid",
+            "type": "lldb",
+            "request": "launch",
+            "preLaunchTask": "build_daemon_debug",
+            "program": "${workspaceFolder}/src/antiwire-rs/target/debug/antiwire-daemon",
+            "windows": {
+                "program": "${workspaceFolder}/src/antiwire-rs/target/debug/antiwire-daemon.exe"
+            },
+            // A debug build uses the same default data dir as the debug daemon; add
+            // "--data-dir", "<dir>" if that daemon was started with one.
+            "args": ["--reap-parent", "${input:reapParentPid}"],
+            "cwd": "${workspaceFolder}/src/antiwire-rs",
+            "env": { "RUST_LOG": "debug" },
+            "sourceLanguages": ["rust"]
+        },
+        {
+            // Attaches to the reaper a running daemon spawned (shown as antiwire-reaper). It
+            // blocks until the daemon exits, so attach, set breakpoints in host_reaper.rs or
+            // antiwire_runtime::revert_orphaned_host_state, then stop the daemon.
+            "name": "Reaper: attach to running antiwire-reaper",
+            "type": "lldb",
+            "request": "attach",
+            "pid": "${command:pickProcess}",
+            "sourceLanguages": ["rust"]
+        },
+        {
+            // The ONSTART heal task's mode: restore dirty DNS from the store and exit. Windows only.
+            "name": "Heal: debug --heal-host-state",
+            "type": "lldb",
+            "request": "launch",
+            "preLaunchTask": "build_daemon_debug",
+            "program": "${workspaceFolder}/src/antiwire-rs/target/debug/antiwire-daemon.exe",
+            "args": ["--heal-host-state"],
+            "cwd": "${workspaceFolder}/src/antiwire-rs",
+            "env": { "RUST_LOG": "debug" },
+            "sourceLanguages": ["rust"]
+        },
+
+        // ---------------------------------------------------------------- Other
+        {
+            "name": "GeoIP: update country CIDRs",
+            "type": "node-terminal",
+            "request": "launch",
+            "cwd": "${workspaceFolder}/src/antiwire-client",
+            "command": "bun run update:country-cidrs"
+        }
+    ],
+    "compounds": [
+        {
+            "name": "Client: Electron (main + renderer)",
+            "configurations": ["Client: Electron main", "Client: Electron renderer"],
+            "stopAll": true
+        },
+        {
+            "name": "Daemon (not elevated) + Client",
+            "configurations": [
+                "Daemon: run (not elevated)",
+                "Client: Electron main",
+                "Client: Electron renderer"
+            ],
+            "stopAll": true
+        },
+        {
+            "name": "Daemon (elevated) + Client",
+            "configurations": [
+                "Daemon: run elevated",
+                "Client: Electron main",
+                "Client: Electron renderer"
+            ],
+            "stopAll": true
+        }
+    ],
+    "inputs": [
+        {
+            "id": "reapParentPid",
+            "type": "promptString",
+            "description": "PID the reaper waits on (a running antiwire-daemon, or any process you will close)"
+        }
+    ]
+}

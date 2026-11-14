@@ -1,0 +1,99 @@
+.statusbar {
+  height: 34px;
+  flex: none;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 0 14px;
+  border-top: 1px solid var(--ln);
+  background: var(--chrome);
+  font-size: 10px;
+  color: var(--t2);
+  user-select: none;
+  -webkit-user-select: none;
+  isolation: isolate;
+  contain: layout paint;
+}
+.left {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+}
+.metric {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  font-family: var(--font-mono);
+  font-size: 10px;
+  font-variant-numeric: tabular-nums;
+}
+.separator {
+  width: 1px;
+  height: 12px;
+  background: var(--ln);
+}
+.down {
+  color: var(--acc);
+}
+.up {
+  color: var(--acc-sub);
+}
+.right {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  color: var(--t2);
+  font-size: 10px;
+  font-variant-numeric: tabular-nums;
+}
+.stale {
+  color: var(--warn);
+}
+.unavailable {
+  color: var(--t3);
+}
+.setup-button,
+.update-button {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  padding: 4px 7px;
+  border: 1px solid var(--ln);
+  border-radius: 5px;
+  background: transparent;
+  color: var(--t2);
+  font-family: var(--font-mono);
+  font-size: 9px;
+  letter-spacing: 0.05em;
+  cursor: pointer;
+}
+.setup-button:hover,
+.update-button:hover {
+  color: var(--acc);
+  border-color: color-mix(in srgb, var(--acc) 35%, var(--ln));
+  background: color-mix(in srgb, var(--acc) 6%, transparent);
+}
+.update-button.failed {
+  color: var(--warn);
+}
+.update-dialog {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+.update-dialog p {
+  margin: 0;
+  font-size: 14px;
+  line-height: 1.45;
+  color: var(--t2);
+}
+.update-label {
+  font-size: 12px;
+  color: var(--t3);
+}
+.update-notes {
+  white-space: pre-line;
+}
+.update-dialog .update-failure {
+  color: var(--warn);
+}

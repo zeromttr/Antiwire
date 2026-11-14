@@ -1,0 +1,27 @@
+.sink-fields {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  max-width: 560px;
+}
+
+.field-block {
+  display: flex;
+  flex-direction: column;
+  min-width: 0;
+}
+
+.pair {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) 120px;
+  gap: 12px;
+}
+
+.pair.even {
+  grid-template-columns: minmax(0, 1fr) minmax(0, 1fr);
+}
+
+/* Was `:global(.segmented)`: the protocol control is this block's last child. */
+.segmented-block > :last-child {
+  align-self: flex-start;
+}

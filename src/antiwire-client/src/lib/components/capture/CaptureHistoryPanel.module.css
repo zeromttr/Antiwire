@@ -1,0 +1,96 @@
+.history-panel {
+  margin-top: 16px;
+  overflow: hidden;
+}
+
+.panel-heading {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  min-height: 44px;
+  padding: 0 12px 0 16px;
+}
+
+.panel-heading h2 {
+  margin: 0;
+  font-size: 13px;
+  font-weight: 600;
+}
+
+.meta {
+  flex: 1;
+  color: var(--t3);
+  font-size: 12px;
+}
+
+.history-row {
+  min-height: 54px;
+  display: grid;
+  grid-template-columns: 18px minmax(180px, 1fr) repeat(3, minmax(80px, 0.4fr)) auto;
+  gap: 12px;
+  align-items: center;
+  padding: 8px 16px;
+  border-top: 1px solid var(--ln);
+}
+
+.history-state {
+  display: grid;
+  place-items: center;
+}
+
+.history-state span {
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  background: var(--ok);
+  box-shadow: 0 0 0 3px color-mix(in oklab, var(--ok) 18%, transparent);
+}
+
+.history-main,
+.history-stat {
+  min-width: 0;
+}
+
+.history-main strong,
+.history-main span,
+.history-stat strong,
+.history-stat span {
+  display: block;
+}
+
+.history-main strong {
+  overflow: hidden;
+  color: var(--t1);
+  font-size: 13px;
+  font-weight: 500;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.history-main span {
+  margin-top: 2px;
+  color: var(--t3);
+  font-size: 12px;
+}
+
+.history-stat strong {
+  color: var(--t1);
+  font-size: 12px;
+  font-weight: 500;
+  font-variant-numeric: tabular-nums;
+}
+
+.history-stat span {
+  margin-top: 2px;
+  color: var(--t3);
+  font-size: 11.5px;
+}
+
+@media (max-width: 980px) {
+  .history-row {
+    grid-template-columns: 18px 1fr auto;
+  }
+  .history-stat {
+    display: none;
+  }
+}
