@@ -1,0 +1,36 @@
+[package]
+name = "firew-windows"
+description = "Windows INetFw COM and WFP fallback backends for firew-rs"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+repository.workspace = true
+readme.workspace = true
+
+[lints]
+workspace = true
+
+[dependencies]
+data-encoding.workspace = true
+firew-core.workspace = true
+firew-sys.workspace = true
+serde_json = "1.0"
+sha2.workspace = true
+
+[target.'cfg(windows)'.dependencies]
+ipnet = "2.11"
+windows = { version = "0.62", features = [
+    "Win32_Foundation",
+    "Win32_System_Com",
+    "Win32_System_Ole",
+    "Win32_System_Variant",
+    "Win32_System_Rpc",
+    "Win32_NetworkManagement_WindowsFirewall",
+    "Win32_NetworkManagement_WindowsFilteringPlatform",
+    "Win32_Security",
+] }
+windows-core = "0.62"
+
+[dev-dependencies]
+firew-rs.workspace = true

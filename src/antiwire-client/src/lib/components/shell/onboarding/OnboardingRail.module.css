@@ -1,0 +1,135 @@
+.rail {
+  display: flex;
+  flex-direction: column;
+  gap: 18px;
+  min-height: 0;
+  padding: 18px 12px;
+  border-right: 1px solid var(--ln);
+  background: var(--bg);
+}
+
+.rail-brand {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 0 8px;
+  color: var(--t1);
+  font-size: 13px;
+  font-weight: 600;
+}
+
+.rail-brand img {
+  display: block;
+  flex: none;
+}
+
+.rail-steps {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+
+.rail-step {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  width: 100%;
+  height: 34px;
+  padding: 0 8px;
+  border: 1px solid transparent;
+  border-radius: 8px;
+  color: var(--t3);
+  font-size: 13px;
+  text-align: left;
+  transition:
+    background-color var(--dur-fast) var(--ease-standard),
+    border-color var(--dur-fast) var(--ease-standard),
+    color var(--dur-fast) var(--ease-standard);
+}
+
+.rail-step.done {
+  color: var(--t2);
+}
+
+.rail-step:hover:not(:disabled):not(.active) {
+  background: var(--hover);
+  color: var(--t1);
+}
+
+.rail-step.active {
+  background: var(--ctl);
+  border-color: var(--ln);
+  box-shadow: var(--sh-ctl);
+  color: var(--t1);
+}
+
+.rail-step:disabled {
+  cursor: default;
+}
+
+.rail-step:focus-visible {
+  outline: none;
+  box-shadow: var(--focus-ring);
+}
+
+.rail-icon {
+  display: grid;
+  place-items: center;
+  flex: none;
+  width: 18px;
+  height: 18px;
+}
+
+.rail-step.active .rail-icon {
+  color: var(--acc);
+}
+
+.rail-check {
+  display: grid;
+  place-items: center;
+  width: 16px;
+  height: 16px;
+  border-radius: 50%;
+  background: color-mix(in oklab, var(--acc) 16%, transparent);
+  color: var(--acc);
+  animation: mark-pop var(--dur-slow) var(--ease-pop) both;
+}
+
+.rail-label {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+@keyframes mark-pop {
+  from {
+    opacity: 0;
+    transform: scale(0.4);
+  }
+}
+
+@media (max-width: 640px) {
+  .rail {
+    flex-direction: row;
+    align-items: center;
+    padding: 10px 12px;
+    border-right: none;
+    border-bottom: 1px solid var(--ln);
+    overflow-x: auto;
+  }
+
+  .rail-brand span,
+  .rail-label {
+    display: none;
+  }
+
+  .rail-steps {
+    flex-direction: row;
+  }
+
+  .rail-step {
+    width: 34px;
+    justify-content: center;
+  }
+}

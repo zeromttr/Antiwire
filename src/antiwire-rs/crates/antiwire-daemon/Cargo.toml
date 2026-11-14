@@ -1,0 +1,59 @@
+[package]
+name = "antiwire-daemon"
+version.workspace = true
+publish.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+description = "Antiwire privileged networking daemon"
+
+[lints]
+workspace = true
+
+[lib]
+name = "antiwire_daemon"
+path = "src/lib.rs"
+
+[[bin]]
+name = "antiwire-daemon"
+path = "src/main.rs"
+
+[dependencies]
+antiwire-ipc = { workspace = true }
+antiwire-runtime = { workspace = true }
+antiwire-tuning = { workspace = true }
+antiwire-platform = { workspace = true }
+antiwire-update = { workspace = true }
+anyhow = { workspace = true }
+semver = { workspace = true }
+tokio = { workspace = true }
+tracing = { workspace = true }
+tracing-subscriber = { workspace = true }
+clap = { workspace = true }
+directories = { workspace = true }
+
+[target.'cfg(unix)'.dependencies]
+libc = { workspace = true }
+
+[target.'cfg(windows)'.dependencies]
+# Only Windows locks through it; see src/process_lock.rs.
+single-instance = "0.3.3"
+antiwire-dns-os = { workspace = true }
+antiwire-dns-redirect = { workspace = true }
+antiwire-secrets = { workspace = true }
+antiwire-store = { workspace = true }
+windows-service = "0.8"
+windows = { workspace = true, features = [
+    "Win32_Foundation",
+    "Win32_Graphics_Gdi",
+    "Win32_Security",
+    "Win32_System_Console",
+    "Win32_System_LibraryLoader",
+    "Win32_System_Shutdown",
+    "Win32_System_Threading",
+    "Win32_System_WindowsProgramming",
+    "Win32_UI_WindowsAndMessaging",
+] }
+
+[dev-dependencies]
+tempfile = { workspace = true }

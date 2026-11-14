@@ -1,0 +1,107 @@
+[
+  {
+    "event": "process_started",
+    "data": {
+      "pid": 42,
+      "identity": {
+        "executable": "C:\\Program Files\\Example\\example.exe",
+        "name": "example.exe",
+        "start_ts": 1700000000000
+      }
+    }
+  },
+  {
+    "event": "opened",
+    "data": [
+      {
+        "protocol": "tcp",
+        "local_addr": "192.0.2.10",
+        "local_port": 50000,
+        "remote_addr": "198.51.100.20",
+        "remote_port": 443
+      },
+      {
+        "pid": 42,
+        "process": {
+          "executable": "C:\\Program Files\\Example\\example.exe",
+          "name": "example.exe",
+          "start_ts": 1700000000000
+        },
+        "open_ts": 1700000000010
+      }
+    ]
+  },
+  {
+    "event": "bytes",
+    "data": [
+      {
+        "protocol": "tcp",
+        "local_addr": "192.0.2.10",
+        "local_port": 50000,
+        "remote_addr": "198.51.100.20",
+        "remote_port": 443
+      },
+      {
+        "sent": 1024,
+        "received": 2048
+      }
+    ]
+  },
+  {
+    "event": "closed",
+    "data": [
+      {
+        "protocol": "tcp",
+        "local_addr": "192.0.2.10",
+        "local_port": 50000,
+        "remote_addr": "198.51.100.20",
+        "remote_port": 443
+      },
+      {
+        "pid": 42,
+        "process": null,
+        "open_ts": 1700000000010
+      }
+    ]
+  },
+  {
+    "event": "process_stopped",
+    "data": {
+      "pid": 42,
+      "stop_ts": 1700000000015
+    }
+  },
+  {
+    "event": "dns_resolved",
+    "data": {
+      "pid": 42,
+      "query": "example.test",
+      "answers": [
+        "198.51.100.20"
+      ]
+    }
+  },
+  {
+    "event": "interface",
+    "data": {
+      "index": 7,
+      "name": "Ethernet",
+      "rx_bytes": 20,
+      "tx_bytes": 10,
+      "rx_errors": 1,
+      "tx_errors": 2,
+      "rx_drops": 3,
+      "tx_drops": 4,
+      "timestamp": 1700000000020
+    }
+  },
+  {
+    "event": "degraded",
+    "data": {
+      "reason": {
+        "kind": "buffer_overflow",
+        "dropped": 3
+      }
+    }
+  }
+]

@@ -1,0 +1,162 @@
+/* Styles for the onboarding step components (global); scoped under .step-body
+ * because each step renders inside it from a separate component. */
+
+.step-body .card {
+  border: 1px solid var(--ln);
+  border-radius: 10px;
+  background: var(--well-soft);
+}
+
+.step-body .card.language {
+  padding: 14px 16px;
+}
+
+.step-body .row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 16px;
+  padding: 12px 16px;
+}
+
+.step-body .row + .row {
+  border-top: 1px solid var(--ln);
+}
+
+.step-body .row-copy {
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+  min-width: 0;
+}
+
+.step-body .row-copy strong {
+  color: var(--t1);
+  font-size: 13px;
+  font-weight: 500;
+}
+
+.step-body .row-copy small {
+  color: var(--t3);
+  font-size: 12px;
+  line-height: 1.45;
+}
+
+.step-body .highlights {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  margin-bottom: 6px;
+}
+
+.step-body .highlights li {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  padding: 8px 0;
+}
+
+.step-body .highlight-icon {
+  display: grid;
+  place-items: center;
+  flex: none;
+  width: 32px;
+  height: 32px;
+  border-radius: 8px;
+  color: var(--acc);
+  background: color-mix(in oklab, var(--acc) 10%, transparent);
+}
+
+.step-body .note {
+  margin: 2px 0 0;
+  color: var(--t3);
+  font-size: 12px;
+  line-height: 1.45;
+}
+
+.step-body /* Selectable options share the Checkbox component's marks. */
+  .options {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  transition: opacity var(--dur-base) var(--ease-standard);
+}
+
+.step-body .options .option {
+  align-items: flex-start;
+}
+
+.step-body .option-title {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 4px 8px;
+  color: var(--t1);
+  font-size: 13px;
+  font-weight: 500;
+}
+
+.step-body .option-summary {
+  color: var(--t3);
+  font-weight: 400;
+}
+
+.step-body .option-summary::before {
+  content: '·';
+  margin-right: 8px;
+}
+
+.step-body .tag {
+  display: inline-flex;
+  align-items: center;
+  height: 18px;
+  padding: 0 6px;
+  border-radius: 5px;
+  color: var(--acc);
+  background: color-mix(in oklab, var(--acc) 12%, transparent);
+  font-size: 11px;
+  font-weight: 500;
+}
+
+.step-body .mark {
+  display: flex;
+  flex: none;
+  margin-top: 1px;
+}
+
+.step-body .retention {
+  display: grid;
+  grid-template-columns: repeat(6, minmax(0, 1fr));
+  gap: 8px;
+}
+
+.step-body .retention .retention-option {
+  flex-direction: column;
+  align-items: center;
+  gap: 2px;
+  padding: 14px 4px 12px;
+  color: var(--t3);
+}
+
+/* ChoiceCard's selected class is module-scoped; its aria state is not. */
+.step-body .retention .retention-option[aria-checked='true'] {
+  color: var(--acc);
+}
+
+.step-body .retention-value {
+  color: var(--t1);
+  font-size: 20px;
+  font-weight: 500;
+  letter-spacing: -0.02em;
+  font-variant-numeric: tabular-nums;
+}
+
+.step-body .retention-unit {
+  font-size: 11.5px;
+}
+
+@media (max-width: 640px) {
+  .step-body .retention {
+    grid-template-columns: repeat(3, minmax(0, 1fr));
+  }
+}

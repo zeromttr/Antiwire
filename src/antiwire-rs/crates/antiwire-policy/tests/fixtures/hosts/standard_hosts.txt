@@ -1,0 +1,10 @@
+# Standard hosts-file fixture
+127.0.0.1 ads.example.com tracker.example.com
+0.0.0.0 wildcard.example.com
+::1 dualstack.example.com
+
+# Non-loopback mappings must be ignored
+8.8.8.8 public-dns.example.com
+
+# Inline comment stops hostname parsing
+127.0.0.1 commented.example.com # still-valid.example.com

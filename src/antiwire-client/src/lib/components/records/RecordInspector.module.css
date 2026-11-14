@@ -1,0 +1,256 @@
+/* The last column of the records container. */
+.inspector {
+  min-width: 0;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+}
+
+/* The verdict and what decided it, at the height of the other columns' bands. */
+.band {
+  flex: none;
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  min-width: 0;
+  height: var(--records-band-height);
+  padding: 0 8px 0 18px;
+  border-bottom: 1px solid var(--ln);
+  background: var(--records-band-fill);
+}
+
+.band-note {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  color: var(--t3);
+  font-size: 12px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.band .close {
+  flex: none;
+}
+
+.body {
+  flex: 1;
+  min-height: 0;
+  overflow-y: auto;
+}
+
+.intro {
+  display: flex;
+  flex-direction: column;
+  gap: 9px;
+  padding: 14px 10px 0 18px;
+}
+
+.title-row {
+  display: flex;
+  align-items: flex-start;
+  gap: 6px;
+}
+
+.title {
+  flex: 1;
+  min-width: 0;
+  margin: 0;
+  padding-top: 3px;
+  overflow-wrap: anywhere;
+  color: var(--t1);
+  font-size: 15px;
+  font-weight: 600;
+  letter-spacing: -0.02em;
+  line-height: 1.3;
+  user-select: text;
+  -webkit-user-select: text;
+}
+
+.app {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  min-width: 0;
+  padding-right: 6px;
+  color: var(--t2);
+  font-size: 12.5px;
+}
+
+.app-name {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.sep {
+  color: var(--t3);
+}
+
+.exe {
+  overflow: hidden;
+  color: var(--t3);
+  font-family: var(--font-mono);
+  font-size: 11.5px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.traffic {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 8px;
+  padding: 14px 18px 0;
+}
+
+.tile {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  min-width: 0;
+  padding: 9px 12px;
+  border: 1px solid color-mix(in oklab, var(--t1) 5%, transparent);
+  border-radius: 10px;
+  background: var(--well);
+}
+
+.tile-label {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  font-size: 11px;
+}
+
+/* Traffic directions keep the colours they have everywhere else. */
+.up {
+  color: var(--acc-sub);
+}
+
+.down {
+  color: var(--acc);
+}
+
+.tile-value {
+  overflow: hidden;
+  color: var(--t1);
+  font-size: 14px;
+  font-variant-numeric: tabular-nums;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  user-select: text;
+  -webkit-user-select: text;
+}
+
+.facts {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 12px 14px;
+  margin: 0;
+  padding: 14px 18px 16px;
+}
+
+.facts div {
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+  min-width: 0;
+}
+
+.facts .wide {
+  grid-column: 1 / -1;
+}
+
+.facts dt {
+  color: var(--t3);
+  font-size: 11px;
+}
+
+.facts dd {
+  margin: 0;
+  overflow-wrap: anywhere;
+  color: var(--t1);
+  font-size: 12.5px;
+  user-select: text;
+  -webkit-user-select: text;
+}
+
+.facts dd:global(.mono),
+.facts dd :global(.mono) {
+  font-size: 12px;
+}
+
+/* An address, then its port set apart so the two cannot run together. */
+.facts .endpoint {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 4px 6px;
+}
+
+/* The destination's port in the accent, the source's in the sub accent. */
+.facts .port {
+  --port-tone: var(--acc);
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  height: 18px;
+  padding: 0 6px;
+  border: 1px solid color-mix(in oklab, var(--port-tone) 24%, transparent);
+  border-radius: 5px;
+  background: color-mix(in oklab, var(--port-tone) 12%, transparent);
+  color: var(--port-tone);
+  font-size: 11px;
+  font-weight: 500;
+}
+
+.facts .port.source {
+  --port-tone: var(--acc-sub);
+}
+
+.port-label {
+  color: var(--t2);
+  font-family: var(--font-sans);
+  font-size: 9.5px;
+  font-weight: 600;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+}
+
+.facts .proto {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  font-weight: 600;
+}
+
+.proto-sep {
+  flex: none;
+  width: 1px;
+  height: 11px;
+  background: var(--ln-strong);
+}
+
+.path {
+  color: var(--t2);
+}
+
+.actions {
+  flex: none;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  padding: 11px 18px 14px;
+  border-top: 1px solid var(--ln);
+}
+
+.actions-label {
+  color: var(--t3);
+  font-size: 11px;
+}
+
+.kinds {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 6px;
+}

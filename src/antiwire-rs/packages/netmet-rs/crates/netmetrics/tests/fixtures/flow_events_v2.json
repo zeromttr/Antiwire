@@ -1,0 +1,44 @@
+[
+  {
+    "event": "opened",
+    "data": [
+      {
+        "protocol": "tcp",
+        "local_addr": "192.0.2.10",
+        "local_port": 50000,
+        "remote_addr": "198.51.100.20",
+        "remote_port": 443
+      },
+      {
+        "pid": 42,
+        "process": null,
+        "open_ts": 1700000000010,
+        "cookie": {
+          "value": 1234567890,
+          "source": "linux_sock_cookie"
+        }
+      }
+    ]
+  },
+  {
+    "event": "closed",
+    "data": [
+      {
+        "protocol": "tcp",
+        "local_addr": "192.0.2.10",
+        "local_port": 50000,
+        "remote_addr": "198.51.100.20",
+        "remote_port": 443
+      },
+      {
+        "pid": 42,
+        "process": null,
+        "open_ts": 1700000000010,
+        "cookie": {
+          "value": 9876543210,
+          "source": "windows_create_timestamp"
+        }
+      }
+    ]
+  }
+]

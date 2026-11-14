@@ -1,0 +1,31 @@
+[package]
+name = "antiwire-dns-redirect"
+description = "Points system DNS at Antiwire's resolver and puts it back, on Windows, macOS and Linux"
+version.workspace = true
+publish.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+repository.workspace = true
+
+[lints]
+workspace = true
+
+[features]
+# Lets other crates' tests set up a redirect without changing the host's DNS.
+test-support = []
+
+[dependencies]
+antiwire-dns-os = { workspace = true }
+antiwire-store = { workspace = true }
+antiwire-tuning = { workspace = true }
+parking_lot = { workspace = true }
+thiserror = { workspace = true }
+tokio = { workspace = true }
+tokio-util = { workspace = true }
+tracing = { workspace = true }
+
+[dev-dependencies]
+antiwire-secrets = { workspace = true }
+tempfile = { workspace = true }
+tokio = { workspace = true, features = ["test-util"] }

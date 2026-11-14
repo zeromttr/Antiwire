@@ -1,0 +1,30 @@
+# Build artifacts (workspace root + any per-crate target dirs, any depth)
+**/target/
+# rust-analyzer / cargo check scratch builds
+**/target/flycheck*/
+# Debug symbols
+*.pdb
+# Local dev data written by debug builds (ProjectDirs data_local_dir)
+.antiwire/
+# Env / secrets
+.env
+.env.*
+# Editor/IDE
+.vscode/
+.idea/
+*.swp
+# OS cruft
+Thumbs.db
+.DS_Store
+# Backup/patch files
+*.orig
+*.rej
+
+# Cargo.lock must be committed: Dependabot cargo treats missing lockfiles as
+# libraries and will not bump compatible versions (looks like it "does nothing").
+**/dist/
+**/build/
+**/node_modules/
+src/antiwire-rs/.cursor/settings.json
+/.agents
+ORIGINAL_REQUEST.md

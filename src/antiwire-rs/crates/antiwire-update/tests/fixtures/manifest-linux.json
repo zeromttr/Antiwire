@@ -1,0 +1,20 @@
+{
+  "version": "0.2.0",
+  "notes": "Linux packages.",
+  "packages": [
+    {
+      "platform": "linux-x86_64",
+      "format": "deb",
+      "name": "antiwire_0.2.0_amd64.deb",
+      "sha256": "86e3971b27cfdd073d838d8565c37230cf8c0e65cd7feafa3801265b605e21eb",
+      "size": 9
+    },
+    {
+      "platform": "linux-x86_64",
+      "format": "rpm",
+      "name": "antiwire-0.2.0-1.x86_64.rpm",
+      "sha256": "796db88b0f34dda83955633af1e8401e78fd19b76acf2fe2fd03dc977bab7f00",
+      "size": 10
+    }
+  ]
+}

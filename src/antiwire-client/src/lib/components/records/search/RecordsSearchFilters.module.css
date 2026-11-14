@@ -1,0 +1,253 @@
+.records-search {
+  position: relative;
+  flex: 1;
+  min-width: 180px;
+  max-width: 300px;
+}
+
+.records-search.has-chips {
+  max-width: 440px;
+}
+
+.records-search .search-box {
+  max-width: none;
+  width: 100%;
+}
+
+.chip {
+  flex: none;
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  max-width: 160px;
+  height: 20px;
+  padding: 0 2px 0 7px;
+  border-radius: 6px;
+  background: color-mix(in oklab, var(--acc) 12%, var(--ctl));
+  box-shadow: inset 0 0 0 1px color-mix(in oklab, var(--acc) 30%, transparent);
+  color: var(--t1);
+  font-size: 12px;
+  font-weight: 500;
+}
+
+.chip :global(svg) {
+  flex: none;
+  color: var(--acc);
+}
+
+.chip-label {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.chip-remove {
+  display: grid;
+  place-items: center;
+  flex: none;
+  width: 16px;
+  height: 16px;
+  border-radius: 4px;
+  color: var(--t3);
+}
+
+.chip-remove:hover {
+  background: var(--hover);
+  color: var(--t1);
+}
+
+.chip-remove:focus-visible {
+  outline: none;
+  box-shadow: var(--focus-ring);
+}
+
+.quick-menu {
+  position: absolute;
+  z-index: 20;
+  top: calc(100% + 8px);
+  left: 0;
+  width: 560px;
+  max-width: calc(100vw - 48px);
+  max-height: calc(100vh - 200px);
+  overflow: auto;
+  overscroll-behavior: contain;
+  padding: 14px;
+  border: 1px solid var(--ln-strong);
+  border-radius: 12px;
+  background: var(--pop);
+  box-shadow: var(--sh-pop);
+  backdrop-filter: blur(16px);
+  -webkit-backdrop-filter: blur(16px);
+}
+
+.menu-head {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 16px;
+  margin-bottom: 12px;
+}
+
+.menu-head strong {
+  display: block;
+  color: var(--t1);
+  font-size: 13px;
+  font-weight: 600;
+}
+
+.menu-head span {
+  display: block;
+  margin-top: 2px;
+  color: var(--t3);
+  font-size: 12px;
+}
+
+.clear-all {
+  flex: none;
+  padding: 3px 8px;
+  border-radius: 6px;
+  color: var(--t2);
+  font-size: 12px;
+  font-weight: 500;
+}
+
+.clear-all:hover {
+  background: var(--hover);
+  color: var(--t1);
+}
+
+.window {
+  margin-bottom: 12px;
+}
+
+.groups {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 12px;
+}
+
+.group {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  min-width: 0;
+}
+
+.group h3 {
+  margin: 0 0 4px;
+  padding: 0 8px;
+  color: var(--t3);
+  font-size: 12px;
+  font-weight: 500;
+}
+
+.options {
+  min-height: 0;
+  max-height: min(320px, 42vh);
+  overflow-y: auto;
+  overscroll-behavior: contain;
+}
+
+.option {
+  display: flex;
+  flex-direction: column;
+  gap: 5px;
+  width: 100%;
+  padding: 6px 8px 7px;
+  border-radius: 7px;
+  color: var(--t2);
+  text-align: left;
+  transition:
+    background-color var(--dur-fast) var(--ease-standard),
+    color var(--dur-fast) var(--ease-standard);
+}
+
+.option:hover {
+  background: var(--hover);
+  color: var(--t1);
+}
+
+.option.active {
+  background: color-mix(in oklab, var(--acc) 10%, transparent);
+  color: var(--t1);
+}
+
+.option:focus-visible {
+  outline: none;
+  box-shadow: var(--focus-ring);
+}
+
+.option-line {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  min-width: 0;
+}
+
+.option-label {
+  min-width: 0;
+  overflow: hidden;
+  font-size: 12.5px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.detail {
+  margin-left: 4px;
+  color: var(--t3);
+  font-size: 11px;
+}
+
+.count {
+  flex: none;
+  color: var(--t3);
+  font-size: 11px;
+  font-variant-numeric: tabular-nums;
+}
+
+.option .option-check {
+  flex: none;
+  color: var(--acc);
+}
+
+.share {
+  display: block;
+  height: 3px;
+  border-radius: 2px;
+  background: var(--track);
+  overflow: hidden;
+}
+
+.share span {
+  display: block;
+  height: 100%;
+  width: calc(var(--share) * 100%);
+  min-width: 3px;
+  border-radius: 2px;
+  background: color-mix(in oklab, var(--acc) 70%, transparent);
+  transition: width var(--dur-data) var(--ease-out);
+}
+
+.empty {
+  display: block;
+  padding: 6px 8px;
+  color: var(--t3);
+  font-size: 12px;
+}
+
+@media (max-width: 900px) {
+  .quick-menu {
+    left: auto;
+    right: 0;
+  }
+
+  .groups {
+    grid-template-columns: minmax(0, 1fr);
+  }
+
+  .options {
+    max-height: 200px;
+  }
+}

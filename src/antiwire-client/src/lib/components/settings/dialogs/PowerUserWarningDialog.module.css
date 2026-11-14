@@ -1,0 +1,42 @@
+.body {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+}
+
+.intro {
+  margin: 0;
+  font-size: 14px;
+  line-height: 1.45;
+  color: var(--t2);
+}
+
+.callout {
+  display: flex;
+  align-items: flex-start;
+  gap: 12px;
+  padding: 12px 14px;
+  border-radius: 8px;
+  background: color-mix(in oklab, var(--warn) 8%, transparent);
+  border: 1px solid color-mix(in oklab, var(--warn) 30%, transparent);
+}
+
+.callout .callout-icon {
+  flex: none;
+  color: var(--warn);
+  margin-top: 1px;
+}
+
+.callout-text {
+  margin: 0;
+  font-size: 13px;
+  line-height: 1.45;
+  color: var(--t1);
+}
+
+.footnote {
+  margin: 4px 0 0;
+  font-size: 13px;
+  line-height: 1.4;
+  color: var(--t3);
+}

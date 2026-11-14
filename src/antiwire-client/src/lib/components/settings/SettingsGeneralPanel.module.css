@@ -1,0 +1,14 @@
+/* Outranks the shared `.form-panel .field-hint` margin, as the scoped rule did. */
+:global(.form-panel) .error.error {
+  margin: 0;
+  color: var(--bad);
+}
+
+/* Appearance is a few big, visual choices: flat sections, not a form card.
+ * The accent and language pickers take an `appearance` prop for their flat
+ * styling (was `.appearance :global(.accent-picker)` etc.). */
+.appearance {
+  display: flex;
+  flex-direction: column;
+  gap: 28px;
+}

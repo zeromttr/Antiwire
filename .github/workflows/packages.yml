@@ -1,0 +1,468 @@
+name: Packages
+
+# Manual packaging runs every CI job, on every runner, before building artifacts.
+# Pull requests and pushes to main are owned by ci.yml, which runs only the areas
+# that changed.
+#
+# Rust cache policy (Swatinem/rust-cache):
+# - Debug keys for test jobs, `packages-release` for package jobs (profiles don't share objects).
+#   Windows adds the target: one x64 runner builds both architectures, and rust-cache
+#   ignores `key` next to `shared-key`, so only the shared key can tell them apart.
+# - Stable shared keys allow compatible jobs to reuse dependencies without mixing profiles.
+# - Only main publishes a cache. Every other ref restores that copy and does not
+#   save. A save on another ref can evict the shared archive.
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: packages-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
+env:
+  ANTIWIRE_VERSION: 0.1.0
+  RUST_BACKTRACE: "1"
+
+jobs:
+  # cargo deny runs once inside it, then every test job.
+  test:
+    uses: ./.github/workflows/ci.yml
+    with:
+      os: all
+      scope: all
+
+  # --- Package jobs (manual only) ---
+  windows-installer:
+    if: github.event_name == 'workflow_dispatch'
+    needs: test
+    # ARM64 is cross-compiled on the x64 runner, as in release.yml. Its daemon is built
+    # without WinDivert, which has no ARM64 driver, and never downloads it.
+    runs-on: blacksmith-4vcpu-windows-2025
+    # Release builds; a hung job would otherwise run for six hours.
+    timeout-minutes: 60
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - target: x86_64-pc-windows-msvc
+            platform: windows-x86_64
+            electron_arch: x64
+            unpacked: win-unpacked
+          - target: aarch64-pc-windows-msvc
+            platform: windows-aarch64
+            electron_arch: arm64
+            unpacked: win-arm64-unpacked
+    env:
+      TARGET: ${{ matrix.target }}
+      PLATFORM: ${{ matrix.platform }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v7
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: 1.100.0
+          targets: ${{ matrix.target }}
+
+      - name: Put LLVM on PATH
+        if: matrix.target == 'aarch64-pc-windows-msvc'
+        run: ./src/antiwire-rs/scripts/ci-windows-arm64-llvm.ps1
+
+      - name: Install Bun
+        uses: oven-sh/setup-bun@v2
+        with:
+          # One Bun for CI and developers; `bun check` and `bun fmt` need 1.4 or newer.
+          bun-version-file: .bun-version
+
+      - name: Restore Bun packages
+        id: bun-cache
+        uses: actions/cache/restore@v6
+        with:
+          path: |
+            ~/.bun/install/cache
+            src/antiwire-client/node_modules
+          key: ${{ runner.os }}-bun-${{ hashFiles('src/antiwire-client/bun.lock') }}
+          restore-keys: |
+            ${{ runner.os }}-bun-
+
+      - name: Rust build cache
+        uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: |
+            src/antiwire-rs
+          # Release profile artifacts — separate from debug test caches.
+          # v4 drops archives saved before this repo's crates were included.
+          prefix-key: v4
+          shared-key: packages-release-${{ matrix.target }}
+          cache-workspace-crates: true
+          save-if: ${{ github.ref == 'refs/heads/main' }}
+
+      # This job's steps run in PowerShell, where the job's TARGET is `$env:TARGET`.
+      - name: Build antiwire-daemon (release)
+        run: cargo build --release --target "$env:TARGET" -p antiwire-daemon
+        working-directory: src/antiwire-rs
+
+      - name: Install client frontend dependencies
+        run: bun install --frozen-lockfile
+        working-directory: src/antiwire-client
+
+      - name: Save Bun packages
+        if: github.ref == 'refs/heads/main' && steps.bun-cache.outputs.cache-hit != 'true'
+        continue-on-error: true
+        uses: actions/cache/save@v6
+        with:
+          path: |
+            ~/.bun/install/cache
+            src/antiwire-client/node_modules
+          key: ${{ runner.os }}-bun-${{ hashFiles('src/antiwire-client/bun.lock') }}
+
+      # The unpacked Electron app for this architecture; installer.iss packages the directory.
+      - name: Build Antiwire client (release)
+        run: bun run package:dir "--${{ matrix.electron_arch }}"
+        working-directory: src/antiwire-client
+        env:
+          CSC_IDENTITY_AUTO_DISCOVERY: "false"
+
+      - name: Install Inno Setup
+        run: choco install innosetup -y --no-progress
+
+      - name: Compile installer.iss
+        # The target picks the payload directory and the architecture the installer accepts.
+        run: '& "${env:ProgramFiles(x86)}\Inno Setup 6\ISCC.exe" "/DAppVersion=${{ env.ANTIWIRE_VERSION }}" "/DTargetTriple=$env:TARGET" installer.iss'
+
+      - name: Stage packages
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p dist
+          cp Output/AntiwireInstaller.exe "dist/AntiwireInstaller-${ANTIWIRE_VERSION}-${PLATFORM}.exe"
+          bash scripts/package-archive.sh --os windows --version "$ANTIWIRE_VERSION" \
+            --platform "$PLATFORM" \
+            --daemon "src/antiwire-rs/target/$TARGET/release/antiwire-daemon.exe" \
+            --client "src/antiwire-client/dist/${{ matrix.unpacked }}" --out dist
+
+      # `archive: false` uploads each file as itself, named after the file, not inside a zip.
+      - name: Upload installer
+        uses: actions/upload-artifact@v7
+        with:
+          path: dist/AntiwireInstaller-${{ env.ANTIWIRE_VERSION }}-${{ matrix.platform }}.exe
+          archive: false
+          if-no-files-found: error
+
+      - name: Upload portable zip
+        uses: actions/upload-artifact@v7
+        with:
+          path: dist/antiwire-${{ env.ANTIWIRE_VERSION }}-${{ matrix.platform }}.zip
+          archive: false
+          if-no-files-found: error
+
+  macos-packages:
+    if: github.event_name == 'workflow_dispatch'
+    needs: test
+    runs-on: blacksmith-6vcpu-macos-latest
+    # Release builds; a hung job would otherwise run for six hours.
+    timeout-minutes: 60
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v7
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: 1.100.0
+
+      - name: Install Bun
+        uses: oven-sh/setup-bun@v2
+        with:
+          # One Bun for CI and developers; `bun check` and `bun fmt` need 1.4 or newer.
+          bun-version-file: .bun-version
+
+      - name: Restore Bun packages
+        id: bun-cache
+        uses: actions/cache/restore@v6
+        with:
+          path: |
+            ~/.bun/install/cache
+            src/antiwire-client/node_modules
+          key: ${{ runner.os }}-bun-${{ hashFiles('src/antiwire-client/bun.lock') }}
+          restore-keys: |
+            ${{ runner.os }}-bun-
+
+      - name: Rust build cache
+        uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: |
+            src/antiwire-rs
+          # Release profile artifacts — separate from debug test caches.
+          # v4 drops archives saved before this repo's crates were included.
+          prefix-key: v4
+          shared-key: packages-release
+          cache-workspace-crates: true
+          save-if: ${{ github.ref == 'refs/heads/main' }}
+
+      - name: Install build dependencies
+        run: brew install libpcap
+
+      - name: Build antiwire-daemon (release)
+        run: cargo build --release -p antiwire-daemon
+        working-directory: src/antiwire-rs
+
+      - name: Install client frontend dependencies
+        run: bun install --frozen-lockfile
+        working-directory: src/antiwire-client
+
+      - name: Save Bun packages
+        if: github.ref == 'refs/heads/main' && steps.bun-cache.outputs.cache-hit != 'true'
+        continue-on-error: true
+        uses: actions/cache/save@v6
+        with:
+          path: |
+            ~/.bun/install/cache
+            src/antiwire-client/node_modules
+          key: ${{ runner.os }}-bun-${{ hashFiles('src/antiwire-client/bun.lock') }}
+
+      # Ad-hoc signed by scripts/after-pack.mjs after the fuses are flipped.
+      - name: Build Antiwire.app (release)
+        run: bun run package:dir
+        working-directory: src/antiwire-client
+        env:
+          CSC_IDENTITY_AUTO_DISCOVERY: "false"
+
+      # macos-latest is Apple silicon; release.yml names the same build macos-aarch64.
+      - name: Stage packages
+        shell: bash
+        run: |
+          set -euo pipefail
+          PLATFORM=macos-aarch64
+          test "$(uname -m)" = arm64
+          APP_SRC="$(ls -d src/antiwire-client/dist/mac*/Antiwire.app | head -n 1)"
+          DAEMON_SRC="src/antiwire-rs/target/release/antiwire-daemon"
+          test -d "$APP_SRC"
+          test -x "$DAEMON_SRC"
+
+          rm -rf dist package
+          mkdir -p dist package
+          ARCHIVE="$(bash scripts/package-archive.sh --os macos --version "$ANTIWIRE_VERSION" \
+            --platform "$PLATFORM" --daemon "$DAEMON_SRC" --client "$APP_SRC" --out dist)"
+          tar -C package -xzf "$ARCHIVE"
+          hdiutil create -volname "Antiwire" \
+            -srcfolder "package/antiwire-${ANTIWIRE_VERSION}-${PLATFORM}" \
+            -ov -format UDZO "dist/Antiwire-${ANTIWIRE_VERSION}-${PLATFORM}.dmg"
+
+      - name: Upload disk image
+        uses: actions/upload-artifact@v7
+        with:
+          path: dist/Antiwire-${{ env.ANTIWIRE_VERSION }}-macos-aarch64.dmg
+          archive: false
+          if-no-files-found: error
+
+      - name: Upload tarball
+        uses: actions/upload-artifact@v7
+        with:
+          path: dist/antiwire-${{ env.ANTIWIRE_VERSION }}-macos-aarch64.tar.gz
+          archive: false
+          if-no-files-found: error
+
+  linux-packages:
+    if: github.event_name == 'workflow_dispatch'
+    needs: test
+    runs-on: blacksmith-4vcpu-ubuntu-2404
+    # Release builds; a hung job would otherwise run for six hours.
+    timeout-minutes: 60
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v7
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: 1.100.0
+
+      - name: Install Bun
+        uses: oven-sh/setup-bun@v2
+        with:
+          # One Bun for CI and developers; `bun check` and `bun fmt` need 1.4 or newer.
+          bun-version-file: .bun-version
+
+      - name: Restore Bun packages
+        id: bun-cache
+        uses: actions/cache/restore@v6
+        with:
+          path: |
+            ~/.bun/install/cache
+            src/antiwire-client/node_modules
+          key: ${{ runner.os }}-bun-${{ hashFiles('src/antiwire-client/bun.lock') }}
+          restore-keys: |
+            ${{ runner.os }}-bun-
+
+      - name: Rust build cache
+        uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: |
+            src/antiwire-rs
+          # Release profile artifacts — separate from debug test caches.
+          # v4 drops archives saved before this repo's crates were included.
+          prefix-key: v4
+          shared-key: packages-release
+          cache-workspace-crates: true
+          save-if: ${{ github.ref == 'refs/heads/main' }}
+
+      - name: Install build dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            libwebkit2gtk-4.1-dev \
+            libayatana-appindicator3-dev \
+            librsvg2-dev \
+            patchelf \
+            clang \
+            libbpf-dev \
+            linux-tools-common \
+            linux-tools-generic \
+            pkg-config
+
+          if ! /usr/sbin/bpftool -V >/dev/null 2>&1; then
+            FALLBACK="$(find /usr/lib -type f -name bpftool -perm -111 2>/dev/null | sort -V | tail -n 1 || true)"
+            test -n "$FALLBACK"
+            sudo ln -sf "$FALLBACK" /usr/local/bin/bpftool
+          else
+            sudo ln -sf /usr/sbin/bpftool /usr/local/bin/bpftool
+          fi
+
+      - name: Build Linux eBPF objects
+        run: sh ./build.sh
+        working-directory: src/antiwire-rs/packages/netmet-rs/crates/netmetrics-linux/ebpf
+
+      - name: Build antiwire-daemon (release)
+        run: cargo build --release -p antiwire-daemon
+        working-directory: src/antiwire-rs
+
+      - name: Build Antiwire client (release)
+        run: |
+          bun install --frozen-lockfile
+          bun run package:dir
+        working-directory: src/antiwire-client
+
+      - name: Save Bun packages
+        if: github.ref == 'refs/heads/main' && steps.bun-cache.outputs.cache-hit != 'true'
+        continue-on-error: true
+        uses: actions/cache/save@v6
+        with:
+          path: |
+            ~/.bun/install/cache
+            src/antiwire-client/node_modules
+          key: ${{ runner.os }}-bun-${{ hashFiles('src/antiwire-client/bun.lock') }}
+
+
+      - name: Stage package files
+        run: |
+          mkdir -p staging dist
+          cp src/antiwire-rs/target/release/antiwire-daemon staging/antiwire-daemon
+          cp -R src/antiwire-client/dist/linux-unpacked staging/antiwire-app
+          cp src/antiwire-client/resources/icons/128x128.png staging/antiwire.png
+          cp src/antiwire-rs/packages/netmet-rs/crates/netmetrics-linux/ebpf/netmetrics.bpf.o staging/netmetrics.bpf.o
+          cp src/antiwire-rs/packages/netmet-rs/crates/netmetrics-linux/ebpf/dns_filter.bpf.o staging/dns_filter.bpf.o
+
+      # Go only builds nfpm, and nfpm's go.mod sets the oldest Go that can: 1.27.4 for v2.49.0.
+      # Move the two together.
+      - name: Install Go
+        uses: actions/setup-go@v7
+        with:
+          go-version: "1.27.x"
+
+      - name: Install nfpm
+        run: |
+          go install github.com/goreleaser/nfpm/v2/cmd/nfpm@v2.49.0
+          echo "$(go env GOPATH)/bin" >> "$GITHUB_PATH"
+
+      # nfpm's homepage; see scripts/repository.mjs.
+      - name: Read the repository
+        run: echo "ANTIWIRE_REPOSITORY_URL=$(node scripts/repository.mjs url)" >> "$GITHUB_ENV"
+
+      - name: Build .deb
+        run: nfpm package -f packaging/linux/nfpm.yaml --packager deb --target dist
+        env:
+          ANTIWIRE_VERSION: ${{ env.ANTIWIRE_VERSION }}
+          ANTIWIRE_ARCH: amd64
+
+      - name: Build .rpm
+        run: nfpm package -f packaging/linux/nfpm.yaml --packager rpm --target dist
+        env:
+          ANTIWIRE_VERSION: ${{ env.ANTIWIRE_VERSION }}
+          ANTIWIRE_ARCH: amd64
+
+      # A prerelease version puts a "~" in the package file names (see release.yml).
+      - name: Name packages without "~"
+        run: |
+          set -euo pipefail
+          for file in dist/*~*; do
+            [ -e "$file" ] || continue
+            mv "$file" "${file//\~/-}"
+          done
+
+      - name: Build tarball
+        run: |
+          set -euo pipefail
+          bash scripts/package-archive.sh --os linux --version "$ANTIWIRE_VERSION" \
+            --platform linux-x86_64 \
+            --daemon staging/antiwire-daemon --client staging/antiwire-app \
+            --ebpf src/antiwire-rs/packages/netmet-rs/crates/netmetrics-linux/ebpf \
+            --icon staging/antiwire.png --out dist
+
+      # nfpm writes one file of each kind into dist, so each glob names a single file.
+      - name: Upload .deb
+        uses: actions/upload-artifact@v7
+        with:
+          path: dist/*.deb
+          archive: false
+          if-no-files-found: error
+
+      - name: Upload .rpm
+        uses: actions/upload-artifact@v7
+        with:
+          path: dist/*.rpm
+          archive: false
+          if-no-files-found: error
+
+      - name: Upload tarball
+        uses: actions/upload-artifact@v7
+        with:
+          path: dist/antiwire-${{ env.ANTIWIRE_VERSION }}-linux-x86_64.tar.gz
+          archive: false
+          if-no-files-found: error
+
+  # One SHA256SUMS for the run, written from the files as uploaded.
+  checksums:
+    if: github.event_name == 'workflow_dispatch'
+    needs: [windows-installer, macos-packages, linux-packages]
+    runs-on: blacksmith-2vcpu-ubuntu-2404
+    timeout-minutes: 10
+    steps:
+      # An unarchived artifact is named after its file, so the pattern picks the packages
+      # and leaves the test jobs' artifacts (such as the eBPF object) out. skip-decompress
+      # keeps the portable .zip from being unpacked on download.
+      - name: Download packages
+        uses: actions/download-artifact@v8
+        with:
+          pattern: "[Aa]ntiwire*"
+          path: dist
+          merge-multiple: true
+          skip-decompress: true
+
+      - name: Write checksums
+        run: |
+          set -euo pipefail
+          cd dist
+          find . -maxdepth 1 -type f ! -name SHA256SUMS -printf '%P\n' | LC_ALL=C sort \
+            | xargs -d '\n' sha256sum > SHA256SUMS
+          cat SHA256SUMS
+
+      - name: Upload checksums
+        uses: actions/upload-artifact@v7
+        with:
+          path: dist/SHA256SUMS
+          archive: false
+          if-no-files-found: error

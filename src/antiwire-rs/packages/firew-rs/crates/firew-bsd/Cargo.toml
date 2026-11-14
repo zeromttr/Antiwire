@@ -1,0 +1,16 @@
+[package]
+name = "firew-bsd"
+description = "BSD firewall stub backend for firew-rs (deferred)"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+repository.workspace = true
+readme.workspace = true
+
+[lints]
+workspace = true
+
+[dependencies]
+firew-core.workspace = true
+firew-sys.workspace = true

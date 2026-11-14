@@ -1,0 +1,90 @@
+name: CI
+
+on:
+  push:
+  pull_request:
+
+permissions:
+  contents: read
+
+env:
+  RUST_BACKTRACE: "1"
+
+jobs:
+  offline:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [windows-latest, ubuntu-latest, macos-latest]
+    runs-on: ${{ matrix.os }}
+    defaults:
+      run:
+        working-directory: .
+    steps:
+      - uses: actions/checkout@v7
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+      - name: Install Linux firewall tools
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y iptables nftables
+      - run: cargo fmt --all -- --check
+      - run: cargo check --workspace --all-targets --all-features
+      - run: cargo clippy --workspace --all-targets --all-features -- -D warnings
+      - run: cargo doc --workspace --all-features --no-deps
+      - run: bash ./scripts/run-offline-tests.sh
+
+  msrv:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - uses: dtolnay/rust-toolchain@1.90.0
+      - run: cargo check --workspace --all-targets
+
+  facade-features:
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        features:
+          - ""
+          - "linux"
+          - "tokio"
+          - "async-std"
+          - "smol"
+          - "linux,tokio"
+          - "linux,async-std"
+          - "linux,smol"
+    steps:
+      - uses: actions/checkout@v7
+      - uses: dtolnay/rust-toolchain@stable
+      - run: cargo check -p firew-rs --no-default-features --features "${{ matrix.features }}"
+
+  package:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - uses: dtolnay/rust-toolchain@stable
+      - name: Build and dry-run the dependency root
+        shell: bash
+        run: |
+          cargo package -p firew-core
+          cargo publish -p firew-core --dry-run
+      - name: Validate dependent package file sets
+        shell: bash
+        run: |
+          for crate in firew-sys firew-linux firew-windows firew-macos firew-bsd firew-rs; do
+            cargo package -p "$crate" --list
+          done
+
+  linux-live:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - name: Build live test image
+        run: docker build -f docker/linux-test.Dockerfile -t firew-rs-linux-test .
+      - name: Run offline tier in container
+        run: docker run --rm -e RUST_BACKTRACE=1 firew-rs-linux-test offline
+      - name: Run live tier in container
+        run: docker run --rm --cap-add=NET_ADMIN -e RUST_BACKTRACE=1 firew-rs-linux-test live

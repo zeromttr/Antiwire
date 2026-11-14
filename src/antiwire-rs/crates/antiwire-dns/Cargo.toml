@@ -1,0 +1,68 @@
+[package]
+name = "antiwire-dns"
+description = "Lean DNS resolver stub with policy integration, caching, and upstream forwarding"
+version.workspace = true
+publish.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+repository.workspace = true
+
+[lints]
+workspace = true
+
+[features]
+bench-internals = []
+
+[dependencies]
+antiwire-events = { workspace = true }
+antiwire-policy = { workspace = true }
+antiwire-store = { workspace = true }
+antiwire-tuning = { workspace = true }
+antiwire-dns-redirect = { workspace = true }
+antiwire-ai = { workspace = true }
+antiwire-lookup = { workspace = true }
+netmetrics = { workspace = true }
+async-trait = { workspace = true }
+bytes = { workspace = true }
+dashmap = { workspace = true }
+futures-util = { workspace = true }
+moka = { workspace = true }
+hickory-proto = { workspace = true }
+hickory-resolver = { workspace = true }
+hickory-server = { workspace = true }
+ipnet = { workspace = true }
+parking_lot = { workspace = true }
+psl = { workspace = true }
+rustls = { workspace = true }
+rustls-native-certs = { workspace = true }
+smallvec = { workspace = true }
+socket2 = { workspace = true }
+sysinfo = { workspace = true }
+thiserror = { workspace = true }
+tokio = { workspace = true }
+tokio-util = { workspace = true, features = ["codec", "rt"] }
+tower = { workspace = true }
+tracing = { workspace = true }
+time = { workspace = true }
+url = { workspace = true }
+webpki-roots = { workspace = true }
+
+
+[target.'cfg(windows)'.dependencies]
+windows = { workspace = true, features = [
+    "Win32_Networking_WinSock",
+    "Win32_System_IO",
+] }
+
+[dev-dependencies]
+antiwire-dns-redirect = { workspace = true, features = ["test-support"] }
+antiwire-secrets = { workspace = true }
+antiwire-store = { workspace = true, features = ["test-support"] }
+tempfile = { workspace = true }
+tokio = { workspace = true, features = ["test-util"] }
+
+[[bench]]
+name = "dns_hot_path"
+harness = false
+required-features = ["bench-internals"]

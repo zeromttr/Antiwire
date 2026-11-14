@@ -1,0 +1,49 @@
+.toggle-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 16px;
+  padding: 14px 0;
+  border-bottom: 1px solid var(--ln);
+}
+
+.label {
+  font-size: 13px;
+  font-weight: 500;
+  color: var(--t1);
+}
+
+.desc {
+  font-size: 12px;
+  line-height: 1.45;
+  color: var(--t3);
+  margin-top: 3px;
+}
+
+/* Taller rows keep the toggle level with the label. */
+.toggle-row.has-details {
+  align-items: flex-start;
+}
+
+.text {
+  min-width: 0;
+}
+
+.details {
+  margin-top: 10px;
+}
+
+.controls {
+  flex: none;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  min-height: 28px;
+}
+
+.actions {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  height: 28px;
+}

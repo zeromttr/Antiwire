@@ -1,0 +1,79 @@
+.preview-block {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+}
+
+.label {
+  color: var(--t1);
+  font-size: 13px;
+  font-weight: 600;
+}
+
+.preview {
+  display: grid;
+  grid-template-columns: 240px minmax(0, 1fr);
+  max-width: 640px;
+  overflow: hidden;
+}
+
+.stat {
+  display: flex;
+  border-right: 1px solid var(--ln);
+}
+
+.stat > * {
+  flex: 1;
+}
+
+.controls {
+  display: flex;
+  flex-direction: column;
+  justify-content: center;
+  gap: 14px;
+  padding: 16px 18px;
+}
+
+.row {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+}
+
+.status {
+  margin-left: auto;
+}
+
+.toggle-label {
+  color: var(--t1);
+  font-size: 13px;
+}
+
+/* A focused input, showing the focus ring in the accent. */
+.focus-demo {
+  display: flex;
+  align-items: center;
+  height: 30px;
+  padding: 0 10px;
+  border: 1px solid color-mix(in oklab, var(--acc) 55%, transparent);
+  border-radius: 8px;
+  background: var(--ctl);
+  box-shadow: var(--focus-ring);
+}
+
+.caret {
+  width: 1px;
+  height: 14px;
+  background: var(--acc);
+}
+
+@media (max-width: 720px) {
+  .preview {
+    grid-template-columns: minmax(0, 1fr);
+  }
+
+  .stat {
+    border-right: none;
+    border-bottom: 1px solid var(--ln);
+  }
+}

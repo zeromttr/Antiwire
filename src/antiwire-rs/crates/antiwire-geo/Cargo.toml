@@ -1,0 +1,24 @@
+[package]
+name = "antiwire-geo"
+version.workspace = true
+publish.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+description = "GeoIP and OUI lookups"
+
+[lints]
+workspace = true
+
+[features]
+default = []
+embedded-oui = ["dep:flate2"]
+
+[dependencies]
+directories = { workspace = true }
+maxminddb = { workspace = true }
+thiserror = { workspace = true }
+flate2 = { workspace = true, optional = true }
+
+[dev-dependencies]
+tempfile = { workspace = true }

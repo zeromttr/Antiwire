@@ -1,0 +1,44 @@
+[workspace]
+members = [
+    "crates/firew",
+    "crates/firew-core",
+    "crates/firew-sys",
+    "crates/firew-linux",
+    "crates/firew-windows",
+    "crates/firew-macos",
+    "crates/firew-bsd",
+]
+default-members = ["crates/firew"]
+resolver = "2"
+
+# Virtual workspace for local development; external consumers use crates/firew directly.
+
+[workspace.package]
+version = "1.0.0"
+edition = "2021"
+license = "MIT"
+rust-version = "1.90"
+# The repository this workspace is meant to move to, not the Antiwire project's.
+repository = "https://github.com/zeromttr/firew"
+readme = "README.md"
+
+[workspace.lints.rust]
+missing_docs = "warn"
+unsafe_code = "deny"
+unsafe_op_in_unsafe_fn = "deny"
+
+[workspace.lints.clippy]
+all = { level = "warn", priority = -1 }
+pedantic = { level = "warn", priority = -1 }
+module_name_repetitions = "allow"
+must_use_candidate = "allow"
+
+[workspace.dependencies]
+firew-core = { version = "1.0.0", path = "crates/firew-core" }
+firew-sys = { version = "1.0.0", path = "crates/firew-sys" }
+firew-linux = { version = "1.0.0", path = "crates/firew-linux" }
+firew-windows = { version = "1.0.0", path = "crates/firew-windows" }
+firew-macos = { version = "1.0.0", path = "crates/firew-macos" }
+firew-rs = { version = "1.0.0", path = "crates/firew" }
+data-encoding = "2.6"
+sha2 = "0.10"

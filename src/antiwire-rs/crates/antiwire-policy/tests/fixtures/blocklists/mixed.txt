@@ -1,0 +1,5 @@
+||ads.example.com^
+local=/tracker.example.com/
+*.wildcard.example.com
+bare.example.com
+0.0.0.0 hosts-style.example.com

@@ -1,0 +1,313 @@
+:global(.realtime-live) {
+  color: var(--acc);
+  animation: realtimePulse 1.8s var(--ease-in-out) infinite;
+}
+/* The middle column of the records container. */
+.panel {
+  grid-column: 2;
+  min-width: 0;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+}
+.tbody.loading {
+  pointer-events: none;
+}
+/*
+ * One line of controls at the band's height, so its lower edge meets the
+ * neighbouring columns'. A window too narrow for one line wraps it.
+ */
+.filter-bar {
+  flex: none;
+  box-sizing: border-box;
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px 10px;
+  min-height: var(--records-band-height);
+  padding: 7px 12px;
+  border-bottom: 1px solid var(--ln);
+  background: var(--records-band-fill);
+}
+@keyframes realtimePulse {
+  0%,
+  100% {
+    opacity: 1;
+  }
+  50% {
+    opacity: 0.4;
+  }
+}
+.divider {
+  width: 1px;
+  height: 18px;
+  background: var(--ln);
+  flex: none;
+}
+.dot-hit {
+  flex: none;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 7px;
+  height: 7px;
+  padding: 5px;
+  margin: -5px;
+  box-sizing: content-box;
+}
+.dot {
+  width: 7px;
+  height: 7px;
+  border-radius: 50%;
+  flex: none;
+}
+.ban {
+  display: flex;
+  flex: none;
+  color: var(--bad);
+}
+/* The page position, the scope's totals in the middle, then the page buttons. */
+.footer {
+  flex: none;
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto minmax(0, 1fr);
+  align-items: center;
+  gap: 12px;
+  height: 40px;
+  padding: 0 10px 0 16px;
+  border-top: 1px solid var(--ln);
+  color: var(--t3);
+  font-size: 11.5px;
+}
+.page-count {
+  overflow: hidden;
+  font-variant-numeric: tabular-nums;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.stats {
+  display: flex;
+  align-items: center;
+  gap: 16px;
+  white-space: nowrap;
+}
+.stat {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  color: var(--t1);
+  font-size: 12px;
+  font-variant-numeric: tabular-nums;
+}
+/* Traffic directions keep the colours they have everywhere else. */
+.up {
+  color: var(--acc-sub);
+}
+.down {
+  color: var(--acc);
+}
+.page-controls {
+  justify-self: end;
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  padding: 3px;
+  border-radius: 8px;
+  background: var(--well);
+  border: 1px solid color-mix(in oklab, var(--t1) 5%, transparent);
+}
+.thead {
+  flex: none;
+  display: grid;
+  grid-template-columns: var(--cols);
+  align-items: center;
+  gap: 12px;
+  padding: 0 16px;
+  height: 36px;
+  background: color-mix(in oklab, var(--t1) 2%, transparent);
+  border-bottom: 1px solid var(--ln);
+  font-size: 12px;
+  color: var(--t3);
+  font-weight: 500;
+}
+.th {
+  display: flex;
+  align-items: center;
+  gap: 5px;
+  border: none;
+  background: none;
+  cursor: pointer;
+  font-size: 12px;
+  font-weight: 500;
+  padding: 0;
+}
+.th:hover {
+  color: var(--t1);
+}
+.arrow {
+  font-size: 9px;
+}
+.tbody {
+  flex: 1;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+  user-select: none;
+  -webkit-user-select: none;
+}
+.tr {
+  display: grid;
+  grid-template-columns: var(--cols);
+  align-items: center;
+  gap: 12px;
+  padding: 0 16px;
+  width: 100%;
+  height: 48px;
+  border: none;
+  border-bottom: 1px solid color-mix(in oklab, var(--t1) 4%, transparent);
+  background: transparent;
+  color: inherit;
+  font: inherit;
+  text-align: left;
+  cursor: pointer;
+}
+.tbody .tr {
+  animation: none;
+}
+.tr:hover {
+  background: color-mix(in oklab, var(--t1) 5%, transparent);
+}
+.tr.selected {
+  background: color-mix(in oklab, var(--acc) 10%, transparent);
+  box-shadow: inset 2px 0 0 var(--acc);
+}
+.tr.new {
+  animation: rowArrive 700ms var(--ease-out) backwards;
+}
+@keyframes rowArrive {
+  0% {
+    opacity: 0;
+    transform: translateY(-6px);
+    background: color-mix(in oklab, var(--acc) 18%, transparent);
+  }
+  55% {
+    background: color-mix(in oklab, var(--acc) 9%, transparent);
+  }
+  100% {
+    background: transparent;
+  }
+}
+.tr:focus-visible {
+  outline: 2px solid color-mix(in oklab, var(--acc) 55%, transparent);
+  outline-offset: -2px;
+}
+.td {
+  display: flex;
+  align-items: center;
+  height: 100%;
+  font-size: 12px;
+  min-width: 0;
+  white-space: nowrap;
+  overflow: hidden;
+}
+.td.right {
+  justify-content: flex-end;
+}
+.app-cell {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  min-width: 0;
+  overflow: visible;
+}
+.td :global(.tooltip-trigger) {
+  display: inline-block;
+  flex: 0 1 auto;
+  width: auto;
+  max-width: 100%;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.dot-hit :global(.tooltip-trigger) {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 17px;
+  height: 17px;
+  max-width: none;
+  overflow: visible;
+  flex: none;
+}
+/* Tooltip's own state classes are module-scoped: out-rank them for every state. */
+.dot-hit.dot-hit.dot-hit :global(.tooltip-trigger) {
+  color: inherit;
+  text-decoration: none;
+}
+.dot-cell {
+  overflow: visible;
+}
+.dest {
+  flex-direction: column;
+  align-items: flex-start;
+  justify-content: center;
+  gap: 2px;
+}
+.dest-host {
+  display: flex;
+  max-width: 100%;
+  min-width: 0;
+  color: var(--t1);
+  font-size: 12.5px;
+}
+.dest-host.blocked {
+  color: var(--t1);
+  font-weight: 500;
+}
+.dest-sub {
+  display: flex;
+  gap: 6px;
+  max-width: 100%;
+  color: var(--t3);
+  font-size: 11px;
+}
+.dest-sub > span {
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.dest-sub > :global(.mono) {
+  flex: none;
+  max-width: 100%;
+}
+/* Which list or rule blocked the row. */
+.reason {
+  min-width: 0;
+  color: color-mix(in oklab, var(--bad) 80%, var(--t2));
+}
+.port {
+  gap: 6px;
+  font-size: 12px;
+}
+.dim {
+  color: var(--t3);
+}
+.proto {
+  font-weight: 500;
+  font-size: 10.5px;
+  color: var(--t3);
+}
+.proto.named {
+  font-weight: 600;
+}
+.right {
+  text-align: right;
+  font-size: 11px;
+  color: var(--t2);
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .tr.new {
+    animation: none;
+  }
+}

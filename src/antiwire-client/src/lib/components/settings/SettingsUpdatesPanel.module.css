@@ -1,0 +1,259 @@
+/* The status card: the state leads, the details follow underneath. */
+.hero {
+  border-radius: 14px;
+  overflow: hidden;
+}
+
+.hero-main {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 16px 18px;
+  padding: 22px 22px;
+}
+
+.hero-new {
+  background: color-mix(in oklab, var(--acc) 5%, transparent);
+}
+
+.hero-icon {
+  flex: none;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 48px;
+  height: 48px;
+  border-radius: 13px;
+}
+
+.ok {
+  color: var(--acc);
+  background: color-mix(in oklab, var(--acc) 12%, transparent);
+}
+
+.busy {
+  color: var(--acc-sub);
+  background: color-mix(in oklab, var(--acc-sub) 11%, transparent);
+}
+
+.bad {
+  color: var(--bad);
+  background: color-mix(in oklab, var(--bad) 12%, transparent);
+}
+
+.new {
+  color: var(--on-acc);
+  background: var(--acc-fill);
+}
+
+.muted {
+  color: var(--t2);
+  background: var(--hl);
+}
+
+.hero-text {
+  flex: 1 1 280px;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+}
+
+.eyebrow {
+  margin: 0;
+  font-size: 11px;
+  font-weight: 600;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  color: var(--acc);
+}
+
+.hero-title {
+  margin: 0;
+  font-size: 17px;
+  font-weight: 600;
+  color: var(--t1);
+}
+
+.hero-body {
+  margin: 0;
+  font-size: 13px;
+  line-height: 1.45;
+  color: var(--t2);
+}
+
+.hero-detail {
+  margin: 3px 0 0;
+  font-size: 12px;
+  line-height: 1.45;
+  color: var(--bad);
+  overflow-wrap: anywhere;
+}
+
+.actions {
+  display: flex;
+  flex: none;
+  gap: 8px;
+}
+
+/* Release notes from the signed manifest, under the card's headline. */
+.notes {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  padding: 16px 22px 18px 88px;
+  border-top: 1px solid var(--ln);
+}
+
+.notes-head {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 12px;
+}
+
+.notes-head h4 {
+  margin: 0;
+  font-size: 13px;
+  font-weight: 600;
+  color: var(--t1);
+}
+
+.notes-body {
+  margin: 0;
+  max-height: 180px;
+  overflow-y: auto;
+  font-size: 13px;
+  line-height: 1.55;
+  color: var(--t2);
+  white-space: pre-line;
+  overflow-wrap: anywhere;
+}
+
+.link {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  font-size: 12px;
+  color: var(--acc);
+}
+
+.meta {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px 20px;
+  margin: 0;
+  padding: 11px 22px;
+  border-top: 1px solid var(--ln);
+  background: var(--well-soft);
+  font-size: 12px;
+  color: var(--t3);
+}
+
+.meta-value {
+  color: var(--t2);
+}
+
+@media (max-width: 720px) {
+  .notes {
+    padding-left: 22px;
+  }
+}
+
+/* Channel cards, with a three-step stability scale. */
+.channels {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 8px;
+  padding-top: 4px;
+}
+
+.channel {
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 6px;
+  height: 100%;
+}
+
+.channel strong {
+  font-size: 13px;
+  font-weight: 600;
+  color: var(--t1);
+}
+
+.channel > span:not(.stability) {
+  font-size: 12px;
+  line-height: 1.45;
+  color: var(--t3);
+}
+
+.stability {
+  display: flex;
+  gap: 3px;
+  margin-bottom: 2px;
+}
+
+.stability span {
+  width: 14px;
+  height: 4px;
+  border-radius: 2px;
+  background: var(--track);
+}
+
+.stability .on {
+  background: var(--acc);
+}
+
+@media (max-width: 720px) {
+  .channels {
+    grid-template-columns: 1fr;
+  }
+}
+
+/* Shown while the picked channel differs from the saved one. */
+.switch-note {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  margin-top: 12px;
+  padding: 14px 16px;
+  border-radius: 10px;
+  border: 1px solid color-mix(in oklab, var(--acc-sub) 22%, transparent);
+  background: color-mix(in oklab, var(--acc-sub) 6%, transparent);
+}
+
+.switch-note p {
+  margin: 0;
+  font-size: 12px;
+  line-height: 1.5;
+  color: var(--t2);
+}
+
+.switch-note .switch-title {
+  font-size: 13px;
+  color: var(--t1);
+}
+
+.switch-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  margin-top: 6px;
+}
+
+.spinning {
+  animation: spin 0.8s linear infinite;
+}
+
+@keyframes spin {
+  to {
+    transform: rotate(360deg);
+  }
+}
+
+/* Reduced motion slows the turn rather than freezing it, so the check still reads as busy. */
+@media (prefers-reduced-motion: reduce) {
+  .spinning {
+    animation-duration: 1.6s;
+  }
+}
