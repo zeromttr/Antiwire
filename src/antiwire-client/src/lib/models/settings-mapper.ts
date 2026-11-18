@@ -139,6 +139,7 @@ export function normalizeSettings(data: SettingsDto & Record<string, unknown>): 
     ),
     windivertEnabled: bool(data, 'windivertEnabled', 'windivert_enabled'),
     windivertSupported: bool(data, 'windivertSupported', 'windivert_supported'),
+    dnsBypassBlockingEnabled: bool(data, 'dnsBypassBlockingEnabled', 'dns_bypass_blocking_enabled'),
     geoIpEnabled: bool(data, 'geoIpEnabled', 'geo_ip_enabled'),
     logDaemonConnections: bool(data, 'logDaemonConnections', 'log_daemon_connections'),
     powerUserSettingsEnabled: bool(data, 'powerUserSettingsEnabled', 'power_user_settings_enabled'),

@@ -24,6 +24,12 @@ interface Props {
 
 /** iCloud Private Relay exists on macOS only, and so does the setting that makes room for it. */
 const offersPrivateRelayCompatibility = windowPlatform() === 'macos';
+/**
+ * Only Windows has to choose: without a driver it can block DNS that apps send past the
+ * resolver, but not redirect it, and a block can leave such an app without the internet.
+ * Linux and macOS redirect it.
+ */
+const offersDnsBypassBlocking = windowPlatform() === 'windows';
 
 export function SettingsDnsPanel({ set, settings }: Props) {
   return (
@@ -124,6 +130,27 @@ export function SettingsDnsPanel({ set, settings }: Props) {
             warning={m.settings_windivert_warning()}
             checked={settings.windivertEnabled}
             onCheckedChange={(v) => set.patch('windivertEnabled', v)}
+          />
+        </SettingsGroup>
+      )}
+
+      {offersDnsBypassBlocking && (
+        <SettingsGroup
+          title={m.settings_group_dns_bypass_title()}
+          description={m.settings_group_dns_bypass_desc()}
+        >
+          <ToggleRow
+            label={m.settings_dns_bypass_block_label()}
+            description={
+              settings.windivertSupported
+                ? `${m.settings_dns_bypass_block_desc()} ${m.settings_dns_bypass_block_windivert_note()}`
+                : m.settings_dns_bypass_block_desc()
+            }
+            warning={m.settings_dns_bypass_block_warning()}
+            checked={settings.dnsBypassBlockingEnabled}
+            // WinDivert redirects these lookups, so there is nothing left to block.
+            disabled={settings.windivertEnabled}
+            onCheckedChange={(v) => set.patch('dnsBypassBlockingEnabled', v)}
           />
         </SettingsGroup>
       )}

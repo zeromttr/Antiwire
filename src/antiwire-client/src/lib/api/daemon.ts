@@ -295,6 +295,8 @@ export interface SettingsDto {
   windivertEnabled: boolean;
   /** Read-only: the daemon can use WinDivert, which only its Windows x64 build can. */
   windivertSupported: boolean;
+  /** Offered on Windows only: block DNS that apps send past the resolver. WinDivert redirects it instead. */
+  dnsBypassBlockingEnabled: boolean;
   geoIpEnabled: boolean;
   logDaemonConnections: boolean;
   powerUserSettingsEnabled: boolean;

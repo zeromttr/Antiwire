@@ -1,19 +1,22 @@
 //! Windows kernel ETW backend.
 //!
-//! `WinDivert` (connect-time flow owners and the port-53 divert) is off until the
-//! application turns it on with [`set_windivert_enabled`]: until then nothing downloads,
-//! installs, or loads it, and the collector runs on ETW and the socket tables alone.
+//! `WinDivert` (connect-time flow owners, and sending DNS that bypasses the resolver back
+//! to it) is off until the application turns it on with [`set_windivert_enabled`]: until
+//! then nothing downloads, installs, or loads it. The collector then runs on ETW and the
+//! socket tables alone, and bypassing DNS is refused with the Windows Filtering Platform,
+//! which needs no driver.
 //!
-//! It is compiled only for `x86_64`. The official 2.2.2 package ships no ARM64 driver, so
-//! other architectures never use it, whatever the switch says.
+//! `WinDivert` is compiled only for `x86_64`. The official 2.2.2 package ships no ARM64
+//! driver, so other architectures never use it, whatever the switch says.
 #![allow(unsafe_code)]
 
 #[cfg(windows)]
 mod divert_error;
+#[cfg(windows)]
+mod dns_block;
+#[cfg(windows)]
+mod dns_bypass;
 #[cfg(all(windows, target_arch = "x86_64"))]
-mod dns_divert;
-#[cfg(all(windows, not(target_arch = "x86_64")))]
-#[path = "dns_divert_unavailable.rs"]
 mod dns_divert;
 #[cfg(windows)]
 mod endpoint_owner;
@@ -53,9 +56,8 @@ mod windivert_package;
 mod windows;
 
 #[cfg(windows)]
-pub use dns_divert::{
-    ActiveDivert as DnsDivert, install as install_dns_divert,
-    original_endpoint as dns_divert_original_endpoint,
+pub use dns_bypass::{
+    DnsDivert, install as install_dns_divert, original_endpoint as dns_divert_original_endpoint,
 };
 #[cfg(windows)]
 pub use interface::InterfaceEstimator;

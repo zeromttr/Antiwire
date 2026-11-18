@@ -191,6 +191,7 @@ export function createFixtures(now: number) {
     persistRulesOffline: true,
     privateRelayCompatibility: false,
     windivertEnabled: false,
+    dnsBypassBlockingEnabled: false,
     windivertSupported: true,
     geoIpEnabled: true,
     logDaemonConnections: false,

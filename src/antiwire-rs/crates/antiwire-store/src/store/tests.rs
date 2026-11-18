@@ -1,8 +1,8 @@
 use super::*;
 use crate::models::{
     activity_bucket_start, format_timestamp, Application, ConnectionDomainUpgrade,
-    ConnectionLogAttribution, ConnectionLogQuery, DnsCacheEntry, DomainDecision, FirewallRule,
-    NetworkDevice, NetworkDeviceWatch, NewAlert, NewConnectionLog,
+    ConnectionLogAttribution, ConnectionLogQuery, DnsBypass, DnsCacheEntry, DomainDecision,
+    FirewallRule, NetworkDevice, NetworkDeviceWatch, NewAlert, NewConnectionLog,
 };
 use antiwire_policy::RuleTargetKind;
 use antiwire_secrets::SecretBytes;
@@ -905,31 +905,65 @@ fn windivert_starts_off_and_saves() {
     let (_file, store) = temp_store();
     let mut settings = store.get_settings().expect("settings");
     assert!(!settings.windivert_enabled);
-    assert_eq!(settings.diverts_dns(), !cfg!(windows));
+    // Windows cannot redirect without the driver, and blocks only when asked to.
+    let without_windivert = if cfg!(windows) {
+        DnsBypass::Open
+    } else {
+        DnsBypass::Redirected
+    };
+    assert_eq!(settings.dns_bypass(), without_windivert);
 
     settings.windivert_enabled = true;
     store.update_settings(&settings).expect("save");
 
     let mut saved = store.get_settings().expect("reload");
     assert!(saved.windivert_enabled);
-    assert!(saved.diverts_dns());
+    assert_eq!(saved.dns_bypass(), DnsBypass::Redirected);
 
-    // The divert is a packet rule, whatever it is made of.
+    // Catching it is a packet rule, whatever it is made of.
     saved.private_relay_compatibility = true;
-    assert!(!saved.diverts_dns());
+    assert_eq!(saved.dns_bypass(), DnsBypass::Open);
 }
 
-/// A database from before the setting existed gains it, switched off.
 #[test]
-fn a_database_without_the_windivert_setting_gains_it_switched_off() {
+fn dns_bypass_blocking_starts_off_and_saves() {
     let (_file, store) = temp_store();
-    store
-        .db
-        .execute(
-            "ALTER TABLE daemon_settings DROP COLUMN windivert_enabled",
-            [],
-        )
-        .expect("drop the column");
+    let mut settings = store.get_settings().expect("settings");
+    assert!(!settings.dns_bypass_blocking_enabled);
+
+    settings.dns_bypass_blocking_enabled = true;
+    store.update_settings(&settings).expect("save");
+
+    let mut saved = store.get_settings().expect("reload");
+    assert!(saved.dns_bypass_blocking_enabled);
+    // Only Windows blocks, and only where it cannot redirect.
+    let blocking = if cfg!(windows) {
+        DnsBypass::Refused
+    } else {
+        DnsBypass::Redirected
+    };
+    assert_eq!(saved.dns_bypass(), blocking);
+
+    saved.windivert_enabled = true;
+    assert_eq!(saved.dns_bypass(), DnsBypass::Redirected);
+
+    saved.private_relay_compatibility = true;
+    assert_eq!(saved.dns_bypass(), DnsBypass::Open);
+}
+
+/// A database from before the two settings existed gains them, switched off.
+#[test]
+fn a_database_without_the_newer_settings_gains_them_switched_off() {
+    let (_file, store) = temp_store();
+    for column in ["windivert_enabled", "dns_bypass_blocking_enabled"] {
+        store
+            .db
+            .execute(
+                &format!("ALTER TABLE daemon_settings DROP COLUMN {column}"),
+                [],
+            )
+            .expect("drop the column");
+    }
     store
         .db
         .execute("DELETE FROM schema_migrations WHERE version = 2", [])
@@ -937,7 +971,9 @@ fn a_database_without_the_windivert_setting_gains_it_switched_off() {
 
     store.migrate().expect("migrate");
 
-    assert!(!store.get_settings().expect("settings").windivert_enabled);
+    let settings = store.get_settings().expect("settings");
+    assert!(!settings.windivert_enabled);
+    assert!(!settings.dns_bypass_blocking_enabled);
 }
 
 #[test]

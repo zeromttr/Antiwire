@@ -35,14 +35,23 @@ Antiwire is at version `0.1.0` and under active development.
 
 | Platform | Monitoring | Firewall | Rules on applications | DNS redirection |
 | --- | --- | --- | --- | --- |
-| Windows x64 | ETW (falls back to IP Helper). With WinDivert turned on, also the app that opened each connection, as it opens | Windows Firewall (falls back to WFP) | Yes | WinDivert, once you turn it on |
-| Windows ARM64 | ETW (falls back to IP Helper) | Windows Firewall (falls back to WFP) | Yes | None |
+| Windows x64 | ETW (falls back to IP Helper). With WinDivert turned on, also the app that opened each connection, as it opens | Windows Firewall (falls back to WFP) | Yes | WinDivert, once you turn it on. Without it, such queries can be blocked (WFP), also once you turn that on |
+| Windows ARM64 | ETW (falls back to IP Helper) | Windows Firewall (falls back to WFP) | Yes | None. Such queries can be blocked (WFP), once you turn that on |
 | Linux | eBPF (falls back to procfs) | nftables (falls back to iptables) | No | nftables (falls back to iptables) |
 | macOS | PKTAP | PF | No | PF |
 
 DNS redirection sends DNS queries that try to skip Antiwire's resolver back through it. On Linux
 that covers every program, those running as root included; on macOS programs running as root are
 not redirected.
+
+Windows can redirect such queries only with a kernel driver, which is what WinDivert is. Without
+it, Antiwire can block them with the Windows Filtering Platform, which needs no driver. The
+block is off until you turn it on, in Settings under "DNS & privacy", because it can cut a
+program off: one that sends DNS straight to a resolver of its own choosing (port 53, or port 853
+for DNS over TLS) gets no answer that way, and resolves only if it falls back to the system's DNS
+settings. The system resolver itself and Antiwire are let through, and Windows removes the block
+by itself if Antiwire stops unexpectedly. With neither WinDivert nor the block, such queries
+reach the resolver they were sent to, unfiltered.
 
 The iptables fallback is for a Linux system without `nft`. Its firewall rules cover IPv4 only:
 a rule on an IPv6 address is refused there, and the blocks Antiwire builds itself, on public
@@ -62,8 +71,9 @@ on, in Settings under "DNS & privacy". Anti-cheat software may treat the driver 
 violation: a game may refuse to run, or ban the account. While it is off, Antiwire neither
 downloads nor loads it. Which app opened a connection then comes from ETW and the socket tables
 alone, and DNS sent straight to another resolver is not redirected (the adapters still point
-at Antiwire's resolver). Turning it on downloads the driver from the WinDivert website. After
-you turn it off again, Windows keeps the driver loaded until the computer restarts.
+at Antiwire's resolver); it can be blocked instead, as above. Turning WinDivert on downloads the
+driver from the WinDivert website. After you turn it off again, Windows keeps the driver loaded
+until the computer restarts.
 
 WinDivert has no ARM64 driver, so the Windows ARM64 build leaves it out entirely: it never
 downloads or loads it, and its settings do not offer it.

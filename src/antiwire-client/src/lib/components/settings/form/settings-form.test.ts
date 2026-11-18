@@ -92,6 +92,7 @@ function dto(overrides: Partial<SettingsDto> = {}): SettingsDto {
     persistRulesOffline: false,
     privateRelayCompatibility: false,
     windivertEnabled: false,
+    dnsBypassBlockingEnabled: false,
     windivertSupported: false,
     geoIpEnabled: false,
     logDaemonConnections: false,

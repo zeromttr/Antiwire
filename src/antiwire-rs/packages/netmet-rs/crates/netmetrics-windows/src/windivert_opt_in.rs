@@ -20,9 +20,9 @@ static ENABLED: AtomicBool = AtomicBool::new(false);
 /// with `true`.
 ///
 /// Allowing it lets a running collector start its FLOW listener, which downloads the
-/// official package on first use, and lets the port-53 divert be installed. Forbidding it
-/// stops that listener within one poll of the collector and refuses every later open. A
-/// port-53 divert that is already installed keeps its handle until it is dropped.
+/// official package on first use, and makes the next port-53 divert a redirect. Forbidding
+/// it stops that listener within one poll of the collector and refuses every later open. A
+/// port-53 divert that is already installed keeps its form until it is dropped.
 ///
 /// Closing the last handle does not unload the driver. The `WinDivert` manual
 /// (<https://reqrypt.org/windivert-doc.html>, "Driver Installation") says a running

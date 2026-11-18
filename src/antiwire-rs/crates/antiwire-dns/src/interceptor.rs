@@ -3,7 +3,7 @@
 use std::sync::Arc;
 
 use antiwire_events::{Alert, AlertKind, AlertPublisher, Severity};
-use antiwire_store::{DaemonSetting, Store};
+use antiwire_store::{DaemonSetting, DnsBypass, Store};
 use futures_util::future::BoxFuture;
 use netmetrics::dns_divert::DivertEvent;
 use parking_lot::Mutex;
@@ -33,6 +33,9 @@ pub struct DnsInterceptor {
     redirect: DnsRedirect,
     /// Its install is replaceable in tests, as the listener's construction is.
     dns_divert: Port53Divert,
+    /// What the divert was last installed to do. A restart for settings that ask for
+    /// something else takes it out first.
+    dns_bypass: DnsBypass,
     /// Listener construction, replaceable in lifecycle fault-injection tests.
     bind_listener: fn(Arc<QueryEngine<EnginePolicy>>) -> Result<DnsListener>,
 }
@@ -52,6 +55,7 @@ impl DnsInterceptor {
             network_watcher: None,
             redirect,
             dns_divert: Port53Divert::on_host(),
+            dns_bypass: DnsBypass::Open,
             bind_listener: DnsListener::start_default,
         }
     }
@@ -128,7 +132,7 @@ impl DnsInterceptor {
 
         let settings = store.get_settings()?;
         match self.build_engine(&settings) {
-            Ok(stub) => self.serve(stub, settings.diverts_dns()).await,
+            Ok(stub) => self.serve(stub, settings.dns_bypass()).await,
             Err(error) => {
                 self.recover_after_failed_start().await;
                 Err(error)
@@ -151,21 +155,21 @@ impl DnsInterceptor {
     /// rewritten twice. The new engine is built before the old stack stops: a
     /// configuration it rejects leaves the running resolver serving.
     ///
-    /// A port 53 divert the settings no longer want is taken out before that, so a
-    /// rejected configuration cannot keep it installed.
+    /// A port 53 divert the settings no longer want, or want in the other form, is taken
+    /// out before that, so a rejected configuration cannot keep it installed.
     pub(crate) async fn restart(&mut self, store: &Store) -> Result<()> {
         self.redirect.stop_restoring().await;
         if !self.is_running() {
             return self.start(store).await;
         }
         let settings = store.get_settings()?;
-        if !settings.diverts_dns() {
+        if settings.dns_bypass() != self.dns_bypass {
             self.disable_dns_divert();
         }
         let stub = self.build_engine(&settings)?;
         self.disable_dns_divert();
         self.shutdown_stack().await;
-        self.serve(stub, settings.diverts_dns()).await
+        self.serve(stub, settings.dns_bypass()).await
     }
 
     /// Builds the query engine for `settings`.
@@ -196,18 +200,26 @@ impl DnsInterceptor {
         Ok(stub)
     }
 
-    /// Binds the listener for `stub`, then redirects OS DNS to it and, with `divert`,
-    /// installs the port 53 divert. Expects no stack to be running.
+    /// Binds the listener for `stub`, then redirects OS DNS to it and installs the port 53
+    /// divert that `bypass` asks for (`DaemonSetting::dns_bypass`). Expects no stack to be
+    /// running.
+    ///
+    /// The divert takes its form from `netmetrics`: DNS sent past the system's settings is
+    /// sent to the resolver, or, on Windows without `WinDivert`, refused.
+    ///
+    /// With [`DnsBypass::Open`] nothing is installed: the user has switched packet rules
+    /// off, or is on Windows without `WinDivert` and has not asked for the block. DNS sent
+    /// past the system's settings is then not filtered, by their choice, and is not
+    /// reported as a gap.
     ///
     /// The install is waited for only briefly (`DNS_DIVERT_INSTALL_WAIT`): one that has to
     /// download the `WinDivert` package first carries on after this returns, and a failure
     /// then reaches the user as an alert of its own.
-    ///
-    /// Without `divert` the settings leave the divert out (`DaemonSetting::diverts_dns`):
-    /// the user has switched packet rules off or, on Windows, has not turned `WinDivert`
-    /// on. DNS sent past the system's settings is then not filtered, by their choice, and
-    /// is not reported as a gap.
-    async fn serve(&mut self, stub: Arc<QueryEngine<EnginePolicy>>, divert: bool) -> Result<()> {
+    async fn serve(
+        &mut self,
+        stub: Arc<QueryEngine<EnginePolicy>>,
+        bypass: DnsBypass,
+    ) -> Result<()> {
         let listener = match (self.bind_listener)(Arc::clone(&stub)) {
             Ok(listener) => listener,
             Err(error) => {
@@ -235,11 +247,11 @@ impl DnsInterceptor {
             }
         };
 
-        let divert = if divert {
-            self.install_dns_divert().await
-        } else {
+        let divert = if bypass == DnsBypass::Open {
             info!("port 53 bypass divert left out, as the settings say");
             true
+        } else {
+            self.install_dns_divert(bypass).await
         };
 
         self.report_enforcement_gaps(DnsEnforcement {
@@ -251,9 +263,11 @@ impl DnsInterceptor {
         Ok(())
     }
 
-    /// Installs the port 53 divert, and returns whether nothing is known to be wrong
-    /// with it once the wait is over: it is installed, or still being installed.
-    async fn install_dns_divert(&mut self) -> bool {
+    /// Installs the port 53 divert to do what `bypass` says, and returns whether nothing
+    /// is known to be wrong with it once the wait is over: it is installed, or still being
+    /// installed.
+    async fn install_dns_divert(&mut self, bypass: DnsBypass) -> bool {
+        self.dns_bypass = bypass;
         let alerts = self.dependencies.alerts.clone();
         let late_failure = move |detail: String| {
             warn!(%detail, "port 53 bypass divert was not installed");
@@ -269,7 +283,7 @@ impl DnsInterceptor {
             .await;
         match installed {
             DivertInstall::Installed => {
-                info!("outbound port 53 that bypasses the stub is diverted to it");
+                info!(?bypass, "port 53 bypass divert is in place");
                 true
             }
             DivertInstall::Failed(detail) => {
@@ -318,6 +332,7 @@ impl DnsInterceptor {
     }
 
     fn disable_dns_divert(&mut self) {
+        self.dns_bypass = DnsBypass::Open;
         self.dns_divert.remove();
         netmetrics::dns_divert::clear_leftover();
     }
@@ -579,7 +594,7 @@ mod tests {
     use std::time::Duration;
 
     use antiwire_policy::RuleEngine;
-    use antiwire_store::{DaemonSetting, Store};
+    use antiwire_store::{DaemonSetting, DnsBypass, Store};
     use parking_lot::RwLock;
 
     use antiwire_dns_redirect::{AppliedRedirect, RedirectBackend};
@@ -616,11 +631,13 @@ mod tests {
         }
     }
 
-    /// An interceptor whose redirect cannot change this host's DNS, even when
-    /// the tests run elevated.
+    /// An interceptor whose redirect cannot change this host's DNS, and whose port 53
+    /// divert installs nothing, even when the tests run elevated.
     fn interceptor(store: &Arc<Store>) -> DnsInterceptor {
         let mut interceptor = DnsInterceptor::new(dependencies(store, None), false);
         interceptor.redirect.set_backend(RedirectBackend::INERT);
+        interceptor.dns_divert =
+            Port53Divert::installing_with(Arc::new(|_| Err("no divert in tests".to_owned())));
         interceptor
     }
 
@@ -835,14 +852,18 @@ mod tests {
         }
     }
 
-    /// Installs a stand-in divert for `interceptor`, and returns what its removal sets.
-    async fn install_fake_divert(interceptor: &mut DnsInterceptor) -> Arc<AtomicBool> {
+    /// Installs a stand-in divert for `interceptor`, to do what `bypass` says, and returns
+    /// what its removal sets.
+    async fn install_fake_divert(
+        interceptor: &mut DnsInterceptor,
+        bypass: DnsBypass,
+    ) -> Arc<AtomicBool> {
         let removed = Arc::new(AtomicBool::new(false));
         let fake = Arc::clone(&removed);
         interceptor.dns_divert = Port53Divert::installing_with(Arc::new(move |_| {
             Ok(Box::new(FakeDivert(Arc::clone(&fake))) as InstalledDivert)
         }));
-        assert!(interceptor.install_dns_divert().await);
+        assert!(interceptor.install_dns_divert(bypass).await);
         assert!(interceptor.dns_divert.is_installed());
         removed
     }
@@ -857,7 +878,7 @@ mod tests {
             settings.private_relay_compatibility = true;
         });
         let mut interceptor = running_interceptor(&store);
-        let removed = install_fake_divert(&mut interceptor).await;
+        let removed = install_fake_divert(&mut interceptor, DnsBypass::Redirected).await;
 
         assert!(interceptor.restart(store.as_ref()).await.is_err());
 
@@ -866,13 +887,37 @@ mod tests {
         assert!(interceptor.is_running(), "the old resolver keeps serving");
     }
 
+    /// A redirect is `WinDivert`, and it must not stay once the settings turn that off; nor
+    /// may a block stay once they ask for the redirect.
+    #[tokio::test]
+    async fn a_rejected_configuration_still_takes_out_a_divert_of_the_other_form() {
+        let (_dir, store) = crate::test_support::temp_store();
+        save_rejected_settings(&store, |_| ());
+        let wanted = store.get_settings().expect("settings").dns_bypass();
+        let other = match wanted {
+            DnsBypass::Redirected => DnsBypass::Refused,
+            _ => DnsBypass::Redirected,
+        };
+        let mut interceptor = running_interceptor(&store);
+        let removed = install_fake_divert(&mut interceptor, other).await;
+
+        assert!(interceptor.restart(store.as_ref()).await.is_err());
+
+        assert!(removed.load(Ordering::SeqCst));
+        assert!(!interceptor.dns_divert.is_installed());
+    }
+
     #[tokio::test]
     async fn a_rejected_configuration_keeps_a_divert_the_settings_still_want() {
         let (_dir, store) = crate::test_support::temp_store();
-        // On Windows the divert is wanted only with `WinDivert` turned on.
-        save_rejected_settings(&store, |settings| settings.windivert_enabled = true);
+        // Windows catches DNS sent past the resolver only when asked to.
+        save_rejected_settings(&store, |settings| {
+            settings.dns_bypass_blocking_enabled = true;
+        });
+        let wanted = store.get_settings().expect("settings").dns_bypass();
+        assert_ne!(wanted, DnsBypass::Open);
         let mut interceptor = running_interceptor(&store);
-        let removed = install_fake_divert(&mut interceptor).await;
+        let removed = install_fake_divert(&mut interceptor, wanted).await;
 
         assert!(interceptor.restart(store.as_ref()).await.is_err());
 
@@ -888,7 +933,7 @@ mod tests {
         interceptor.dns_divert =
             Port53Divert::installing_with(Arc::new(|_| Err("no permission".to_owned())));
 
-        assert!(!interceptor.install_dns_divert().await);
+        assert!(!interceptor.install_dns_divert(DnsBypass::Redirected).await);
         assert!(!interceptor.dns_divert.is_installed());
     }
 

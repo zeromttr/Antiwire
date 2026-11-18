@@ -173,10 +173,14 @@ message SettingsRequest {
   // offers it on macOS only.
   bool private_relay_compatibility = 83;
   // Windows only. Lets the daemon use WinDivert, a third-party kernel driver, for
-  // connect-time flow owners and the port 53 divert. Off by default: anti-cheat software
-  // can treat the driver as an integrity violation. While it is off the driver is neither
-  // downloaded nor loaded.
+  // connect-time flow owners and to send DNS that bypasses the resolver back to it. Off by
+  // default: anti-cheat software can treat the driver as an integrity violation. While it
+  // is off the driver is neither downloaded nor loaded.
   bool windivert_enabled = 84;
+  // Windows only, and only while WinDivert is off: blocks DNS that an application sends
+  // past the resolver, straight to a server of its own choosing. Windows cannot redirect it
+  // without a driver. Off by default: such an application may then resolve nothing.
+  bool dns_bypass_blocking_enabled = 86;
   reserved 41; // removed dnssec_validation_enabled
   reserved 42; // removed dns_ecs_stripping_enabled
   reserved 43; // removed dns_edns_padding_enabled
@@ -281,6 +285,7 @@ message SettingsResponse {
   // Read-only: whether this daemon can use WinDivert at all. Only the Windows build for
   // x86-64 can, and the client offers the setting only where this is true.
   bool windivert_supported = 85;
+  bool dns_bypass_blocking_enabled = 86;
   reserved 41; // removed dnssec_validation_enabled
   reserved 42; // removed dns_ecs_stripping_enabled
   reserved 43; // removed dns_edns_padding_enabled

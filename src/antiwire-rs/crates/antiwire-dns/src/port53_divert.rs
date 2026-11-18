@@ -110,9 +110,7 @@ impl Port53Divert {
             };
             if let Err(unheard) = ended.send(result) {
                 match unheard {
-                    Ok(()) => info!(
-                        "outbound port 53 that bypasses the stub is diverted to it, after a slow install"
-                    ),
+                    Ok(()) => info!("port 53 bypass divert is in place, after a slow install"),
                     Err(detail) => late_failure(detail),
                 }
             }

@@ -4,14 +4,15 @@
 //! downloaded, loaded or run for it: the collector takes flow owners from kernel ETW and
 //! the socket tables alone, [`crate::endpoint_owner`] reports
 //! [`EndpointOwner::Unavailable`](crate::endpoint_owner::EndpointOwner::Unavailable), and
-//! [`crate::dns_divert::start`] refuses.
+//! [`crate::dns_divert::start`] refuses DNS that bypasses the stub, with the Windows
+//! Filtering Platform, where `WinDivert` would send it to the stub.
 //!
 //! It is off by default because a loaded packet-capture driver is something anti-cheat
 //! software can treat as an integrity violation: a game may refuse to start, or ban the
 //! account. Turn it on only when the user asked for it.
 //!
-//! Turning it on gives the Windows collector connect-time flow owners and makes the
-//! port-53 divert available. The first use downloads the official package from
+//! Turning it on gives the Windows collector connect-time flow owners and lets the
+//! port-53 divert redirect. The first use downloads the official package from
 //! <https://reqrypt.org/download/WinDivert-2.2.2-A.zip>.
 //!
 //! On every other platform, and on Windows architectures `WinDivert` has no driver for,
@@ -22,8 +23,8 @@
 ///
 /// A running collector follows the switch within one poll: it starts its FLOW listener
 /// when turned on, and closes it when turned off. A [`DnsDivert`](crate::dns_divert::DnsDivert)
-/// that is already running keeps its handle until it is dropped, so drop it when turning
-/// `WinDivert` off.
+/// that is already running keeps the form it started in, so drop it and start it again
+/// when turning `WinDivert` on or off.
 ///
 /// Turning it off closes the handles but does not unload the driver: `WinDivert` leaves
 /// a running driver loaded until the next reboot, or until `sc stop WinDivert`.

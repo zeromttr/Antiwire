@@ -17,10 +17,14 @@ windows = { version = "0.57", features = [
     "Win32_Foundation",
     "Win32_NetworkManagement_IpHelper",
     "Win32_NetworkManagement_Ndis",
+    "Win32_NetworkManagement_WindowsFilteringPlatform",
     "Win32_Networking_WinSock",
+    "Win32_Security",
     "Win32_System_Diagnostics_Etw",
     "Win32_System_LibraryLoader",
     "Win32_System_Performance",
+    "Win32_System_Rpc",
+    "Win32_System_SystemInformation",
     "Win32_System_Threading",
 ] }
 
@@ -37,6 +41,9 @@ ureq = { version = "3.4", default-features = false, features = [
     "win-system-proxy",
 ] }
 zip = { version = "9.0", default-features = false, features = ["deflate-flate2-zlib-rs"] }
+
+[dev-dependencies]
+netmetrics-core = { workspace = true, features = ["test-support"] }
 
 [lints]
 workspace = true

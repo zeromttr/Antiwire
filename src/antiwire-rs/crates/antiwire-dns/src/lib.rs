@@ -68,8 +68,10 @@ pub fn clear_port53_divert() {
 /// until this allows it, and Windows is the only place it does anything.
 ///
 /// Both users of the driver follow it: the flow collector's connect-time owners, at once,
-/// and the port 53 divert, when the resolver next starts. So call this before either
-/// starts, and before [`apply_dns_settings_change`] when the setting changes.
+/// and the port 53 divert, when the resolver next starts: with the driver it sends DNS
+/// that bypasses the resolver back to it, and without it Windows can only refuse that DNS,
+/// which it does when the settings ask. So call this before either starts, and before
+/// [`apply_dns_settings_change`] when the setting changes.
 pub fn apply_windivert_setting(settings: &antiwire_store::DaemonSetting) {
     netmetrics::windivert::set_enabled(settings.windivert_enabled);
 }

@@ -78,6 +78,7 @@ export const SETTINGS_FIELDS = {
   persistRulesOffline: 'bool',
   privateRelayCompatibility: 'bool',
   windivertEnabled: 'bool',
+  dnsBypassBlockingEnabled: 'bool',
   geoIpEnabled: 'bool',
   logDaemonConnections: 'bool',
   powerUserSettingsEnabled: 'bool',

@@ -109,10 +109,11 @@ pub async fn apply_dns_settings_change(
 ) -> Result<()> {
     let store = &dependencies.store;
     let enabled_changed = previous.dns_resolver_enabled != updated.dns_resolver_enabled;
-    // The port 53 divert is installed or left out as the resolver starts, so a change to
-    // whether DNS is diverted restarts it like a change to its configuration.
+    // The port 53 divert is installed, in one form or the other, or left out as the
+    // resolver starts. So a change to what becomes of DNS sent past the resolver restarts
+    // it like a change to its configuration.
     let stub_changed =
-        dns_config_changed(previous, updated) || previous.diverts_dns() != updated.diverts_dns();
+        dns_config_changed(previous, updated) || previous.dns_bypass() != updated.dns_bypass();
     let ai_changed = crate::ai_support::ai_config_changed(previous, updated);
 
     if !enabled_changed && !stub_changed && !ai_changed {

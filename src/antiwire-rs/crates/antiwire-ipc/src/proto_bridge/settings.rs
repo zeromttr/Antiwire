@@ -89,6 +89,7 @@ pub(crate) fn settings_to_proto(settings: &DaemonSetting) -> SettingsResponse {
         private_relay_compatibility: settings.private_relay_compatibility,
         windivert_enabled: settings.windivert_enabled,
         windivert_supported: antiwire_dns::windivert_supported(),
+        dns_bypass_blocking_enabled: settings.dns_bypass_blocking_enabled,
         network_mapping_auto_enabled: settings.network_mapping_auto_enabled,
         network_mapping_interval_minutes: i32_to_u32(settings.network_mapping_interval_minutes),
         oui_database_last_updated: format_timestamp_rfc3339(settings.oui_database_last_updated),
@@ -210,7 +211,10 @@ pub(crate) fn settings_merge_request(
     settings.notify_threat_detected = request.notify_threat_detected;
     settings.persist_rules_offline = request.persist_rules_offline;
     settings.private_relay_compatibility = request.private_relay_compatibility;
-    settings.windivert_enabled = request.windivert_enabled;
+    // A build that cannot use the driver never saves it as allowed, whatever a client
+    // sends: the settings would then ask for a redirect that cannot be made.
+    settings.windivert_enabled = request.windivert_enabled && antiwire_dns::windivert_supported();
+    settings.dns_bypass_blocking_enabled = request.dns_bypass_blocking_enabled;
     settings.geoip_enabled = request.geo_ip_enabled;
     settings.log_daemon_connections = request.log_daemon_connections;
     settings.power_user_settings_enabled = request.power_user_settings_enabled;
