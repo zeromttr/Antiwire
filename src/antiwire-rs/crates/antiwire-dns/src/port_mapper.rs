@@ -10,8 +10,7 @@ use std::sync::atomic::{AtomicU64, Ordering};
 
 pub(crate) use netmetrics::Ownership;
 
-#[cfg(windows)]
-mod windows_impl {
+mod socket_table {
     use super::Ownership;
     use netmetrics::owner_cache::{Pending, Wait};
     use netmetrics::{LocalEndpoint, Protocol, SocketOwnerCache};
@@ -21,7 +20,8 @@ mod windows_impl {
     /// DNS redirect by [`super::client_endpoint`], from the process-wide
     /// [`SocketOwnerCache`]. Its refresh interval keeps attribution bursts of
     /// missing (often already closed) ports from scanning the socket table per
-    /// query: lookups start at most four scans of a protocol a second.
+    /// query: lookups start at most four scans a second, of one protocol's
+    /// tables on Windows and of every table elsewhere.
     ///
     /// `wait_for_scan` waits behind a running scan or for the next slot, until
     /// the query's deadline; only callers off the reply path may wait. Without
@@ -83,8 +83,8 @@ mod windows_impl {
 
     /// Bench support: times `samples` socket-table captures of every table
     /// and of each protocol's alone, and prints the observed scan cost.
-    /// Windows-only, because the table backend is.
-    #[cfg(feature = "bench-internals")]
+    /// Windows-only: a scan reads one protocol's tables only there.
+    #[cfg(all(windows, feature = "bench-internals"))]
     pub(crate) fn run_snapshot_benchmark() {
         const SAMPLES: u32 = 25;
         type Scan = fn() -> netmetrics::SocketOwnerSnapshot;
@@ -111,6 +111,31 @@ mod windows_impl {
     }
 }
 
+/// What a client lookup is for, which decides whether it may scan the socket
+/// tables.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum Purpose {
+    /// The history row of a blocked query.
+    BlockedQuery,
+    /// The hint that names the connections a served answer leads to.
+    ServedAnswer,
+}
+
+impl Purpose {
+    /// Whether a lookup for this may scan the socket tables.
+    ///
+    /// On Windows a scan reads one protocol's tables in well under a
+    /// millisecond, and any lookup may ask for one. Elsewhere it walks every
+    /// process's descriptors, which takes tens of milliseconds, and the
+    /// receive loop that asked answers nothing meanwhile. A blocked query's
+    /// row is worth that: it is what the user reads, and the client loses
+    /// nothing when a refusal comes late. A served answer's hint is not: every
+    /// client waiting on that loop would pay for it.
+    fn may_scan(self) -> bool {
+        cfg!(windows) || self == Self::BlockedQuery
+    }
+}
+
 /// Owner of the socket `context`'s query came from, if the reply path can
 /// tell it now.
 ///
@@ -120,52 +145,50 @@ mod windows_impl {
 /// lookup needed another: finish it with [`deferred_query_owner`] off the
 /// reply path. On a multi-threaded runtime the scan steps off the async worker
 /// so other tasks keep running; a lookup that does not scan stays where it is.
-pub(crate) fn reply_path_query_owner(context: &DnsQueryContext) -> Option<Ownership> {
-    table_query_owner(context, false)
+///
+/// A lookup whose `purpose` is not worth a scan ([`Purpose::may_scan`]) is
+/// answered [`Ownership::NotFound`] without one.
+pub(crate) fn reply_path_query_owner(
+    context: &DnsQueryContext,
+    purpose: Purpose,
+) -> Option<Ownership> {
+    table_query_owner(context, purpose, false)
 }
 
 /// [`reply_path_query_owner`], or with `wait_for_scan` a lookup that waits
 /// behind a scan already running and always answers.
-fn table_query_owner(context: &DnsQueryContext, wait_for_scan: bool) -> Option<Ownership> {
-    #[cfg(windows)]
-    {
-        let (protocol, endpoint) = client_endpoint(context);
-        // Nearly every lookup is answered by the snapshot already taken, or
-        // needs a scan that is not due. Neither blocks, and stepping off an
-        // async worker for them cost each answer more than the lookup itself:
-        // it hands the worker's tasks to another thread, which has to wake.
-        match windows_impl::lookup_without_scan(
-            netmetrics::SocketOwnerCache::shared(),
-            protocol,
-            endpoint,
-            context.received_at,
-            wait_for_scan,
-        ) {
-            windows_impl::WithoutScan::Owner(owner) => return Some(owner),
-            windows_impl::WithoutScan::Busy => return None,
-            windows_impl::WithoutScan::Blocks => {}
-        }
-        let lookup = || {
-            windows_impl::lookup_socket_owner(
-                protocol,
-                endpoint,
-                context.received_at,
-                wait_for_scan,
-            )
-        };
-        match tokio::runtime::Handle::try_current() {
-            Ok(handle)
-                if handle.runtime_flavor() != tokio::runtime::RuntimeFlavor::CurrentThread =>
-            {
-                tokio::task::block_in_place(lookup)
-            }
-            _ => lookup(),
-        }
+fn table_query_owner(
+    context: &DnsQueryContext,
+    purpose: Purpose,
+    wait_for_scan: bool,
+) -> Option<Ownership> {
+    if !purpose.may_scan() {
+        return Some(Ownership::NotFound);
     }
-    #[cfg(not(windows))]
-    {
-        let _ = (context, wait_for_scan);
-        Some(Ownership::NotFound)
+    let (protocol, endpoint) = client_endpoint(context);
+    // Nearly every lookup is answered by the snapshot already taken, or
+    // needs a scan that is not due. Neither blocks, and stepping off an
+    // async worker for them cost each answer more than the lookup itself:
+    // it hands the worker's tasks to another thread, which has to wake.
+    match socket_table::lookup_without_scan(
+        netmetrics::SocketOwnerCache::shared(),
+        protocol,
+        endpoint,
+        context.received_at,
+        wait_for_scan,
+    ) {
+        socket_table::WithoutScan::Owner(owner) => return Some(owner),
+        socket_table::WithoutScan::Busy => return None,
+        socket_table::WithoutScan::Blocks => {}
+    }
+    let lookup = || {
+        socket_table::lookup_socket_owner(protocol, endpoint, context.received_at, wait_for_scan)
+    };
+    match tokio::runtime::Handle::try_current() {
+        Ok(handle) if handle.runtime_flavor() != tokio::runtime::RuntimeFlavor::CurrentThread => {
+            tokio::task::block_in_place(lookup)
+        }
+        _ => lookup(),
     }
 }
 
@@ -192,7 +215,7 @@ pub(crate) fn recorded_owners_available() -> bool {
 /// A job that waited in a backlog past the query deadline skips the table
 /// fallback: the client has given up by then and its port may belong to
 /// another process, so the table would name the wrong owner.
-pub(crate) fn deferred_query_owner(context: &DnsQueryContext) -> Ownership {
+pub(crate) fn deferred_query_owner(context: &DnsQueryContext, purpose: Purpose) -> Ownership {
     let (protocol, endpoint) = client_endpoint(context);
     let recorded = recorded_owner(protocol, endpoint, context.received_at);
     STATS.count_recorded(recorded, endpoint.address.is_loopback());
@@ -202,7 +225,7 @@ pub(crate) fn deferred_query_owner(context: &DnsQueryContext) -> Ownership {
             STATS.table_skipped.fetch_add(1, Ordering::Relaxed);
             return Ownership::NotFound;
         }
-        let owner = table_query_owner(context, true).unwrap_or(Ownership::NotFound);
+        let owner = table_query_owner(context, purpose, true).unwrap_or(Ownership::NotFound);
         let answered = if owner.resolved_pid().is_some() {
             &STATS.table_resolved
         } else {
@@ -295,14 +318,7 @@ impl AttributionStats {
 /// Socket-table scans the process-wide owner cache has run, for DNS lookups
 /// and for every other user of it.
 fn shared_table_scans() -> u64 {
-    #[cfg(windows)]
-    {
-        netmetrics::SocketOwnerCache::shared().scans()
-    }
-    #[cfg(not(windows))]
-    {
-        0
-    }
+    netmetrics::SocketOwnerCache::shared().scans()
 }
 
 /// Whether a query received at `received_at` is past its deadline, after which
@@ -347,7 +363,7 @@ fn recorded_owner(
 
 #[cfg(all(windows, feature = "bench-internals"))]
 pub(crate) fn run_snapshot_benchmark() {
-    windows_impl::run_snapshot_benchmark();
+    socket_table::run_snapshot_benchmark();
 }
 
 #[cfg(test)]
@@ -380,6 +396,34 @@ mod refine_tests {
         }
     }
 
+    /// A scan off Windows stalls the receive loop for tens of milliseconds, so only a
+    /// blocked query's row may ask for one there.
+    #[test]
+    fn a_served_answer_is_worth_a_scan_only_where_one_is_cheap() {
+        assert!(Purpose::BlockedQuery.may_scan());
+        assert_eq!(Purpose::ServedAnswer.may_scan(), cfg!(windows));
+        if !Purpose::ServedAnswer.may_scan() {
+            let socket = std::net::UdpSocket::bind("127.0.0.1:0").expect("bind");
+            let local = socket.local_addr().expect("local address");
+            let context = DnsQueryContext {
+                client_addr: local.ip(),
+                client_port: local.port(),
+                protocol: hickory_server::net::xfer::Protocol::Udp,
+                received_at: std::time::Instant::now(),
+            };
+            let scans = shared_table_scans();
+            assert_eq!(
+                reply_path_query_owner(&context, Purpose::ServedAnswer),
+                Some(Ownership::NotFound)
+            );
+            assert_eq!(
+                deferred_query_owner(&context, Purpose::ServedAnswer),
+                Ownership::NotFound
+            );
+            assert_eq!(shared_table_scans(), scans, "neither lookup scanned");
+        }
+    }
+
     #[test]
     fn only_a_query_past_its_deadline_may_have_lost_its_port() {
         assert!(!port_may_be_reused(std::time::Instant::now()));
@@ -390,7 +434,7 @@ mod refine_tests {
     }
 }
 
-#[cfg(all(test, windows))]
+#[cfg(test)]
 mod reply_path_tests {
     use std::net::{IpAddr, Ipv4Addr};
     use std::sync::atomic::{AtomicUsize, Ordering};
@@ -399,7 +443,7 @@ mod reply_path_tests {
     use netmetrics::owner_cache::{Wait, DEFAULT_REFRESH};
     use netmetrics::{LocalEndpoint, Protocol, SocketOwnerCache, SocketOwnerSnapshot};
 
-    use super::windows_impl::{lookup_without_scan, WithoutScan};
+    use super::socket_table::{lookup_without_scan, WithoutScan};
     use super::Ownership;
 
     fn local(port: u16) -> LocalEndpoint {

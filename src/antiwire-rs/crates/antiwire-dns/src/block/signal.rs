@@ -15,7 +15,7 @@ use tracing::{info, warn};
 use super::response::BlockResponseMode;
 use super::sink::DnsBlockSink;
 use crate::port_mapper::{
-    deferred_query_owner, recorded_owners_available, reply_path_query_owner, Ownership,
+    deferred_query_owner, recorded_owners_available, reply_path_query_owner, Ownership, Purpose,
 };
 use hickory_server::net::xfer::Protocol;
 use std::net::IpAddr;
@@ -23,12 +23,9 @@ use std::net::IpAddr;
 /// Optional per-query client metadata for block attribution.
 #[derive(Debug, Clone, Copy)]
 pub(crate) struct DnsQueryContext {
-    // Read only by the Windows socket-owner lookup in `port_mapper`.
-    #[cfg_attr(not(windows), allow(dead_code))]
     pub(crate) client_addr: IpAddr,
     pub(crate) client_port: u16,
     pub(crate) protocol: Protocol,
-    #[cfg_attr(not(windows), allow(dead_code))]
     pub(crate) received_at: Instant,
 }
 
@@ -208,7 +205,7 @@ impl BlockSignalLogger {
         // rather than stall every other query behind it.
         let owner = match context {
             Some(context) if recorded_owners_available() => BlockOwner::Deferred(context),
-            Some(context) => reply_path_query_owner(&context)
+            Some(context) => reply_path_query_owner(&context, Purpose::BlockedQuery)
                 .map_or(BlockOwner::Deferred(context), BlockOwner::Resolved),
             None => BlockOwner::Resolved(Ownership::NotFound),
         };
@@ -296,7 +293,7 @@ fn block_signal_worker(
         }
         let ownership = match event.owner {
             BlockOwner::Resolved(ownership) => ownership,
-            BlockOwner::Deferred(context) => deferred_query_owner(&context),
+            BlockOwner::Deferred(context) => deferred_query_owner(&context, Purpose::BlockedQuery),
         };
         sink.record_blocked_query_with_ownership(
             &event.domain,
@@ -354,7 +351,8 @@ mod tests {
         assert_eq!(*sink.ownership.lock(), Some(Ownership::Resolved(4242)));
     }
 
-    #[cfg(windows)]
+    /// The regression this guards, off Windows: the lookup was compiled only there, and
+    /// everywhere else answered that the socket had no owner without looking.
     #[test]
     fn signal_block_records_the_sender_even_after_its_socket_closes() {
         let socket = std::net::UdpSocket::bind("127.0.0.1:0").expect("bind");

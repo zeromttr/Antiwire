@@ -9,7 +9,7 @@ use super::QueryEngine;
 use crate::answers::answered_addresses;
 use crate::block::DnsQueryContext;
 use crate::port_mapper::{
-    deferred_query_owner, recorded_owners_available, reply_path_query_owner, Ownership,
+    deferred_query_owner, recorded_owners_available, reply_path_query_owner, Ownership, Purpose,
 };
 use crate::response_cache::{CachedAnswer, ResponseCache};
 
@@ -64,7 +64,7 @@ where
         let answered_at_ms = unix_now_ms();
         let mut owner = None;
         if !recorded_owners_available() {
-            owner = reply_path_query_owner(&context);
+            owner = reply_path_query_owner(&context, Purpose::ServedAnswer);
         }
         if owner.is_none() {
             // The recorded owner can lag the query, and a socket-table scan the
@@ -74,7 +74,9 @@ where
             let deferred_domain = domain.to_owned();
             let deferred_answers = answers.clone();
             let submitted = self.owner_worker.submit(Box::new(move || {
-                let pid = deferred_query_owner(&context).resolved_pid().unwrap_or(0);
+                let pid = deferred_query_owner(&context, Purpose::ServedAnswer)
+                    .resolved_pid()
+                    .unwrap_or(0);
                 deferred_sink.record_hint(
                     pid,
                     &deferred_domain,
@@ -87,7 +89,7 @@ where
                 return;
             }
             // The worker's queue is full.
-            owner = reply_path_query_owner(&context);
+            owner = reply_path_query_owner(&context, Purpose::ServedAnswer);
         }
         let pid = owner.and_then(Ownership::resolved_pid).unwrap_or(0);
         sink.record_hint(pid, domain, &answers, ttl_ms, answered_at_ms);
