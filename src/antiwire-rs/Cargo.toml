@@ -102,7 +102,7 @@ tokio-util = { version = "0.7", features = ["io", "rt"] }
 tower = { version = "0.5", default-features = false, features = ["limit", "util"] }
 url = "2.5"
 tonic = { version = "0.12", features = ["tls", "transport"] }
-prost = "0.13"
+prost = "0.14"
 rustls = { version = "0.23.46", default-features = false, features = ["ring", "std", "tls12"] }
 async-trait = "0.1"
 # Without `multithread`: with it, looking up one process on Linux scans all of /proc on a
