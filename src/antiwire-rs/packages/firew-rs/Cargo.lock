@@ -524,7 +524,7 @@ dependencies = [
  "firew-rs",
  "firew-sys",
  "ipnet",
- "ipnetwork",
+ "ipnetwork 0.21.1",
  "pfctl",
 ]
 
@@ -720,6 +720,12 @@ dependencies = [
 ]
 
 [[package]]
+name = "ipnetwork"
+version = "0.21.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "cf370abdafd54d13e54a620e8c3e1145f28e46cc9d704bc6d94414559df41763"
+
+[[package]]
 name = "iptables"
 version = "0.6.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -864,7 +870,7 @@ checksum = "a44e65c0d3523afa79a600a3964c3ac0fabdabe2d7c68da624b2bb0b441b9d61"
 dependencies = [
  "derive_builder",
  "ioctl-sys",
- "ipnetwork",
+ "ipnetwork 0.20.0",
  "libc",
 ]
 
