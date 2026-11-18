@@ -249,17 +249,15 @@ fn a_process_closing_again_after_recovery_keeps_its_new_candidate() {
     assert_eq!(queue.len(), 0);
 }
 
-/// A tracker with one closed, flushed connection of `pid`, opened at
-/// `opened_at` with nothing known of the process that had the PID.
-fn closed_connection_of_an_unknown_process(
-    pid: u32,
-    opened_at: u64,
-) -> (
+type TrackerWithStore = (
     tempfile::TempDir,
     Arc<Store>,
     Arc<FlowProcessor>,
     FlowTracker<StoreFlowAdapter>,
-) {
+);
+
+/// A tracker that writes to a store of its own, and the processor it resolves with.
+fn tracker_with_store() -> TrackerWithStore {
     let dir = tempdir().expect("tempdir");
     let keystore = UnixSecureFileKeyProvider::new(dir.path().join("key"));
     let store = Arc::new(
@@ -273,15 +271,33 @@ fn closed_connection_of_an_unknown_process(
         StoreFlowAdapter::new(Arc::clone(&store)),
         Some(Arc::clone(&processor)),
     );
-    let key = sample_key();
-    let meta = |open_ts| FlowMeta {
+    (dir, store, processor, tracker)
+}
+
+/// Metadata naming `pid`, and nothing of its process, for a flow opened at `open_ts`.
+fn pid_only(pid: u32, open_ts: u64) -> FlowMeta {
+    FlowMeta {
         pid,
         process: None,
         open_ts,
         cookie: None,
         if_index: None,
-    };
-    tracker.handle_event(&FlowEvent::Opened(key, meta(opened_at)));
+    }
+}
+
+/// A tracker with one closed, flushed connection of `pid`, opened at
+/// `opened_at` with nothing known of the process that had the PID.
+fn closed_connection_of_an_unknown_process(pid: u32, opened_at: u64) -> TrackerWithStore {
+    closed_connection(pid, pid, opened_at)
+}
+
+/// A tracker with one closed, flushed connection opened at `opened_at`. Its
+/// open named `open_pid` and its close `close_pid`, zero for no owner, and
+/// nothing is known of the process that had either.
+fn closed_connection(open_pid: u32, close_pid: u32, opened_at: u64) -> TrackerWithStore {
+    let (dir, store, processor, tracker) = tracker_with_store();
+    let key = sample_key();
+    tracker.handle_event(&FlowEvent::Opened(key, pid_only(open_pid, opened_at)));
     tracker.handle_event(&FlowEvent::Bytes(
         key,
         ByteDelta {
@@ -289,7 +305,7 @@ fn closed_connection_of_an_unknown_process(
             received: 230,
         },
     ));
-    tracker.handle_event(&FlowEvent::Closed(key, meta(0)));
+    tracker.handle_event(&FlowEvent::Closed(key, pid_only(close_pid, 0)));
     tracker.flush().expect("flush the closed connection");
     (dir, store, processor, tracker)
 }
@@ -393,4 +409,289 @@ fn a_process_that_exited_before_the_connection_opened_is_not_given_it() {
     );
     deliver(&processor, &tracker, &later);
     assert_eq!(only_log(&store).app_path, LATE_PATH);
+}
+
+/// The regression this guards: a connection opened with no owner whose close
+/// was the first to name its PID lost that PID when the process could not be
+/// named there and then. The row said no owner, and no lifecycle event could
+/// find it again.
+#[test]
+fn a_pid_first_learned_at_close_is_named_by_its_start_and_stop() {
+    let pid = 917_003;
+    let opened_at = netmetrics_core::unix_now_ms() - 5_000;
+    let (_dir, store, processor, tracker) = closed_connection(0, pid, opened_at);
+    assert_eq!(
+        only_log(&store).app_path,
+        "Unknown (Exited)",
+        "the connection had an owner, which is gone"
+    );
+    assert_eq!(tracker.closed_identities.lock().len(), 1);
+
+    let started = process_started_event(pid, LATE_PATH, "late-image.exe", opened_at - 1_000);
+    deliver(&processor, &tracker, &started);
+    deliver(
+        &processor,
+        &tracker,
+        &FlowEvent::ProcessStopped {
+            pid,
+            stop_ts: opened_at + 500,
+        },
+    );
+    let log = only_log(&store);
+    assert_eq!(log.app_path, LATE_PATH);
+    assert_eq!((log.bytes_sent, log.bytes_received), (150, 230));
+    assert!(log.closed_at.is_some());
+}
+
+/// A PID learned at close is held to the same proof as one learned at open: a
+/// process that started after the connection opened did not have it.
+#[test]
+fn a_pid_first_learned_at_close_is_not_given_to_a_later_process() {
+    let pid = 917_004;
+    let opened_at = netmetrics_core::unix_now_ms() - 5_000;
+    let (_dir, store, processor, tracker) = closed_connection(0, pid, opened_at);
+
+    let later = process_started_event(
+        pid,
+        AMBIGUOUS_PATH,
+        "ambiguous-image.exe",
+        opened_at + 2_000,
+    );
+    deliver(&processor, &tracker, &later);
+    deliver(
+        &processor,
+        &tracker,
+        &FlowEvent::ProcessStopped {
+            pid,
+            stop_ts: opened_at + 3_000,
+        },
+    );
+    assert_eq!(only_log(&store).app_path, "Unknown (Exited)");
+}
+
+/// The regression this guards: a stop that arrived before its process's start
+/// was dropped, since nothing was known of the PID yet. The start that
+/// followed then described a process never seen to stop, which vouches for no
+/// past moment, and the connection stayed unknown.
+#[test]
+fn a_stop_delivered_before_its_start_still_brackets_the_connection() {
+    let pid = 917_005;
+    let opened_at = netmetrics_core::unix_now_ms() - 5_000;
+    let (_dir, store, processor, tracker) = closed_connection_of_an_unknown_process(pid, opened_at);
+
+    deliver(
+        &processor,
+        &tracker,
+        &FlowEvent::ProcessStopped {
+            pid,
+            stop_ts: opened_at + 500,
+        },
+    );
+    assert!(only_log(&store).app_path.starts_with("Unknown"));
+
+    let started = process_started_event(pid, LATE_PATH, "late-image.exe", opened_at - 1_000);
+    deliver(&processor, &tracker, &started);
+    let log = only_log(&store);
+    assert_eq!(log.app_path, LATE_PATH);
+    assert_eq!((log.bytes_sent, log.bytes_received), (150, 230));
+}
+
+/// A stop kept without its start belongs to whichever process had the PID
+/// then. One that started after it is a later process, still running.
+#[test]
+fn an_early_stop_is_not_joined_to_a_process_that_started_after_it() {
+    let pid = 917_006;
+    let opened_at = netmetrics_core::unix_now_ms() - 5_000;
+    let (_dir, store, processor, tracker) = closed_connection_of_an_unknown_process(pid, opened_at);
+
+    // An earlier process's stop, then the start of the one that followed it.
+    deliver(
+        &processor,
+        &tracker,
+        &FlowEvent::ProcessStopped {
+            pid,
+            stop_ts: opened_at - 30_000,
+        },
+    );
+    let owner = process_started_event(pid, LATE_PATH, "late-image.exe", opened_at - 200);
+    deliver(&processor, &tracker, &owner);
+    assert!(
+        only_log(&store).app_path.starts_with("Unknown"),
+        "nothing says this process was still running when the connection opened"
+    );
+
+    deliver(
+        &processor,
+        &tracker,
+        &FlowEvent::ProcessStopped {
+            pid,
+            stop_ts: opened_at + 300,
+        },
+    );
+    assert_eq!(only_log(&store).app_path, LATE_PATH);
+}
+
+/// The regression this guards: a process gone before it could be asked is
+/// reported by name, with its creation time and no path. Recovery wanted a
+/// path, so the connection stayed unknown though the process was known.
+#[test]
+fn a_process_known_only_by_name_names_its_closed_connection() {
+    for executable in ["", "late-image.exe"] {
+        let pid = 917_007;
+        let opened_at = netmetrics_core::unix_now_ms() - 5_000;
+        let started_at = opened_at - 1_000;
+        let (_dir, store, processor, tracker) =
+            closed_connection_of_an_unknown_process(pid, opened_at);
+
+        let named = process_started_event(pid, executable, "late-image.exe", started_at);
+        deliver(&processor, &tracker, &named);
+        assert!(
+            only_log(&store).app_path.starts_with("Unknown"),
+            "named, but it may have exited before the connection opened"
+        );
+        deliver(
+            &processor,
+            &tracker,
+            &FlowEvent::ProcessStopped {
+                pid,
+                stop_ts: opened_at + 500,
+            },
+        );
+        let log = only_log(&store);
+        assert_eq!(log.app_path, "Path unavailable");
+        assert_eq!((log.bytes_sent, log.bytes_received), (150, 230));
+
+        // The name again changes nothing, and another process's path is not this one's.
+        deliver(&processor, &tracker, &named);
+        let other = process_started_event(
+            pid,
+            AMBIGUOUS_PATH,
+            "ambiguous-image.exe",
+            started_at + 10_000,
+        );
+        deliver(&processor, &tracker, &other);
+        assert_eq!(only_log(&store).app_path, "Path unavailable");
+    }
+}
+
+/// A name is not the last word: the same process can still report its path.
+#[test]
+fn a_connection_named_without_a_path_takes_the_path_the_same_process_reports() {
+    let pid = 917_008;
+    let opened_at = netmetrics_core::unix_now_ms() - 5_000;
+    let started_at = opened_at - 1_000;
+    let (_dir, store, processor, tracker) = closed_connection_of_an_unknown_process(pid, opened_at);
+    deliver(
+        &processor,
+        &tracker,
+        &process_started_event(pid, "", "late-image.exe", started_at),
+    );
+    deliver(
+        &processor,
+        &tracker,
+        &FlowEvent::ProcessStopped {
+            pid,
+            stop_ts: opened_at + 500,
+        },
+    );
+    assert_eq!(only_log(&store).app_path, "Path unavailable");
+
+    let full = process_started_event(pid, LATE_PATH, "late-image.exe", started_at);
+    deliver(&processor, &tracker, &full);
+    let log = only_log(&store);
+    assert_eq!(log.app_path, LATE_PATH);
+    assert_eq!((log.bytes_sent, log.bytes_received), (150, 230));
+    let totals = tracker.closed_app_bytes.lock();
+    let identity = application_identity(LATE_PATH, "late-image.exe").expect("identity");
+    assert_eq!(
+        totals.get(&identity),
+        Some(&(150, 230)),
+        "its bytes are credited once"
+    );
+}
+
+/// The regression this guards: the start of a later process with the PID gave
+/// its creation time to a connection opened before that process existed. The
+/// connection's own process, named by the close, was then turned away as a
+/// different one.
+#[test]
+fn a_later_process_does_not_date_a_connection_opened_before_it_started() {
+    let pid = 917_009;
+    let opened_at = netmetrics_core::unix_now_ms() - 60_000;
+    let (_dir, store, processor, tracker) = tracker_with_store();
+    let key = sample_key();
+    tracker.handle_event(&FlowEvent::Opened(key, pid_only(pid, opened_at)));
+
+    let later = process_started_event(
+        pid,
+        AMBIGUOUS_PATH,
+        "ambiguous-image.exe",
+        opened_at + 20_000,
+    );
+    deliver(&processor, &tracker, &later);
+
+    tracker.handle_event(&FlowEvent::Closed(
+        key,
+        FlowMeta {
+            process: Some(ProcessIdentity {
+                executable: LATE_PATH.to_owned(),
+                name: "late-image.exe".to_owned(),
+                start_ts: opened_at - 1_000,
+            }),
+            ..pid_only(pid, opened_at)
+        },
+    ));
+    tracker.flush().expect("flush the close");
+    assert_eq!(only_log(&store).app_path, LATE_PATH);
+}
+
+/// The regression this guards: asking about an earlier process with a PID
+/// erased what was known of the process that has it now, and the next
+/// connection of that process had no owner to be given.
+#[test]
+fn asking_about_an_earlier_process_keeps_what_is_known_of_the_current_one() {
+    let pid = 917_010;
+    let opened_at = netmetrics_core::unix_now_ms() - 5_000;
+    let (_dir, store, processor, tracker) = tracker_with_store();
+    let started = process_started_event(pid, LATE_PATH, "late-image.exe", opened_at - 1_000);
+    deliver(&processor, &tracker, &started);
+    deliver(
+        &processor,
+        &tracker,
+        &FlowEvent::ProcessStopped {
+            pid,
+            stop_ts: opened_at + 500,
+        },
+    );
+
+    // A delayed connection of the process that had the PID before.
+    let delayed = FlowKey {
+        local_port: 50_001,
+        ..sample_key()
+    };
+    tracker.handle_event(&FlowEvent::Opened(
+        delayed,
+        FlowMeta {
+            process: Some(ProcessIdentity {
+                executable: String::new(),
+                name: String::new(),
+                start_ts: opened_at - 60_000,
+            }),
+            ..pid_only(pid, opened_at - 50_000)
+        },
+    ));
+
+    let key = sample_key();
+    tracker.handle_event(&FlowEvent::Opened(key, pid_only(pid, opened_at)));
+    tracker.handle_event(&FlowEvent::Closed(key, pid_only(pid, 0)));
+    tracker.flush().expect("flush");
+    let logs = store
+        .query_connection_logs(&ConnectionLogQuery::default())
+        .expect("logs")
+        .logs;
+    let log = logs
+        .iter()
+        .find(|log| log.src_port == i32::from(key.local_port))
+        .expect("the current process's connection");
+    assert_eq!(log.app_path, LATE_PATH);
 }

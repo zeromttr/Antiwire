@@ -37,6 +37,13 @@ impl<S: FlowStore> FlowTracker<S> {
                 if flow.pid != pid {
                     continue;
                 }
+                // A process created after the flow opened took the PID over
+                // from the flow's own. Its start says nothing of this flow,
+                // and must not date it: the flow's real process, named later,
+                // would then be turned away as a different one.
+                if process_resolver::started_after(start_ts, flow.open_ts) {
+                    continue;
+                }
                 if flow.process_start_ts.is_none() && start_ts > 0 {
                     flow.process_start_ts = Some(start_ts);
                 } else if start_ts > 0
@@ -155,19 +162,32 @@ impl<S: FlowStore> FlowTracker<S> {
         refresh_again
     }
 
+    /// Recovers closed connections of the exact process `info` reports: the
+    /// same PID and creation time.
+    ///
+    /// A report with a path names a connection or completes a named one. A
+    /// report with only a name, which is all that is left of a process gone
+    /// before it could be asked, still names a connection that had none.
     pub(super) fn recover_closed_identities(&self, info: &netmetrics_core::ProcessInfo) {
-        if info.identity.start_ts == 0 || !info.identity.executable.contains(['\\', '/']) {
+        if info.identity.start_ts == 0 || !info.identity.is_usable() {
             return;
         }
         let Some(processor) = &self.processor else {
             return;
         };
+        let has_path = info.identity.executable.contains(['\\', '/']);
         let candidates = self.closed_identities.lock().take_for(
             info.pid,
             info.identity.start_ts,
             Instant::now(),
         );
         for candidate in candidates {
+            if evidence_adds_nothing(&candidate, has_path) {
+                self.closed_identities
+                    .lock()
+                    .restore(candidate, Instant::now());
+                continue;
+            }
             self.recover_closed(processor, candidate, info.pid, &info.identity);
         }
     }
@@ -198,8 +218,21 @@ impl<S: FlowStore> FlowTracker<S> {
                     .restore(candidate, Instant::now());
                 continue;
             };
+            let has_path = !process_resolver::is_synthetic_path(&identity.path);
+            if evidence_adds_nothing(&candidate, has_path) {
+                self.closed_identities
+                    .lock()
+                    .restore(candidate, Instant::now());
+                continue;
+            }
             let process = ProcessIdentity {
-                executable: identity.path,
+                // The placeholder stands for a path nobody reported. It is not
+                // an executable, so the resolver is not handed it as one.
+                executable: if has_path {
+                    identity.path
+                } else {
+                    String::new()
+                },
                 name: identity.name,
                 start_ts: identity.start_ts,
             };
@@ -209,13 +242,18 @@ impl<S: FlowStore> FlowTracker<S> {
 
     /// Re-attributes the closed connection `candidate` to `process`, which
     /// had `pid` when it was open, or keeps it for later if that fails.
+    ///
+    /// A connection with no name takes a name without a path. It is then kept
+    /// as any connection closed under such a name is, for the path the same
+    /// process may still report.
     fn recover_closed(
         &self,
         processor: &FlowProcessor,
-        candidate: Candidate,
+        mut candidate: Candidate,
         pid: u32,
         process: &ProcessIdentity,
     ) {
+        let named = process_resolver::is_recoverable_placeholder(&candidate.flow.app_path);
         self.identity_recovery_attempts
             .fetch_add(1, Ordering::Relaxed);
         let resolved = processor.resolve_flow_app(
@@ -230,7 +268,7 @@ impl<S: FlowStore> FlowTracker<S> {
         );
         if resolved.start_ts != process.start_ts
             || resolved.app_id <= 0
-            || (!identity_upgrade_acceptable(true, &resolved.app_path, &resolved.app_name)
+            || (!identity_upgrade_acceptable(named, &resolved.app_path, &resolved.app_name)
                 && !system_services::is_system_identity(&resolved.app_path, &resolved.app_name))
         {
             self.closed_identities
@@ -270,6 +308,13 @@ impl<S: FlowStore> FlowTracker<S> {
         flow.app_name = resolved.app_name;
         self.record_closed_bytes(&flow);
         self.record_identity_recovery(flow.opened_at);
+        if process_resolver::is_recoverable_placeholder(&flow.app_path) {
+            flow.process_start_ts = Some(process.start_ts);
+            candidate.flow = flow;
+            self.closed_identities
+                .lock()
+                .restore(candidate, Instant::now());
+        }
     }
 
     /// Re-resolves a recoverable flow's identity: unknown rows and the
@@ -555,6 +600,13 @@ pub(super) fn identity_upgrade_acceptable(
         return false;
     }
     true
+}
+
+/// Whether evidence of a process has nothing to give `candidate`: it carries
+/// no path, and the connection closed under a name already, which only a path
+/// improves on.
+fn evidence_adds_nothing(candidate: &Candidate, has_path: bool) -> bool {
+    !has_path && process_resolver::is_recoverable_placeholder(&candidate.flow.app_path)
 }
 
 /// Returns the observed process creation timestamp, when the backend supplied one.
