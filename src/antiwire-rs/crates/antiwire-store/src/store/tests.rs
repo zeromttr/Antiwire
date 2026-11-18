@@ -901,6 +901,46 @@ fn private_relay_compatibility_starts_off_and_saves() {
 }
 
 #[test]
+fn windivert_starts_off_and_saves() {
+    let (_file, store) = temp_store();
+    let mut settings = store.get_settings().expect("settings");
+    assert!(!settings.windivert_enabled);
+    assert_eq!(settings.diverts_dns(), !cfg!(windows));
+
+    settings.windivert_enabled = true;
+    store.update_settings(&settings).expect("save");
+
+    let mut saved = store.get_settings().expect("reload");
+    assert!(saved.windivert_enabled);
+    assert!(saved.diverts_dns());
+
+    // The divert is a packet rule, whatever it is made of.
+    saved.private_relay_compatibility = true;
+    assert!(!saved.diverts_dns());
+}
+
+/// A database from before the setting existed gains it, switched off.
+#[test]
+fn a_database_without_the_windivert_setting_gains_it_switched_off() {
+    let (_file, store) = temp_store();
+    store
+        .db
+        .execute(
+            "ALTER TABLE daemon_settings DROP COLUMN windivert_enabled",
+            [],
+        )
+        .expect("drop the column");
+    store
+        .db
+        .execute("DELETE FROM schema_migrations WHERE version = 2", [])
+        .expect("forget the migration");
+
+    store.migrate().expect("migrate");
+
+    assert!(!store.get_settings().expect("settings").windivert_enabled);
+}
+
+#[test]
 fn single_column_setters_leave_the_rest_of_the_row_alone() {
     let (_file, store) = temp_store();
     let mut settings = store.get_settings().expect("get settings");

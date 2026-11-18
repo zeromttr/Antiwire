@@ -291,6 +291,7 @@ fn response_round_trip_leaves_settings_unchanged() {
     previous.ai_api_key = SecretBytes::from_string("sk-stored".to_owned());
     previous.siem_auth_token = "Bearer stored".to_owned();
     previous.private_relay_compatibility = true;
+    previous.windivert_enabled = true;
     let response = settings_to_proto(&previous);
     let request = SettingsRequest {
         siem_enabled: response.siem_enabled,
@@ -365,6 +366,7 @@ fn response_round_trip_leaves_settings_unchanged() {
         dns_new_domain_max_age_days: response.dns_new_domain_max_age_days,
         update_channel: response.update_channel,
         private_relay_compatibility: response.private_relay_compatibility,
+        windivert_enabled: response.windivert_enabled,
         network_mapping_auto_enabled: response.network_mapping_auto_enabled,
         network_mapping_interval_minutes: response.network_mapping_interval_minutes,
         save_domain_lookups: response.save_domain_lookups,
@@ -391,6 +393,16 @@ fn settings_response_reports_secrets_without_their_values() {
     assert!(response.siem_auth_token_set);
     assert_eq!(response.ai_api_key, "");
     assert_eq!(response.siem_auth_token, "");
+}
+
+/// The client offers the `WinDivert` setting only where the daemon can use the driver.
+#[test]
+fn settings_response_says_whether_windivert_can_be_used() {
+    let response = settings_to_proto(&DaemonSetting::default());
+    assert_eq!(
+        response.windivert_supported,
+        cfg!(all(windows, target_arch = "x86_64"))
+    );
 }
 
 #[test]

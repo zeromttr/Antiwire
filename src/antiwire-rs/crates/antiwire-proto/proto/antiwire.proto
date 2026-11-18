@@ -172,6 +172,11 @@ message SettingsRequest {
   // macOS turns iCloud Private Relay off for an app that applies such rules. The client
   // offers it on macOS only.
   bool private_relay_compatibility = 83;
+  // Windows only. Lets the daemon use WinDivert, a third-party kernel driver, for
+  // connect-time flow owners and the port 53 divert. Off by default: anti-cheat software
+  // can treat the driver as an integrity violation. While it is off the driver is neither
+  // downloaded nor loaded.
+  bool windivert_enabled = 84;
   reserved 41; // removed dnssec_validation_enabled
   reserved 42; // removed dns_ecs_stripping_enabled
   reserved 43; // removed dns_edns_padding_enabled
@@ -272,6 +277,10 @@ message SettingsResponse {
   uint32 dns_new_domain_max_age_days = 81; // 7, 14, 30 or 90
   string update_channel = 82; // "stable", "beta", or "nightly"
   bool private_relay_compatibility = 83;
+  bool windivert_enabled = 84;
+  // Read-only: whether this daemon can use WinDivert at all. Only the Windows build for
+  // x86-64 can, and the client offers the setting only where this is true.
+  bool windivert_supported = 85;
   reserved 41; // removed dnssec_validation_enabled
   reserved 42; // removed dns_ecs_stripping_enabled
   reserved 43; // removed dns_edns_padding_enabled

@@ -135,7 +135,8 @@ impl Supervisor {
 ///
 /// # Errors
 ///
-/// Returns an error when the official package cannot be loaded or `WinDivertOpen` fails.
+/// Returns an error when `WinDivert` is turned off ([`crate::set_windivert_enabled`]),
+/// the official package cannot be loaded, or `WinDivertOpen` fails.
 pub fn install(report: DivertReport) -> Result<ActiveDivert, String> {
     let mut active = active_nat().lock().unwrap_or_else(PoisonError::into_inner);
     if active.is_some() {

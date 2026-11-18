@@ -137,6 +137,8 @@ export function normalizeSettings(data: SettingsDto & Record<string, unknown>): 
       'privateRelayCompatibility',
       'private_relay_compatibility',
     ),
+    windivertEnabled: bool(data, 'windivertEnabled', 'windivert_enabled'),
+    windivertSupported: bool(data, 'windivertSupported', 'windivert_supported'),
     geoIpEnabled: bool(data, 'geoIpEnabled', 'geo_ip_enabled'),
     logDaemonConnections: bool(data, 'logDaemonConnections', 'log_daemon_connections'),
     powerUserSettingsEnabled: bool(data, 'powerUserSettingsEnabled', 'power_user_settings_enabled'),

@@ -1,8 +1,11 @@
 //! Windows kernel ETW backend.
 //!
-//! `WinDivert` (connect-time flow owners and the port-53 divert) is compiled only for
-//! `x86_64`. The official 2.2.2 package ships no ARM64 driver, so other architectures
-//! never download, install, or load it; they run on ETW and the socket tables alone.
+//! `WinDivert` (connect-time flow owners and the port-53 divert) is off until the
+//! application turns it on with [`set_windivert_enabled`]: until then nothing downloads,
+//! installs, or loads it, and the collector runs on ETW and the socket tables alone.
+//!
+//! It is compiled only for `x86_64`. The official 2.2.2 package ships no ARM64 driver, so
+//! other architectures never use it, whatever the switch says.
 #![allow(unsafe_code)]
 
 #[cfg(windows)]
@@ -42,6 +45,8 @@ mod windivert;
 mod windivert;
 #[cfg(all(windows, target_arch = "x86_64"))]
 mod windivert_handle;
+#[cfg(windows)]
+mod windivert_opt_in;
 #[cfg(all(windows, target_arch = "x86_64"))]
 mod windivert_package;
 #[cfg(windows)]
@@ -55,6 +60,8 @@ pub use dns_divert::{
 #[cfg(windows)]
 pub use interface::InterfaceEstimator;
 pub use netmetrics_core::SocketCount;
+#[cfg(windows)]
+pub use windivert_opt_in::{set_windivert_enabled, windivert_enabled, windivert_supported};
 #[cfg(windows)]
 pub use windows::{
     SocketCountSample, UdpPidAttributionSample, WindowsBackend, active_socket_count,

@@ -76,6 +76,8 @@ const settings: SettingsDto = {
   notifyThreatDetected: true,
   persistRulesOffline: false,
   privateRelayCompatibility: false,
+  windivertEnabled: false,
+  windivertSupported: false,
   geoIpEnabled: false,
   logDaemonConnections: false,
   powerUserSettingsEnabled: false,

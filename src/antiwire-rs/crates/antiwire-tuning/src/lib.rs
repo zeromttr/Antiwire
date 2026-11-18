@@ -138,6 +138,11 @@ mod dns_interceptor {
     /// turning them into SERVFAILs after only a minute.
     pub const DNS_SERVE_STALE_GRACE: Duration = Duration::from_secs(60 * 60 * 24);
     pub const DNS_QUERY_DEADLINE: Duration = Duration::from_secs(2);
+    /// How long a resolver start waits for the port 53 divert to be installed. That is
+    /// quick unless the `WinDivert` package has to be downloaded first; an install still
+    /// under way after this carries on in the background. It has to stay well inside
+    /// `SETTINGS_APPLY_DEADLINE`, which a restart for a settings change must fit in.
+    pub const DNS_DIVERT_INSTALL_WAIT: Duration = Duration::from_secs(5);
     /// RFC 8767 §5 client response timer: once a query has waited this long
     /// and a stale answer is cached, serve it and keep refreshing in the
     /// background. The RFC recommends 1.8 s, just under common 2 s client

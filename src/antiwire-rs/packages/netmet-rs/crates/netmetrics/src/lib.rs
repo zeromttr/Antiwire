@@ -12,6 +12,7 @@ pub mod dns_divert;
 pub mod endpoint_owner;
 pub mod owner_cache;
 mod sockets;
+pub mod windivert;
 
 pub use active::{SocketCount, active_connection_count};
 pub use attribution::{

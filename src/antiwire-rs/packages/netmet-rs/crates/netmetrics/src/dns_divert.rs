@@ -54,10 +54,14 @@ impl std::fmt::Debug for DnsDivert {
 /// divert checks its rules every [`DIVERT_CHECK_INTERVAL`] and puts them back
 /// when they are removed, emptied or, on macOS, pf is switched off.
 ///
+/// On Windows the divert is `WinDivert`, which is off until
+/// [`crate::windivert::set_enabled`] turns it on.
+///
 /// # Errors
 ///
-/// Returns an error when the platform filter cannot be installed. The caller
-/// should keep resolving through the stub; a missing divert is not fatal.
+/// Returns an error when the platform filter cannot be installed, which on Windows
+/// includes `WinDivert` being turned off: nothing is downloaded or loaded then. The
+/// caller should keep resolving through the stub; a missing divert is not fatal.
 pub fn start(report: impl Fn(DivertEvent) + Send + 'static) -> Result<DnsDivert, String> {
     clear_leftover();
     install(Box::new(report))

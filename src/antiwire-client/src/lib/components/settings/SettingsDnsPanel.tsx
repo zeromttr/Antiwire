@@ -112,6 +112,22 @@ export function SettingsDnsPanel({ set, settings }: Props) {
         </SettingsGroup>
       )}
 
+      {/* The daemon says whether it can use the driver: only its Windows x64 build can. */}
+      {settings.windivertSupported && (
+        <SettingsGroup
+          title={m.settings_group_windivert_title()}
+          description={m.settings_group_windivert_desc()}
+        >
+          <ToggleRow
+            label={m.settings_windivert_label()}
+            description={m.settings_windivert_desc()}
+            warning={m.settings_windivert_warning()}
+            checked={settings.windivertEnabled}
+            onCheckedChange={(v) => set.patch('windivertEnabled', v)}
+          />
+        </SettingsGroup>
+      )}
+
       <SettingsGroup
         title={m.settings_group_blocklists_title()}
         description={m.settings_group_blocklists_desc()}

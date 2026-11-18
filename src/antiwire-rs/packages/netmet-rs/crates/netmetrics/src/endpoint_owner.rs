@@ -2,7 +2,8 @@
 //!
 //! Windows uses `WinDivert` FLOW, Linux uses eBPF socket I/O, and macOS uses
 //! PKTAP process metadata. History survives socket closure while the reader
-//! runs. Snapshot-only modes report [`EndpointOwner::Unavailable`].
+//! runs. Snapshot-only modes report [`EndpointOwner::Unavailable`], as does
+//! Windows until `WinDivert` is turned on ([`crate::windivert`]).
 
 pub use netmetrics_core::EndpointOwner;
 pub use netmetrics_core::endpoint_owner::{

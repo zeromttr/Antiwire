@@ -35,7 +35,7 @@ Antiwire is at version `0.1.0` and under active development.
 
 | Platform | Monitoring | Firewall | Rules on applications | DNS redirection |
 | --- | --- | --- | --- | --- |
-| Windows x64 | ETW (falls back to IP Helper), plus WinDivert to see which app opened each connection | Windows Firewall (falls back to WFP) | Yes | WinDivert |
+| Windows x64 | ETW (falls back to IP Helper). With WinDivert turned on, also the app that opened each connection, as it opens | Windows Firewall (falls back to WFP) | Yes | WinDivert, once you turn it on |
 | Windows ARM64 | ETW (falls back to IP Helper) | Windows Firewall (falls back to WFP) | Yes | None |
 | Linux | eBPF (falls back to procfs) | nftables (falls back to iptables) | No | nftables (falls back to iptables) |
 | macOS | PKTAP | PF | No | PF |
@@ -57,10 +57,16 @@ A rule on an address never covers this computer's own loopback range (`127.0.0.0
 `::1`), so blocking a wide range such as `0.0.0.0/0` does not cut programs off from services
 on the same machine, Antiwire's resolver among them.
 
-WinDivert has no ARM64 driver, so the Windows ARM64 build leaves it out entirely: it never
-downloads or loads it. Which app opened a connection comes from ETW and the socket tables
+WinDivert is a third-party Windows driver, and Antiwire does not use it unless you turn it
+on, in Settings under "DNS & privacy". Anti-cheat software may treat the driver as an integrity
+violation: a game may refuse to run, or ban the account. While it is off, Antiwire neither
+downloads nor loads it. Which app opened a connection then comes from ETW and the socket tables
 alone, and DNS sent straight to another resolver is not redirected (the adapters still point
-at Antiwire's resolver).
+at Antiwire's resolver). Turning it on downloads the driver from the WinDivert website. After
+you turn it off again, Windows keeps the driver loaded until the computer restarts.
+
+WinDivert has no ARM64 driver, so the Windows ARM64 build leaves it out entirely: it never
+downloads or loads it, and its settings do not offer it.
 
 iCloud Private Relay does not work on a Mac that runs Antiwire. macOS turns Private Relay off
 for as long as an app applies its own packet filter rules
@@ -83,8 +89,8 @@ feature works.
 <summary>Windows (winget)</summary>
 
 Nothing extra is needed for the app. For packet capture, download and install
-[Npcap](https://npcap.com/#download) from its website. On x64, WinDivert is downloaded by
-Antiwire itself; the ARM64 build does not use it.
+[Npcap](https://npcap.com/#download) from its website. WinDivert is optional: on x64,
+Antiwire downloads it itself once you turn it on; the ARM64 build does not use it.
 
 </details>
 
@@ -92,8 +98,8 @@ Antiwire itself; the ARM64 build does not use it.
 <summary>Windows (Chocolatey)</summary>
 
 Nothing extra is needed for the app. For packet capture, download and install
-[Npcap](https://npcap.com/#download) from its website. On x64, WinDivert is downloaded by
-Antiwire itself; the ARM64 build does not use it.
+[Npcap](https://npcap.com/#download) from its website. WinDivert is optional: on x64,
+Antiwire downloads it itself once you turn it on; the ARM64 build does not use it.
 
 </details>
 
@@ -252,13 +258,13 @@ These are the only connections Antiwire makes to the internet.
 | What | Where to | What is sent | Why |
 | --- | --- | --- | --- |
 | Encrypted DNS | Cloudflare (`1.1.1.1`) by default; you can pick another provider | The domain names your computer looks up | Resolves domains privately over DNS-over-HTTPS instead of plain DNS |
-| WinDivert download (Windows x64 only) | `reqrypt.org` | Nothing | Downloads the official signed driver once, checks its hash, and keeps it locally. A download that fails is tried again, at intervals that grow to an hour, until one succeeds |
 | Update check (release builds) | `github.com`, which serves the files from `*.githubusercontent.com` | Nothing | Reads the signed release manifests of your update channel and the more stable ones, every 6 hours. Nothing is downloaded or installed until you click Install |
 
 **Only if you turn it on**
 
 | What | Where to | What is sent | Why |
 | --- | --- | --- | --- |
+| WinDivert download (Windows x64 only) | `reqrypt.org` | Nothing | Downloads the official signed driver once, checks its hash, and keeps it locally. A download that fails is tried again, at intervals that grow to an hour, until one succeeds or you turn WinDivert off |
 | Blocklists | The list's host (GitHub, jsDelivr, GitLab, or the URL you add) | Nothing | Downloads ad, tracker, and malware block lists, daily by default |
 | GeoIP | `cdn.jsdelivr.net` | Nothing | Downloads a country/city database about every 90 days. Lookups then happen locally |
 | Newly registered domain blocking | IANA and each domain's registry (RDAP or WHOIS) | Registered domain names (`example.com` for `www.example.com`) | Looks up when each domain was registered and blocks those younger than the age you pick (1 week to 3 months). Dates are cached for a day |

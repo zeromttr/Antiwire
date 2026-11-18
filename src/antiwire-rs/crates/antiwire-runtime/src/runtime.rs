@@ -196,6 +196,10 @@ impl AntiwireRuntime {
     async fn start_inner(&self) -> Result<()> {
         let settings = self.context.settings.current();
 
+        // Before the resolver and the flow collector start: both use the driver only once
+        // this allows it.
+        antiwire_dns::apply_windivert_setting(&settings);
+
         // Before DNS starts: ordinary DNS stays fail-closed until the
         // selected hosts blocklists load.
         self.context.services.hosts_blocklist.start();

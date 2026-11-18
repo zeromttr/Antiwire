@@ -321,6 +321,13 @@ pub struct DaemonSetting {
     /// Lets iCloud Private Relay stay on. See [`Self::uses_packet_rules`].
     #[serde(default)]
     pub private_relay_compatibility: bool,
+    /// Lets the daemon use `WinDivert` on Windows. See [`Self::diverts_dns`].
+    ///
+    /// Off unless the user turns it on: `WinDivert` is a third-party kernel driver, and
+    /// anti-cheat software can treat it as an integrity violation. While it is off the
+    /// driver is neither downloaded nor loaded.
+    #[serde(default)]
+    pub windivert_enabled: bool,
     #[serde(default)]
     pub network_mapping_auto_enabled: bool,
     #[serde(default = "default_mapping_interval")]
@@ -469,6 +476,17 @@ impl DaemonSetting {
     pub fn uses_packet_rules(&self) -> bool {
         !self.private_relay_compatibility
     }
+
+    /// Whether DNS sent past the resolver, straight to a server of the application's own
+    /// choosing, is diverted to it.
+    ///
+    /// The divert is a packet rule, so it needs [`Self::uses_packet_rules`]. On Windows it
+    /// is also `WinDivert`, so it needs `windivert_enabled` there. Without the divert the
+    /// resolver still answers every lookup made through the system's DNS settings.
+    #[must_use]
+    pub fn diverts_dns(&self) -> bool {
+        self.uses_packet_rules() && (!cfg!(windows) || self.windivert_enabled)
+    }
 }
 
 impl Default for DaemonSetting {
@@ -548,6 +566,7 @@ impl Default for DaemonSetting {
             dns_new_domain_max_age_days: default_new_domain_max_age_days(),
             update_channel: default_update_channel(),
             private_relay_compatibility: false,
+            windivert_enabled: false,
             network_mapping_auto_enabled: false,
             network_mapping_interval_minutes: default_mapping_interval(),
             network_mapping_baseline_established: false,

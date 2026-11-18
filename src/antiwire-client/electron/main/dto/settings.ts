@@ -77,6 +77,7 @@ export const SETTINGS_FIELDS = {
   notifyThreatDetected: 'bool',
   persistRulesOffline: 'bool',
   privateRelayCompatibility: 'bool',
+  windivertEnabled: 'bool',
   geoIpEnabled: 'bool',
   logDaemonConnections: 'bool',
   powerUserSettingsEnabled: 'bool',
@@ -119,6 +120,8 @@ export const settingsSchema = z.object({
   aiApiKeySet: z.boolean().default(false),
   /** Read-only: whether the daemon holds a SIEM auth token. */
   siemAuthTokenSet: z.boolean().default(false),
+  /** Read-only: whether the daemon can use WinDivert, so whether to offer the setting. */
+  windivertSupported: z.boolean().default(false),
   /** Write-only: remove the stored AI API key. */
   clearAiApiKey: z.boolean().default(false),
   /** Write-only: remove the stored SIEM auth token. */
@@ -133,6 +136,7 @@ export function settingsToDto(s: SettingsResponse): SettingsDto {
   dto.geoipDatabaseLastUpdated = s.geoipDatabaseLastUpdated ?? '';
   dto.aiApiKeySet = s.aiApiKeySet ?? false;
   dto.siemAuthTokenSet = s.siemAuthTokenSet ?? false;
+  dto.windivertSupported = s.windivertSupported ?? false;
   dto.clearAiApiKey = false;
   dto.clearSiemAuthToken = false;
   return dto as SettingsDto;

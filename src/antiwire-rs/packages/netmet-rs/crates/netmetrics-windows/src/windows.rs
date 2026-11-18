@@ -101,7 +101,7 @@ impl Backend for WindowsBackend {
             }
         };
 
-        let mut flow_listening = FlowListening::start(flow_owners, &sink);
+        let mut flow_listening = FlowListening::new(flow_owners);
 
         let mut process_trace =
             match process_trace::start(config, names.process(), &session_owners, &sink) {

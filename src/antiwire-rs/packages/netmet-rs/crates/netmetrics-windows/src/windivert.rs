@@ -62,7 +62,8 @@ impl Drop for FlowListener {
 ///
 /// # Errors
 ///
-/// Says why the listener could not start, and whether a later start could.
+/// Says why the listener could not start, and whether a later start could. While
+/// `WinDivert` is turned off it refuses before anything is downloaded.
 pub(crate) fn start(
     cache: Arc<Mutex<FlowOwnerCache>>,
     sink: EventSink,

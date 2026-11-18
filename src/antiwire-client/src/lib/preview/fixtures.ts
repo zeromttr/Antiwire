@@ -190,6 +190,8 @@ export function createFixtures(now: number) {
     notifyThreatDetected: true,
     persistRulesOffline: true,
     privateRelayCompatibility: false,
+    windivertEnabled: false,
+    windivertSupported: true,
     geoIpEnabled: true,
     logDaemonConnections: false,
     powerUserSettingsEnabled: false,
