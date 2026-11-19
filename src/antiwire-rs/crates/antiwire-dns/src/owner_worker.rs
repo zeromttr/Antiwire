@@ -13,10 +13,12 @@ use std::thread::JoinHandle;
 use parking_lot::Mutex;
 use tracing::warn;
 
-/// Jobs waiting for the worker. Each can take
-/// `port_mapper::RECORDED_OWNER_TIMEOUT` plus a socket-table scan, so a full
-/// queue is a backlog worth shedding, not one worth waiting out; jobs that
-/// still run late skip the scan (see `port_mapper::deferred_query_owner`).
+/// Jobs waiting for the worker. Each waits for the event source until
+/// `port_mapper::RECORDED_OWNER_TIMEOUT` after its query arrived, so a stalled
+/// source holds up the queue once, not once per job, and then may take a
+/// socket-table scan. A full queue is a backlog worth shedding, not one worth
+/// waiting out; jobs that still run late skip the scan (see
+/// `port_mapper::deferred_query_owner`).
 const QUEUE_CAPACITY: usize = 1_024;
 
 pub(crate) type OwnerJob = Box<dyn FnOnce() + Send>;

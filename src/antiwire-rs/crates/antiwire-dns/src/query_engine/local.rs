@@ -188,31 +188,21 @@ where
             AiLocal::Clear => false,
         };
 
-        let answer = if prepared.cache_eligible {
+        // One probe answers every question the miss path asks of the cache:
+        // a fresh answer, or the stale one a failure would serve. Probing
+        // again for the stale entry cost the receive loop a second lookup on
+        // every miss while the upstreams are down.
+        let probe = if prepared.cache_eligible {
             self.probe_cache(&prepared.cache_key)
         } else {
-            None
+            CacheProbe::Miss
         };
-        let Some(answer) = answer else {
-            if let Some(held) = self.held_failure_outcome(request, &prepared, context) {
-                return held;
+        let answer = match probe {
+            CacheProbe::Fresh(answer) => answer,
+            CacheProbe::Stale(stale) => {
+                return self.miss_outcome(request, prepared, Some(stale), context);
             }
-            if self.miss_would_fail_fast(&prepared) {
-                // Answered or dropped here instead of on a task per query;
-                // see `FailFastBudget`.
-                let udp = context.is_some_and(|ctx| ctx.protocol == Protocol::Udp);
-                if udp && !self.fail_fast_replies.try_take() {
-                    self.fail_fast_replies.note_drop();
-                    return CoreSyncOutcome::Dropped;
-                }
-                let servfail = crate::messages::empty_response(
-                    request.metadata(),
-                    request.first_query(),
-                    ResponseCode::ServFail,
-                );
-                return CoreSyncOutcome::Response(servfail, None);
-            }
-            return CoreSyncOutcome::Miss(prepared);
+            CacheProbe::Miss => return self.miss_outcome(request, prepared, None, context),
         };
         let domain = &prepared.cache_key.domain;
         self.note_client_hint(context, domain, &answer);
@@ -222,6 +212,36 @@ where
             self.post_work_for_answer(domain, &answer)
         };
         CoreSyncOutcome::Cached(answer, post_ai)
+    }
+
+    /// What becomes of a query the cache has no fresh answer for. `stale` is
+    /// the stale entry the probe found, which a failure may still serve.
+    fn miss_outcome<R: RequestView>(
+        &self,
+        request: &R,
+        prepared: PreparedQuery,
+        stale: Option<CachedAnswer>,
+        context: Option<DnsQueryContext>,
+    ) -> CoreSyncOutcome {
+        if prepared.cache_eligible && self.response_cache.failure_held(&prepared.cache_key) {
+            return self.held_failure_outcome(request, &prepared, stale, context);
+        }
+        if self.miss_would_fail_fast(&prepared, stale.is_some()) {
+            // Answered or dropped here instead of on a task per query;
+            // see `FailFastBudget`.
+            let udp = context.is_some_and(|ctx| ctx.protocol == Protocol::Udp);
+            if udp && !self.fail_fast_replies.try_take() {
+                self.fail_fast_replies.note_drop();
+                return CoreSyncOutcome::Dropped;
+            }
+            let servfail = crate::messages::empty_response(
+                request.metadata(),
+                request.first_query(),
+                ResponseCode::ServFail,
+            );
+            return CoreSyncOutcome::Response(servfail, None);
+        }
+        CoreSyncOutcome::Miss(prepared)
     }
 
     /// The answer to a query this resolver makes up itself, whatever an upstream would say:
@@ -257,20 +277,17 @@ where
     }
 
     /// Answers a name whose recent failure is still held, without asking
-    /// upstream: the stale answer at once (the RFC 8767 §5 failure recheck
-    /// timer), or SERVFAIL from the cached failure (RFC 9520 §3.2). `None`
-    /// when no failure is held.
+    /// upstream: `stale` at once (the RFC 8767 §5 failure recheck timer), or
+    /// SERVFAIL from the cached failure (RFC 9520 §3.2).
     fn held_failure_outcome<R: RequestView>(
         &self,
         request: &R,
         prepared: &PreparedQuery,
+        stale: Option<CachedAnswer>,
         context: Option<DnsQueryContext>,
-    ) -> Option<CoreSyncOutcome> {
+    ) -> CoreSyncOutcome {
         let key = &prepared.cache_key;
-        if !(prepared.cache_eligible && self.response_cache.failure_held(key)) {
-            return None;
-        }
-        Some(match self.response_cache.stale_after_failure(key) {
+        match stale {
             Some(stale) => {
                 self.note_client_hint(context, &key.domain, &stale);
                 let post_ai = self.post_work_for_answer(&key.domain, &stale);
@@ -284,37 +301,35 @@ where
                 ),
                 None,
             ),
-        })
+        }
     }
 
     /// True when the miss path would answer SERVFAIL without trying upstream:
     /// every tier is down with no recovery attempt available, no stale answer
-    /// would be served instead, and there is no in-flight fetch to join — the
-    /// recovery attempt itself may be resolving this very name.
-    fn miss_would_fail_fast(&self, prepared: &PreparedQuery) -> bool {
+    /// would be served instead (`stale_available`), and there is no in-flight
+    /// fetch to join — the recovery attempt itself may be resolving this very
+    /// name.
+    fn miss_would_fail_fast(&self, prepared: &PreparedQuery, stale_available: bool) -> bool {
         self.upstream.read().fails_fast()
             && !(prepared.cache_eligible
-                && (self.response_cache.fetch_in_flight(&prepared.cache_key)
-                    || self
-                        .response_cache
-                        .stale_after_failure(&prepared.cache_key)
-                        .is_some()))
+                && (stale_available || self.response_cache.fetch_in_flight(&prepared.cache_key)))
     }
 
-    /// Probes the cache and reserves near-expiry prefetch, without policy work.
-    pub(super) fn probe_cache(&self, cache_key: &CacheKey) -> Option<CachedAnswer> {
+    /// Probes the cache, reserving a fresh answer's near-expiry prefetch,
+    /// without policy work.
+    pub(super) fn probe_cache(&self, cache_key: &CacheKey) -> CacheProbe {
         // Stale entries must attempt a foreground refresh before being served.
         // Do not let a background prefetch take ownership of that miss: it has
         // separate admission limits and could delay the foreground request.
-        let CacheProbe::Fresh(answer) = self.response_cache.probe(cache_key) else {
-            return None;
-        };
-        if answer.should_prefetch() {
-            if let Some(reservation) = self.response_cache.try_reserve_prefetch(cache_key) {
-                self.spawn_prefetch(cache_key.clone(), reservation);
+        let probe = self.response_cache.probe(cache_key);
+        if let CacheProbe::Fresh(answer) = &probe {
+            if answer.should_prefetch() {
+                if let Some(reservation) = self.response_cache.try_reserve_prefetch(cache_key) {
+                    self.spawn_prefetch(cache_key.clone(), reservation);
+                }
             }
         }
-        Some(answer)
+        probe
     }
 
     /// Returns a policy, special-use, or cached response without upstream I/O.

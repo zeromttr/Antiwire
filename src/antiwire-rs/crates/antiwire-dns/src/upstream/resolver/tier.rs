@@ -252,6 +252,11 @@ impl TierHealth {
         self.down.load(Ordering::Acquire)
     }
 
+    /// Whether the tier has failed since it last answered.
+    pub(super) fn has_failed(&self) -> bool {
+        self.failures.load(Ordering::Acquire) > 0
+    }
+
     #[cfg(test)]
     pub(super) fn is_recovering(&self) -> bool {
         self.recovering.load(Ordering::Acquire)

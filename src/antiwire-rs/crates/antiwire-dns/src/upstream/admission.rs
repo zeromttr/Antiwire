@@ -71,6 +71,13 @@ impl UpstreamAdmission {
         self.inner.fails_fast()
     }
 
+    /// True when the upstream an exchange would wait on has failed since it
+    /// last answered.
+    #[must_use]
+    pub(crate) fn failing(&self) -> bool {
+        self.inner.failing()
+    }
+
     /// Acquires admission for the requested class.
     pub(crate) async fn acquire(
         &self,

@@ -15,7 +15,8 @@ use tracing::{info, warn};
 use super::response::BlockResponseMode;
 use super::sink::DnsBlockSink;
 use crate::port_mapper::{
-    deferred_query_owner, recorded_owners_available, reply_path_query_owner, Ownership, Purpose,
+    deferred_query_owner, recorded_owners_available, reply_path_query_owner, Ownership,
+    PromisedOwner, Purpose, ReplyPathOwner,
 };
 use hickory_server::net::xfer::Protocol;
 use std::net::IpAddr;
@@ -42,6 +43,9 @@ enum BlockOwner {
     /// later lookup misses the short-lived UDP socket that a blocked query
     /// closes as soon as it receives the answer.
     Resolved(Ownership),
+    /// Resolved from the socket table off the receive loop, before the block
+    /// response was sent, as `Resolved` is; the worker waits for it.
+    Promised(PromisedOwner, DnsQueryContext),
     /// Resolved on the worker from the owner an event source recorded, which
     /// outlives the socket (see `port_mapper::deferred_query_owner`), or from
     /// a socket-table scan the reply path could not run itself.
@@ -200,13 +204,18 @@ impl BlockSignalLogger {
         // Without recorded owners, resolve while the client is still waiting
         // for this response. The socket is gone once the block answer is
         // delivered, and a lookup on the worker then records Unknown (No Owner).
-        // A lookup that needs a scan the reply path may not run now is the
-        // exception: the worker scans at once, racing the client's close,
-        // rather than stall every other query behind it.
+        // A lookup that has to scan the socket table still runs before the
+        // answer goes out, but off the UDP receive loop (see
+        // `port_mapper::resolve_handing_off_scans`). One whose scan is not due
+        // yet is the exception: the worker scans when it is, racing the
+        // client's close, rather than stall every other query behind it.
         let owner = match context {
             Some(context) if recorded_owners_available() => BlockOwner::Deferred(context),
-            Some(context) => reply_path_query_owner(&context, Purpose::BlockedQuery)
-                .map_or(BlockOwner::Deferred(context), BlockOwner::Resolved),
+            Some(context) => match reply_path_query_owner(&context, Purpose::BlockedQuery) {
+                ReplyPathOwner::Known(owner) => BlockOwner::Resolved(owner),
+                ReplyPathOwner::Promised(owner) => BlockOwner::Promised(owner, context),
+                ReplyPathOwner::Busy => BlockOwner::Deferred(context),
+            },
             None => BlockOwner::Resolved(Ownership::NotFound),
         };
         let timestamp = time::OffsetDateTime::now_utc();
@@ -293,6 +302,9 @@ fn block_signal_worker(
         }
         let ownership = match event.owner {
             BlockOwner::Resolved(ownership) => ownership,
+            BlockOwner::Promised(owner, context) => owner
+                .wait(&context)
+                .unwrap_or_else(|| deferred_query_owner(&context, Purpose::BlockedQuery)),
             BlockOwner::Deferred(context) => deferred_query_owner(&context, Purpose::BlockedQuery),
         };
         sink.record_blocked_query_with_ownership(

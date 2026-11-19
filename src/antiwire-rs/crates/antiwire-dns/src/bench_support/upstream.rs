@@ -17,10 +17,13 @@ use std::time::{Duration, Instant};
 
 use antiwire_policy::RuleEngine;
 use hickory_proto::op::{Message, MessageType, OpCode, Query, ResponseCode};
+use hickory_proto::rr::rdata::opt::EdnsOption;
 use hickory_proto::rr::{rdata, Name, RData, Record, RecordType};
 use tokio::net::UdpSocket;
 use tokio::runtime::Runtime;
 
+use super::edns_with;
+use crate::ede::{EDE_STALE_ANSWER, EDNS_OPTION_CODE_EDE};
 use crate::listener::DnsListener;
 use crate::messages::encode_message;
 use crate::query_engine::{EngineServices, QueryEngine};
@@ -260,7 +263,7 @@ impl Bench {
             }
             let outcome = match reply.metadata.response_code {
                 ResponseCode::NoError if !reply.answers.is_empty() => {
-                    if reply.answers.iter().all(|record| record.ttl <= 1) {
+                    if says_stale(&reply) {
                         Outcome::Stale
                     } else {
                         Outcome::Answer
@@ -312,6 +315,9 @@ impl Bench {
     }
 }
 
+/// A query as a stub resolver sends it, with an OPT record: the resolver
+/// says an answer is stale in the OPT record's EDE, so a query without one
+/// could not tell.
 fn query_for(id: u16, name: &str) -> Message {
     let mut query = Message::new(id, MessageType::Query, OpCode::Query);
     query.metadata.recursion_desired = true;
@@ -319,7 +325,22 @@ fn query_for(id: u16, name: &str) -> Message {
         Name::from_ascii(name).expect("query name"),
         RecordType::A,
     ));
+    query.edns = Some(edns_with(false, 1232));
     query
+}
+
+/// Whether `reply` carries RFC 8914 EDE 3, Stale Answer. Its TTLs cannot say:
+/// a stale record is served with the RFC 8767 stale TTL, not one second.
+fn says_stale(reply: &Message) -> bool {
+    reply.edns.as_ref().is_some_and(|edns| {
+        edns.options().as_ref().iter().any(|(_, option)| {
+            matches!(
+                option,
+                EdnsOption::Unknown(EDNS_OPTION_CODE_EDE, data)
+                    if data.get(..2) == Some(&EDE_STALE_ANSWER.to_be_bytes()[..])
+            )
+        })
+    })
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]

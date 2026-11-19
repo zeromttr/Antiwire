@@ -2,8 +2,9 @@
 //!
 //! A lookup on the reply path runs while the client is still waiting for its
 //! answer, so its socket is still bound and the live socket table can name the
-//! owner. Scanning that table stalls the receive loop, so the reply path scans
-//! at most once per refresh interval and hands any other lookup to a worker.
+//! owner. A scan of that table is due at most once per refresh interval, and
+//! any other lookup goes to a worker. The scan itself runs off the UDP receive
+//! loop, before the reply it holds back is sent, so it stalls no other query.
 
 use crate::block::DnsQueryContext;
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -136,54 +137,197 @@ impl Purpose {
     }
 }
 
-/// Owner of the socket `context`'s query came from, if the reply path can
-/// tell it now.
+/// What the reply path knows of the owner of the socket a query came from.
+pub(crate) enum ReplyPathOwner {
+    /// The newest socket-table snapshot names the owner, or says there is none.
+    Known(Ownership),
+    /// A lookup handed off the receive loop names it before the reply goes
+    /// out (see [`resolve_handing_off_scans`]).
+    Promised(PromisedOwner),
+    /// Naming it needs a scan that may not start now: finish it with
+    /// [`deferred_query_owner`] off the reply path.
+    Busy,
+}
+
+/// The owner of a query's client socket, promised by a lookup that runs off
+/// the receive loop before the query's reply is sent.
+pub(crate) struct PromisedOwner(std::sync::mpsc::Receiver<Ownership>);
+
+impl PromisedOwner {
+    /// Waits for the lookup, until `context`'s query deadline at the latest.
+    /// `None` when it was not run, as when the receive loop already held as
+    /// many replies as it may: look the owner up with
+    /// [`deferred_query_owner`] instead.
+    pub(crate) fn wait(self, context: &DnsQueryContext) -> Option<Ownership> {
+        let deadline = context
+            .received_at
+            .checked_add(antiwire_tuning::DNS_QUERY_DEADLINE)
+            .unwrap_or(context.received_at);
+        self.0
+            .recv_timeout(deadline.saturating_duration_since(std::time::Instant::now()))
+            .ok()
+    }
+}
+
+/// Owner lookups handed off a receive loop, to run before the reply of the
+/// query that needed them is sent.
+pub(crate) struct HandedOffLookups(Vec<HandedOff>);
+
+struct HandedOff {
+    protocol: netmetrics::Protocol,
+    endpoint: netmetrics::LocalEndpoint,
+    received_at: std::time::Instant,
+    promise: std::sync::mpsc::SyncSender<Ownership>,
+}
+
+impl HandedOffLookups {
+    /// Runs the lookups, scanning the socket tables when they must, and keeps
+    /// each promise. Blocks for the scan; run it where that may.
+    pub(crate) fn run(self) {
+        for lookup in self.0 {
+            let owner = socket_table::lookup_socket_owner(
+                lookup.protocol,
+                lookup.endpoint,
+                lookup.received_at,
+                true,
+            )
+            .unwrap_or(Ownership::NotFound);
+            // The caller may have stopped waiting; the owner is then not needed.
+            let _ = lookup.promise.send(owner);
+        }
+    }
+}
+
+std::thread_local! {
+    /// Lookups handed off while a receive loop resolves one query on this
+    /// thread; `None` outside [`resolve_handing_off_scans`].
+    static HANDED_OFF: std::cell::RefCell<Option<Vec<HandedOff>>> =
+        const { std::cell::RefCell::new(None) };
+}
+
+/// Runs `resolve` with every owner lookup that would scan the socket tables
+/// handed off instead of run on this thread, and returns them.
+///
+/// A receive loop calls this so a scan never stalls it: what `resolve` decides
+/// is returned with the lookups, which must run before its reply is sent, on a
+/// thread that may block (see [`HandedOffLookups::run`]). They have to see the
+/// client's socket, and the client closes it once the reply arrives.
+pub(crate) fn resolve_handing_off_scans<T>(
+    resolve: impl FnOnce() -> T,
+) -> (T, Option<HandedOffLookups>) {
+    /// Puts back what was handed off outside, even if `resolve` panics.
+    struct Scope(Option<Vec<HandedOff>>);
+    impl Drop for Scope {
+        fn drop(&mut self) {
+            HANDED_OFF.set(self.0.take());
+        }
+    }
+    let scope = Scope(HANDED_OFF.replace(Some(Vec::new())));
+    let resolved = resolve();
+    let handed_off = HANDED_OFF.take().filter(|lookups| !lookups.is_empty());
+    drop(scope);
+    (resolved, handed_off.map(HandedOffLookups))
+}
+
+/// Hands a lookup to the enclosing [`resolve_handing_off_scans`] and returns
+/// its promise, or `None` when there is none.
+fn hand_off(
+    protocol: netmetrics::Protocol,
+    endpoint: netmetrics::LocalEndpoint,
+    received_at: std::time::Instant,
+) -> Option<PromisedOwner> {
+    HANDED_OFF.with_borrow_mut(|handed_off| {
+        let handed_off = handed_off.as_mut()?;
+        let (promise, owner) = std::sync::mpsc::sync_channel(1);
+        handed_off.push(HandedOff {
+            protocol,
+            endpoint,
+            received_at,
+            promise,
+        });
+        Some(PromisedOwner(owner))
+    })
+}
+
+/// Owner of the socket `context`'s query came from, as far as the reply path
+/// can tell it.
 ///
 /// Call it before the answer is sent, while the client's socket is still
-/// bound. A lookup can scan the whole socket table, which stalls the receive
-/// loop, so at most one such scan runs per refresh interval. `None` means this
-/// lookup needed another: finish it with [`deferred_query_owner`] off the
-/// reply path. On a multi-threaded runtime the scan steps off the async worker
-/// so other tasks keep running; a lookup that does not scan stays where it is.
+/// bound. Most lookups are answered by the snapshot already taken, or need a
+/// scan that is not due, and either is answered at once. One that may start a
+/// scan, at most once per refresh interval, is handed off when a receive loop
+/// is resolving the query (see [`resolve_handing_off_scans`]), and otherwise
+/// scans here, stepping off the async worker on a multi-threaded runtime.
 ///
 /// A lookup whose `purpose` is not worth a scan ([`Purpose::may_scan`]) is
 /// answered [`Ownership::NotFound`] without one.
 pub(crate) fn reply_path_query_owner(
     context: &DnsQueryContext,
     purpose: Purpose,
-) -> Option<Ownership> {
-    table_query_owner(context, purpose, false)
-}
-
-/// [`reply_path_query_owner`], or with `wait_for_scan` a lookup that waits
-/// behind a scan already running and always answers.
-fn table_query_owner(
-    context: &DnsQueryContext,
-    purpose: Purpose,
-    wait_for_scan: bool,
-) -> Option<Ownership> {
+) -> ReplyPathOwner {
     if !purpose.may_scan() {
-        return Some(Ownership::NotFound);
+        return ReplyPathOwner::Known(Ownership::NotFound);
     }
     let (protocol, endpoint) = client_endpoint(context);
-    // Nearly every lookup is answered by the snapshot already taken, or
-    // needs a scan that is not due. Neither blocks, and stepping off an
-    // async worker for them cost each answer more than the lookup itself:
-    // it hands the worker's tasks to another thread, which has to wake.
-    match socket_table::lookup_without_scan(
+    match lookup_without_scan(protocol, endpoint, context, false) {
+        socket_table::WithoutScan::Owner(owner) => ReplyPathOwner::Known(owner),
+        socket_table::WithoutScan::Busy => ReplyPathOwner::Busy,
+        socket_table::WithoutScan::Blocks => hand_off(protocol, endpoint, context.received_at)
+            .map_or_else(
+                || {
+                    scan_here(protocol, endpoint, context.received_at, false)
+                        .map_or(ReplyPathOwner::Busy, ReplyPathOwner::Known)
+                },
+                ReplyPathOwner::Promised,
+            ),
+    }
+}
+
+/// [`reply_path_query_owner`] off the reply path: it waits behind a scan
+/// already running, or for the next one, and always answers.
+fn table_query_owner(context: &DnsQueryContext, purpose: Purpose) -> Ownership {
+    if !purpose.may_scan() {
+        return Ownership::NotFound;
+    }
+    let (protocol, endpoint) = client_endpoint(context);
+    match lookup_without_scan(protocol, endpoint, context, true) {
+        socket_table::WithoutScan::Owner(owner) => owner,
+        socket_table::WithoutScan::Busy | socket_table::WithoutScan::Blocks => {
+            scan_here(protocol, endpoint, context.received_at, true).unwrap_or(Ownership::NotFound)
+        }
+    }
+}
+
+/// What a lookup would do without blocking. Nearly every lookup is answered by
+/// the snapshot already taken, or needs a scan that is not due. Neither
+/// blocks, and stepping off an async worker for them cost each answer more
+/// than the lookup itself: it hands the worker's tasks to another thread,
+/// which has to wake.
+fn lookup_without_scan(
+    protocol: netmetrics::Protocol,
+    endpoint: netmetrics::LocalEndpoint,
+    context: &DnsQueryContext,
+    wait_for_scan: bool,
+) -> socket_table::WithoutScan {
+    socket_table::lookup_without_scan(
         netmetrics::SocketOwnerCache::shared(),
         protocol,
         endpoint,
         context.received_at,
         wait_for_scan,
-    ) {
-        socket_table::WithoutScan::Owner(owner) => return Some(owner),
-        socket_table::WithoutScan::Busy => return None,
-        socket_table::WithoutScan::Blocks => {}
-    }
-    let lookup = || {
-        socket_table::lookup_socket_owner(protocol, endpoint, context.received_at, wait_for_scan)
-    };
+    )
+}
+
+/// Runs a lookup that may scan on this thread, first stepping off the async
+/// worker on a multi-threaded runtime so its other tasks keep running.
+fn scan_here(
+    protocol: netmetrics::Protocol,
+    endpoint: netmetrics::LocalEndpoint,
+    received_at: std::time::Instant,
+    wait_for_scan: bool,
+) -> Option<Ownership> {
+    let lookup =
+        || socket_table::lookup_socket_owner(protocol, endpoint, received_at, wait_for_scan);
     match tokio::runtime::Handle::try_current() {
         Ok(handle) if handle.runtime_flavor() != tokio::runtime::RuntimeFlavor::CurrentThread => {
             tokio::task::block_in_place(lookup)
@@ -192,8 +336,9 @@ fn table_query_owner(
     }
 }
 
-/// How long deferred attribution waits for the event source to catch up with
-/// a query. It normally has within a millisecond; this bounds a stalled one.
+/// How long after a query arrived deferred attribution waits for the event
+/// source to catch up with it. It normally has within a millisecond; this
+/// bounds a stalled one.
 pub(crate) const RECORDED_OWNER_TIMEOUT: std::time::Duration = std::time::Duration::from_millis(50);
 
 /// Whether an event source records client owners, so attribution can be
@@ -209,15 +354,35 @@ pub(crate) fn recorded_owners_available() -> bool {
 /// its port has gone to another process, so this runs after the answer is
 /// sent. Only when the source has no answer, such as for a socket opened
 /// before it started, does it fall back to a socket table lookup, which then
-/// sees the socket only if it is still bound. Blocks for up to
-/// [`RECORDED_OWNER_TIMEOUT`] plus that lookup; call it off the reply path.
+/// sees the socket only if it is still bound. Blocks until
+/// [`RECORDED_OWNER_TIMEOUT`] after the query arrived at the latest, plus that
+/// lookup; call it off the reply path.
 ///
 /// A job that waited in a backlog past the query deadline skips the table
 /// fallback: the client has given up by then and its port may belong to
 /// another process, so the table would name the wrong owner.
 pub(crate) fn deferred_query_owner(context: &DnsQueryContext, purpose: Purpose) -> Ownership {
+    deferred_query_owner_from(context, purpose, recorded_owner)
+}
+
+/// [`deferred_query_owner`], reading recorded owners from `recorded`, which
+/// is given how long it may wait for the event source to catch up.
+fn deferred_query_owner_from(
+    context: &DnsQueryContext,
+    purpose: Purpose,
+    recorded: impl FnOnce(
+        netmetrics::Protocol,
+        netmetrics::LocalEndpoint,
+        std::time::Instant,
+        std::time::Duration,
+    ) -> netmetrics::endpoint_owner::EndpointOwner,
+) -> Ownership {
     let (protocol, endpoint) = client_endpoint(context);
-    let recorded = recorded_owner(protocol, endpoint, context.received_at);
+    // The wait is counted from when the query arrived, not from now: the
+    // worker runs lookups one after another, so a fresh wait each would let a
+    // stalled source hold every queued lookup up by the whole timeout again.
+    let wait = RECORDED_OWNER_TIMEOUT.saturating_sub(context.received_at.elapsed());
+    let recorded = recorded(protocol, endpoint, context.received_at, wait);
     STATS.count_recorded(recorded, endpoint.address.is_loopback());
     // Off the reply path, so the fallback can wait for a scan in progress.
     let owner = prefer_recorded(recorded, || {
@@ -225,7 +390,7 @@ pub(crate) fn deferred_query_owner(context: &DnsQueryContext, purpose: Purpose) 
             STATS.table_skipped.fetch_add(1, Ordering::Relaxed);
             return Ownership::NotFound;
         }
-        let owner = table_query_owner(context, purpose, true).unwrap_or(Ownership::NotFound);
+        let owner = table_query_owner(context, purpose);
         let answered = if owner.resolved_pid().is_some() {
             &STATS.table_resolved
         } else {
@@ -317,7 +482,7 @@ impl AttributionStats {
 
 /// Socket-table scans the process-wide owner cache has run, for DNS lookups
 /// and for every other user of it.
-fn shared_table_scans() -> u64 {
+pub(crate) fn shared_table_scans() -> u64 {
     netmetrics::SocketOwnerCache::shared().scans()
 }
 
@@ -357,8 +522,9 @@ fn recorded_owner(
     protocol: netmetrics::Protocol,
     endpoint: netmetrics::LocalEndpoint,
     received_at: std::time::Instant,
+    wait: std::time::Duration,
 ) -> netmetrics::endpoint_owner::EndpointOwner {
-    netmetrics::endpoint_owner::owner_at(protocol, endpoint, received_at, RECORDED_OWNER_TIMEOUT)
+    netmetrics::endpoint_owner::owner_at(protocol, endpoint, received_at, wait)
 }
 
 #[cfg(all(windows, feature = "bench-internals"))]
@@ -370,6 +536,116 @@ pub(crate) fn run_snapshot_benchmark() {
 mod refine_tests {
     use super::*;
     use netmetrics::endpoint_owner::EndpointOwner;
+
+    fn context_for(
+        socket: &std::net::UdpSocket,
+        received_at: std::time::Instant,
+    ) -> DnsQueryContext {
+        let local = socket.local_addr().expect("local address");
+        DnsQueryContext {
+            client_addr: local.ip(),
+            client_port: local.port(),
+            protocol: hickory_server::net::xfer::Protocol::Udp,
+            received_at,
+        }
+    }
+
+    /// A lookup handed off while a receive loop resolves a query comes back
+    /// with the result, to run elsewhere, and names the owner to whoever
+    /// waits on its promise. Outside that scope nothing is handed off.
+    #[test]
+    fn a_lookup_handed_off_the_receive_loop_keeps_its_promise() {
+        let socket = std::net::UdpSocket::bind("127.0.0.1:0").expect("client socket");
+        let context = context_for(&socket, std::time::Instant::now());
+        let (protocol, endpoint) = client_endpoint(&context);
+        let (promise, lookups) =
+            resolve_handing_off_scans(|| hand_off(protocol, endpoint, context.received_at));
+        let promise = promise.expect("handed off inside the scope");
+        assert!(
+            hand_off(protocol, endpoint, context.received_at).is_none(),
+            "nothing is handed off outside the scope"
+        );
+        lookups.expect("the lookup comes back").run();
+        assert_eq!(
+            promise.wait(&context),
+            Some(Ownership::Resolved(std::process::id()))
+        );
+    }
+
+    /// A lookup that is never run, as when the receive loop holds as many
+    /// replies as it may, breaks its promise, and the waiter looks the owner
+    /// up itself instead of waiting out the query deadline.
+    #[test]
+    fn a_dropped_hand_off_lets_the_waiter_look_the_owner_up_itself() {
+        let socket = std::net::UdpSocket::bind("127.0.0.1:0").expect("client socket");
+        let context = context_for(&socket, std::time::Instant::now());
+        let (protocol, endpoint) = client_endpoint(&context);
+        let (promise, lookups) =
+            resolve_handing_off_scans(|| hand_off(protocol, endpoint, context.received_at));
+        drop(lookups);
+        let started = std::time::Instant::now();
+        assert_eq!(promise.expect("handed off").wait(&context), None);
+        assert!(started.elapsed() < std::time::Duration::from_millis(100));
+    }
+
+    /// The regression this guards: the attribution worker runs its lookups
+    /// one after another, and each gave the event source a fresh
+    /// [`RECORDED_OWNER_TIMEOUT`] to catch up. With the source stalled, every
+    /// queued lookup waited that long again, so the backlog grew by 50 ms a
+    /// job. A query is owed that wait once, counted from when it arrived.
+    #[test]
+    fn a_stalled_event_source_delays_queued_lookups_once_not_once_each() {
+        use std::sync::atomic::AtomicUsize;
+        use std::sync::Arc;
+        const JOBS: usize = 10;
+        // Each waits out what it is given, as a source that never catches up does.
+        fn stalled(
+            _: netmetrics::Protocol,
+            _: netmetrics::LocalEndpoint,
+            _: std::time::Instant,
+            wait: std::time::Duration,
+        ) -> EndpointOwner {
+            std::thread::sleep(wait);
+            EndpointOwner::Behind
+        }
+        // Past the deadline, so no lookup goes on to the socket table.
+        let received_at = std::time::Instant::now()
+            .checked_sub(antiwire_tuning::DNS_QUERY_DEADLINE + std::time::Duration::from_secs(1))
+            .expect("instant supports subtraction");
+        let context = DnsQueryContext {
+            client_addr: std::net::IpAddr::V4(std::net::Ipv4Addr::LOCALHOST),
+            client_port: 50_000,
+            protocol: hickory_server::net::xfer::Protocol::Udp,
+            received_at,
+        };
+        let worker = crate::owner_worker::OwnerWorker::default();
+        let done = Arc::new(AtomicUsize::new(0));
+        let started = std::time::Instant::now();
+        for _ in 0..JOBS {
+            let done = Arc::clone(&done);
+            assert!(worker
+                .submit(Box::new(move || {
+                    let owner = deferred_query_owner_from(&context, Purpose::BlockedQuery, stalled);
+                    assert_eq!(owner, Ownership::NotFound);
+                    done.fetch_add(1, Ordering::Relaxed);
+                }))
+                .is_ok());
+        }
+        while done.load(Ordering::Relaxed) < JOBS {
+            assert!(
+                started.elapsed() < std::time::Duration::from_secs(10),
+                "worker stuck"
+            );
+            std::thread::sleep(std::time::Duration::from_millis(1));
+        }
+        let drained = started.elapsed();
+        worker.shutdown();
+        eprintln!("{JOBS} lookups behind a stalled event source drained in {drained:?}");
+        assert!(
+            drained < RECORDED_OWNER_TIMEOUT,
+            "lookups past their wait must not wait again: {drained:?}"
+        );
+    }
 
     #[test]
     fn a_recorded_owner_skips_the_socket_table() {
@@ -412,10 +688,10 @@ mod refine_tests {
                 received_at: std::time::Instant::now(),
             };
             let scans = shared_table_scans();
-            assert_eq!(
+            assert!(matches!(
                 reply_path_query_owner(&context, Purpose::ServedAnswer),
-                Some(Ownership::NotFound)
-            );
+                ReplyPathOwner::Known(Ownership::NotFound)
+            ));
             assert_eq!(
                 deferred_query_owner(&context, Purpose::ServedAnswer),
                 Ownership::NotFound

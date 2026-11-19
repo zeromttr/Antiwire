@@ -1,6 +1,6 @@
 //! Ageing of cached record TTLs and RFC 2308 negative-TTL derivation.
 
-use std::sync::Arc;
+use std::sync::{Arc, OnceLock};
 
 use hickory_proto::op::{Message, ResponseCode};
 use hickory_proto::rr::{RData, Record};
@@ -11,6 +11,7 @@ use antiwire_tuning::{
 };
 
 use super::entry::CachedAnswer;
+use crate::answers::{answered_addresses, AnswerHint};
 
 #[derive(Debug)]
 pub(super) struct AgedBucket {
@@ -28,6 +29,9 @@ pub(crate) struct AgedSections {
     pub(crate) answers: Vec<Record>,
     pub(crate) authorities: Vec<Record>,
     pub(crate) additionals: Vec<Record>,
+    /// The address hint read from these sections, once something asks for it
+    /// (see [`super::ResponseCache::answer_hint`]).
+    pub(super) hint: OnceLock<Option<AnswerHint>>,
 }
 
 impl super::ResponseCache {
@@ -63,6 +67,7 @@ impl super::ResponseCache {
             answers: message.answers.clone(),
             authorities: message.authorities.clone(),
             additionals: message.additionals.clone(),
+            hint: OnceLock::new(),
         };
         // Answers define positive-entry freshness and the SOA defines
         // negative-entry freshness. Preserve those semantic records at a
@@ -87,6 +92,29 @@ impl super::ResponseCache {
             sections: Arc::clone(&sections),
         });
         Some(sections)
+    }
+
+    /// The addresses `cached` gives for the name asked about, as a serve now
+    /// sends them: read from the TTL-aged sections, which can have dropped an
+    /// expired additional record, and good for their aged TTL.
+    ///
+    /// Following a CNAME chain to its addresses costs more than serving the
+    /// answer does, so the hint is kept with the sections it was read from and
+    /// worked out once per entry and elapsed second, not on every hit.
+    #[must_use]
+    pub(crate) fn answer_hint(cached: &CachedAnswer, message: &Message) -> Option<AnswerHint> {
+        match Self::age_sections(cached, message) {
+            Some(sections) => sections
+                .hint
+                .get_or_init(|| {
+                    answered_addresses(message, &sections.answers, &sections.additionals)
+                })
+                .clone(),
+            None => cached
+                .unaged_hint
+                .get_or_init(|| answered_addresses(message, &message.answers, &message.additionals))
+                .clone(),
+        }
     }
 
     /// Cache lifetime for `message`, in seconds.

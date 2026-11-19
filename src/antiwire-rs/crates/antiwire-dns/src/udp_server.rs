@@ -8,6 +8,10 @@
 //! the miss is dropped for the sender to retransmit, so saturation never stalls
 //! socket reads, and local answers need no slot at all, so they keep flowing
 //! while upstream work is saturated.
+//!
+//! A local answer whose client must be looked up in the socket tables first is
+//! the exception: it waits on a task of its own while the lookup scans, so the
+//! scan stalls no other query (see [`send_after_lookups`]).
 
 use std::convert::Infallible;
 use std::io;
@@ -26,8 +30,9 @@ use tokio_util::sync::CancellationToken;
 use tower::{Service, ServiceExt};
 use tracing::{debug, warn};
 
-use antiwire_tuning::DNS_UDP_RECEIVE_ERROR_BACKOFF;
+use antiwire_tuning::{DNS_UDP_HELD_REPLIES, DNS_UDP_RECEIVE_ERROR_BACKOFF};
 
+use crate::port_mapper::HandedOffLookups;
 use crate::service::{Answer, Query, Reply};
 use crate::{DnsError, Result};
 
@@ -47,6 +52,7 @@ where
     M::Future: Send + 'static,
 {
     let socket = Arc::new(socket);
+    let held = Arc::new(Semaphore::new(DNS_UDP_HELD_REPLIES));
     let mut buffer = vec![0u8; MAX_RECEIVE_BUFFER_SIZE];
     let mut tasks = JoinSet::new();
     let mut receive_errors: u64 = 0;
@@ -84,8 +90,13 @@ where
             received_at,
         };
         let miss = match resolve(query) {
-            Answer::Local(reply) => {
-                send_now(&socket, reply, src);
+            Answer::Local(mut reply) => {
+                match reply.take_lookups() {
+                    Some(lookups) => {
+                        send_after_lookups(&mut tasks, &held, &socket, reply, lookups, src);
+                    }
+                    None => send_now(&socket, reply, src),
+                }
                 continue;
             }
             Answer::Ignored => continue,
@@ -136,6 +147,37 @@ fn send_now(socket: &UdpSocket, reply: Reply, dst: SocketAddr) {
         Ok(_) => reply.delivered(),
         Err(error) => debug!(%dst, %error, "dropped dns udp reply"),
     }
+}
+
+/// Sends `reply` once `lookups` have run, on a task of its own: they may scan
+/// the socket tables, which the receive loop must not wait for, and must see
+/// the client's socket before the reply lets the client close it.
+///
+/// Past [`DNS_UDP_HELD_REPLIES`] held at once, the reply goes at once and the
+/// lookups are dropped, so those waiting for them look the owner up later.
+fn send_after_lookups(
+    tasks: &mut JoinSet<()>,
+    held: &Arc<Semaphore>,
+    socket: &Arc<UdpSocket>,
+    reply: Reply,
+    lookups: HandedOffLookups,
+    dst: SocketAddr,
+) {
+    let Ok(slot) = Arc::clone(held).try_acquire_owned() else {
+        drop(lookups);
+        send_now(socket, reply, dst);
+        return;
+    };
+    let socket = Arc::clone(socket);
+    tasks.spawn(async move {
+        let _slot = slot;
+        // A lookup that panicked still lets the reply go.
+        let _ = tokio::task::spawn_blocking(move || lookups.run()).await;
+        match socket.send_to(reply.bytes(), dst).await {
+            Ok(_) => reply.delivered(),
+            Err(error) => debug!(%dst, %error, "failed to send dns udp reply"),
+        }
+    });
 }
 
 /// Rejects a datagram source that must never receive an answer: a zero port or

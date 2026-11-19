@@ -654,6 +654,43 @@ async fn a_stale_answer_is_served_within_the_client_response_timer() {
     }
 }
 
+/// The regression this guards: at the start of an outage every query with a
+/// stale answer waited out a whole failed exchange, about 1.6 s, until enough
+/// of them had failed to take the upstream down. Once one has failed, the
+/// next is served stale after the shorter timer.
+#[tokio::test]
+async fn a_stale_answer_is_served_sooner_once_the_upstream_has_failed() {
+    let upstream = MockUpstream::start_with(MockUpstreamConfig {
+        respond: false,
+        ..MockUpstreamConfig::default()
+    })
+    .await;
+    let stub = QueryEngine::new(allow_policy(), stub_config_with_upstream(&upstream));
+    stale_entry_for(&stub, "first.example");
+    stale_entry_for(&stub, "second.example");
+    let shorter = antiwire_tuning::DNS_STALE_ANSWER_TIMER_WHILE_FAILING;
+
+    let started = Instant::now();
+    let query = build_query("first.example", RecordType::A, 2);
+    let first = Message::from_vec(&respond(&stub, &query, started).await).expect("reply");
+    let first_wait = started.elapsed();
+    assert_eq!(first.answers.len(), 1, "stale answer served");
+    assert!(
+        first_wait > shorter + Duration::from_millis(150),
+        "nothing had failed yet, so the first query waits on the exchange: {first_wait:?}"
+    );
+
+    let started = Instant::now();
+    let query = build_query("second.example", RecordType::A, 3);
+    let second = Message::from_vec(&respond(&stub, &query, started).await).expect("reply");
+    let second_wait = started.elapsed();
+    assert_eq!(second.answers.len(), 1, "stale answer served");
+    assert!(
+        second_wait <= shorter + Duration::from_millis(150),
+        "the upstream had failed, so the stale answer goes out sooner: {second_wait:?}"
+    );
+}
+
 /// Serving stale at the timer must not abandon the refresh: a late upstream
 /// answer still lands in the cache.
 #[tokio::test]

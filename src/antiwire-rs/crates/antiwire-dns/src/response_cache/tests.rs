@@ -570,6 +570,65 @@ fn age(entry: &CachedAnswer) -> Option<Arc<AgedSections>> {
     ResponseCache::age_sections(entry, message)
 }
 
+/// A CNAME answer's hint is worked out once per elapsed second and shared by
+/// the hits in it, and it is read from the sections those hits are sent.
+#[test]
+fn an_answer_hint_is_kept_with_the_sections_it_was_read_from() {
+    let mut response = sample_response();
+    response.answers.clear();
+    response.add_answer(Record::from_rdata(
+        Name::from_ascii("example.test.").expect("name"),
+        300,
+        RData::CNAME(rdata::CNAME(
+            Name::from_ascii("edge.example.test.").expect("target"),
+        )),
+    ));
+    response.add_answer(Record::from_rdata(
+        Name::from_ascii("edge.example.test.").expect("name"),
+        300,
+        RData::A(rdata::A(std::net::Ipv4Addr::new(10, 0, 0, 1))),
+    ));
+    // An address for the chain's target parked in the additional section,
+    // with a TTL that runs out before the answer's does.
+    response.add_additional(Record::from_rdata(
+        Name::from_ascii("edge.example.test.").expect("name"),
+        5,
+        RData::A(rdata::A(std::net::Ipv4Addr::new(10, 0, 0, 2))),
+    ));
+    let message = Arc::new(response);
+    let mut entry = ResponseCache::entry_from_message(&message, false).expect("entry");
+    let parsed = entry.parsed_message.clone().expect("parsed message");
+
+    let first = ResponseCache::answer_hint(&entry, &parsed).expect("hint");
+    assert_eq!(
+        first.addresses.len(),
+        2,
+        "unaged, both addresses: {first:?}"
+    );
+    assert_eq!(first.ttl_ms, 5_000);
+    let again = ResponseCache::answer_hint(&entry, &parsed).expect("hint");
+    assert!(
+        Arc::ptr_eq(&first.addresses, &again.addresses),
+        "worked out once"
+    );
+
+    entry.cached_at = Instant::now()
+        .checked_sub(Duration::from_secs(10))
+        .expect("instant supports subtraction");
+    let aged = ResponseCache::answer_hint(&entry, &parsed).expect("hint");
+    assert_eq!(
+        *aged.addresses,
+        [std::net::IpAddr::V4(std::net::Ipv4Addr::new(10, 0, 0, 1))],
+        "the expired additional is no longer sent, so it is no longer hinted"
+    );
+    assert_eq!(aged.ttl_ms, 290_000);
+    let again = ResponseCache::answer_hint(&entry, &parsed).expect("hint");
+    assert!(
+        Arc::ptr_eq(&aged.addresses, &again.addresses),
+        "worked out once"
+    );
+}
+
 #[test]
 fn record_ttls_are_capped_at_the_cache_lifetime() {
     let max = DNS_MAX_UPSTREAM_TTL_SECONDS as u32;
@@ -685,6 +744,7 @@ fn ttl_snapshot_reuse_allocation_diagnostic() {
             answers: warmup.answers.clone(),
             authorities: warmup.authorities.clone(),
             additionals: warmup.additionals.clone(),
+            hint: std::sync::OnceLock::new(),
         }));
     }
     let recopy = started.elapsed();

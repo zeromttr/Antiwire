@@ -32,6 +32,7 @@ use tracing::warn;
 
 use crate::ai::{AiCoordinator, PostResponseWork};
 use crate::block::DnsQueryContext;
+use crate::port_mapper::{resolve_handing_off_scans, HandedOffLookups};
 #[cfg(test)]
 use crate::query_engine::prepare_uncached_message;
 use crate::query_engine::QueryEngine;
@@ -71,6 +72,10 @@ pub(crate) struct Miss {
 pub(crate) struct Reply {
     bytes: Vec<u8>,
     receipt: Receipt,
+    /// Owner lookups handed off the receive loop that answered it, to run
+    /// before it is sent: they may scan the socket tables, and must see the
+    /// client's socket while the client still waits. Only UDP hands them off.
+    lookups: Option<HandedOffLookups>,
 }
 
 impl Reply {
@@ -79,7 +84,13 @@ impl Reply {
         Self {
             bytes,
             receipt: Receipt(None),
+            lookups: None,
         }
+    }
+
+    /// The lookups to run before this reply is sent, if it has any.
+    pub(crate) fn take_lookups(&mut self) -> Option<HandedOffLookups> {
+        self.lookups.take()
     }
 
     pub(crate) fn bytes(&self) -> &[u8] {
@@ -156,6 +167,7 @@ where
             Answer::Local(Reply {
                 bytes,
                 receipt: Receipt(None),
+                lookups: None,
             })
         });
     };
@@ -167,9 +179,22 @@ where
         clippy::result_large_err,
         reason = "the miss keeps its PreparedQuery so upstream never re-parses"
     )]
-    let local = catch_sync_query_panic(&request, || answer_locally(engine, &request, received_at));
+    let answer =
+        || catch_sync_query_panic(&request, || answer_locally(engine, &request, received_at));
+    // A UDP listener answers every datagram from one receive loop, so an owner
+    // lookup that would scan the socket tables is handed to its reply instead
+    // (see `port_mapper::resolve_handing_off_scans`). A TCP connection has a
+    // task of its own and looks owners up where it is.
+    let (local, lookups) = if request.protocol() == Protocol::Udp {
+        resolve_handing_off_scans(answer)
+    } else {
+        (answer(), None)
+    };
     match local {
-        Some(Ok(Some(reply))) => Answer::Local(reply),
+        Some(Ok(Some(mut reply))) => {
+            reply.lookups = lookups;
+            Answer::Local(reply)
+        }
         Some(Ok(None)) => Answer::Ignored,
         Some(Err(query)) => Answer::Miss(Miss {
             request,
@@ -295,6 +320,7 @@ pub(crate) fn servfail(request: &Request) -> Reply {
     Reply {
         bytes: encode(response, request.protocol(), None),
         receipt: Receipt(None),
+        lookups: None,
     }
 }
 
@@ -337,6 +363,7 @@ fn encode_prepared(
     Reply {
         bytes: encode(message, request.protocol(), edns.as_ref()),
         receipt,
+        lookups: None,
     }
 }
 

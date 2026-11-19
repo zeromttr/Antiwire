@@ -1,6 +1,6 @@
 //! Cached answer representation, admission, and expiry.
 
-use std::sync::Arc;
+use std::sync::{Arc, OnceLock};
 use std::time::{Duration, Instant};
 
 use hickory_proto::op::Message;
@@ -12,6 +12,7 @@ use antiwire_tuning::{
     DNS_RESPONSE_CACHE_HARD_CAP, DNS_RESPONSE_CACHE_MAX_ENTRY_BYTES, DNS_SERVE_STALE_GRACE,
 };
 
+use crate::answers::AnswerHint;
 use crate::messages::encode_message;
 use crate::upstream::UpstreamAnswer;
 use crate::Result;
@@ -43,6 +44,9 @@ pub(crate) struct CachedAnswer {
     /// Reused TTL-aged sections for repeated hits in the same elapsed-second
     /// bucket. Shared across clones of this entry and bounded by cache eviction.
     pub(super) aged: Arc<Mutex<Option<AgedBucket>>>,
+    /// The address hint for serves in the first second, which send the stored
+    /// sections unaged (see `ResponseCache::answer_hint`). Shared across clones.
+    pub(super) unaged_hint: Arc<OnceLock<Option<AnswerHint>>>,
 }
 
 /// Result of a synchronous cache probe.
@@ -213,6 +217,7 @@ impl super::ResponseCache {
             cached_at: now,
             cacheable,
             aged: Arc::new(Mutex::new(None)),
+            unaged_hint: Arc::new(OnceLock::new()),
         }
     }
 }

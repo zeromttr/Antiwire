@@ -26,7 +26,9 @@ use crate::DnsHintSink;
 const QUERIES: usize = 2_000;
 const ROUNDS: usize = 5;
 
-struct NoopSink;
+/// A hint and block sink that keeps nothing, so the reply path's own work is
+/// what is measured.
+pub(super) struct NoopSink;
 
 impl DnsHintSink for NoopSink {
     fn record_hint(&self, _: u32, _: &str, _: &[std::net::IpAddr], _: u64, _: u64) {}

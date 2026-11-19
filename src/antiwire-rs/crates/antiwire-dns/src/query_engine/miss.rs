@@ -4,7 +4,9 @@
 use std::time::{Duration, Instant};
 
 use antiwire_policy::PolicyEngine;
-use antiwire_tuning::{DNS_QUERY_DEADLINE, DNS_STALE_ANSWER_TIMER};
+use antiwire_tuning::{
+    DNS_QUERY_DEADLINE, DNS_STALE_ANSWER_TIMER, DNS_STALE_ANSWER_TIMER_WHILE_FAILING,
+};
 use hickory_proto::op::Message;
 use hickory_proto::rr::RecordType;
 use hickory_server::zone_handler::MessageRequest;
@@ -18,7 +20,7 @@ use crate::block::DnsQueryContext;
 use crate::messages::{build_nodata_response, build_servfail_response};
 use crate::rebinding::message_find_rebinding_address;
 use crate::response_cache::{
-    CacheKey, CachedAnswer, ResponseCache, SharedOutcome, FETCH_GENERATION_ATTEMPTS,
+    CacheKey, CacheProbe, CachedAnswer, ResponseCache, SharedOutcome, FETCH_GENERATION_ATTEMPTS,
 };
 use crate::upstream::{AdmissionClass, SharedUpstreamAdmission};
 use crate::{DnsError, Result};
@@ -108,7 +110,10 @@ where
         let stale_timer = self
             .stale_fallback(&cache_key, cache_eligible)
             .is_some()
-            .then(|| DNS_STALE_ANSWER_TIMER.saturating_sub(enqueued_at.elapsed()))
+            .then(|| {
+                self.stale_answer_timer()
+                    .saturating_sub(enqueued_at.elapsed())
+            })
             .filter(|timer| *timer < remaining);
         tokio::select! {
             biased;
@@ -135,6 +140,17 @@ where
         }
     }
 
+    /// The RFC 8767 §5 client response timer for a query starting now: the
+    /// RFC's, or a shorter one while the upstream is failing (see
+    /// [`DNS_STALE_ANSWER_TIMER_WHILE_FAILING`]).
+    fn stale_answer_timer(&self) -> Duration {
+        if self.upstream().failing() {
+            DNS_STALE_ANSWER_TIMER_WHILE_FAILING
+        } else {
+            DNS_STALE_ANSWER_TIMER
+        }
+    }
+
     /// Completes a cache miss: probes again, admits the miss rate, then runs
     /// the generation-aware fetch loop.
     async fn handle_miss(
@@ -155,7 +171,7 @@ where
         // filled the cache since the sync probe, and resolve_or_fetch only
         // coalesces in-flight fetches.
         if cache_eligible {
-            if let Some(entry) = self.probe_cache(&cache_key) {
+            if let CacheProbe::Fresh(entry) = self.probe_cache(&cache_key) {
                 return Some(entry);
             }
             // The name failed while this query was queued; see `process_core`.
