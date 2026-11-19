@@ -100,12 +100,7 @@ impl GrpcServer {
         IpcEndpoint::loopback_tcp(addr)?;
         let listener = tokio::net::TcpListener::bind(addr).await?;
         let bound = IpcEndpoint::Tcp(listener.local_addr()?);
-        let incoming = TcpIncoming::from_listener(listener, false, None).map_err(|source| {
-            IpcError::Initialization {
-                context: "accept IPC connections",
-                source,
-            }
-        })?;
+        let incoming = TcpIncoming::from(listener);
 
         let identity = generate_server_identity()?;
         publish_public_cert(&self.paths.cert, &identity.cert_pem)?;
