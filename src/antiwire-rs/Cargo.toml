@@ -108,7 +108,7 @@ async-trait = "0.1"
 # Without `multithread`: with it, looking up one process on Linux scans all of /proc on a
 # rayon pool with a thread per core, which costs tens of milliseconds of CPU per lookup.
 sysinfo = { version = "0.33", default-features = false, features = ["network", "system"] }
-maxminddb = "0.32"
+maxminddb = "0.33"
 libloading = "0.8"
 rcgen = { version = "0.13", features = ["pem"] }
 libc = "0.2"
