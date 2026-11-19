@@ -5,6 +5,7 @@ use std::net::IpAddr;
 
 use super::FlowProcessor;
 use crate::domain_stats::{executable_key, HintOwner, HintProcess, HintSource};
+use crate::process_resolver::started_after;
 use crate::sanitize;
 
 impl FlowProcessor {
@@ -129,10 +130,16 @@ impl FlowProcessor {
     ///
     /// The process is identified as of the answer, not as of now. A hint can
     /// arrive after a short-lived process has exited, and an ordinary lookup
-    /// then fails, or finds whichever process has the PID since.
+    /// then fails, or finds whichever process has the PID since. The same
+    /// goes for the image remembered: it answers only for a time its process
+    /// had started by, and an answer from before then was given to an
+    /// earlier process with the PID.
     pub(super) fn hint_image(&self, pid: u32, at_ms: u64) -> HintImage {
-        if let Some(image) = self.hint_images.lock().get(&pid) {
-            return *image;
+        let remembered = self.hint_images.lock().get(&pid).copied();
+        if let Some(image) = remembered {
+            if !started_after(image.started_ms, at_ms) {
+                return image;
+            }
         }
         let Some(identity) = self.app_resolver.processes().identity_at(pid, at_ms) else {
             return HintImage::default();
@@ -140,9 +147,12 @@ impl FlowProcessor {
         let image = HintImage {
             hosts_dns_client: path_hosts_dns_client(&identity.path),
             executable: executable_key(&identity.path),
+            started_ms: identity.start_ts,
         };
-        // A placeholder path says the image could not be read this time.
-        if image.executable != 0 {
+        // A placeholder path says the image could not be read this time. And
+        // the process that has the PID now stays the one remembered: the
+        // hints still to come are its own.
+        if image.executable != 0 && remembered.is_none() {
             self.hint_images.lock().put(pid, image);
         }
         image
@@ -157,6 +167,8 @@ pub(super) struct HintImage {
     hosts_dns_client: bool,
     /// [`executable_key`] of the image, zero when it names no real executable.
     pub(super) executable: u64,
+    /// When the process started, in Unix epoch milliseconds.
+    started_ms: u64,
 }
 
 /// Whether a resolved identity path names a service host running `Dnscache`.

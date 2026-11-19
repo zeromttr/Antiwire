@@ -67,6 +67,16 @@ mod flow_tracker {
     /// Consecutive store-flush failures tolerated before the collector is reported
     /// degraded to the UI. A single failure is usually a transient busy database.
     pub const FLOW_FLUSH_FAILURES_BEFORE_DEGRADED: u32 = 3;
+    /// Rejections in a row one flush sits through while it writes a failing
+    /// queue an entry at a time. That many entries side by side can be at
+    /// fault and still be told from an outage; a flush retries every
+    /// `FLOW_FLUSH_INTERVAL`, so an outage costs this many failed writes each.
+    pub const FLOW_ISOLATION_MAX_REJECTIONS: usize = 128;
+    /// How long one flush spends on those rejections. An entry at fault is
+    /// rejected at once. A busy database or a failing disk takes seconds to
+    /// say no, and sitting through `FLOW_ISOLATION_MAX_REJECTIONS` of those
+    /// would hold every other write up for minutes.
+    pub const FLOW_ISOLATION_BUDGET: Duration = Duration::from_millis(250);
     /// Ceiling on connection logs held in memory while the store is unwritable.
     ///
     /// A failing flush keeps its batch for the next attempt, so the backlog only

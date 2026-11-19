@@ -99,19 +99,17 @@ impl FlowProcessor {
     /// last saw the row as it closed, and on a quiet machine no other event
     /// would prompt them to read it again.
     pub(crate) fn settle_closed_names(&self, named: &NewlyNamed) {
+        let now = Instant::now();
         let now_ms = netmetrics_core::unix_now_ms();
-        let due = {
-            let mut closed = self.closed_names.lock();
-            closed.expire(Instant::now(), now_ms);
-            closed.take_named(named)
-        };
+        let due = self.closed_names.lock().take_due(named, now, now_ms);
         // The lookups read the hints and the store, so the held connections
         // are judged with nothing locked.
         let mut ready = Vec::new();
-        for (remote, rows) in due {
+        for (remote, arrived_ms, rows) in due {
             let still_open: Vec<ClosedName> = rows
                 .into_iter()
-                .filter_map(|row| self.judge_closed(remote, row, now_ms, &mut ready))
+                .filter_map(|row| self.judge_closed(remote, row, arrived_ms, &mut ready))
+                .filter(|row| row.awaited_at(now, now_ms))
                 .collect();
             self.closed_names.lock().put_back(remote, still_open);
         }
@@ -121,20 +119,21 @@ impl FlowProcessor {
         self.write_name_upgrades();
     }
 
-    /// Looks up the closed connection `row`, to `remote`, again at `now_ms`.
-    /// A name that differs from the one written is queued in `ready`. Returns
-    /// the row while its name could still change.
+    /// Looks up the closed connection `row`, to `remote`, again for evidence
+    /// that arrived at `arrived_ms`. A name that differs from the one written
+    /// is queued in `ready`. Returns the row unless its name was already
+    /// past changing when the evidence arrived.
     fn judge_closed(
         &self,
         remote: IpAddr,
         mut row: ClosedName,
-        now_ms: u64,
+        arrived_ms: u64,
         ready: &mut Vec<ReadyUpgrade>,
     ) -> Option<ClosedName> {
-        if !row.naming.open_at(now_ms) {
+        if !row.naming.open_at(arrived_ms) {
             return None;
         }
-        let replaces = row.naming.provisional_at(now_ms);
+        let replaces = row.naming.provisional_at(arrived_ms);
         let judged = self.name_connection(row.pid, row.executable, &remote, row.opening);
         let confirmed =
             antiwire_store::domain_evidence(&judged.domain) == DomainEvidence::Confirmed;
@@ -163,7 +162,7 @@ impl FlowProcessor {
             }
         }
         row.naming = judged.naming;
-        row.naming.open_at(now_ms).then_some(row)
+        Some(row)
     }
 
     /// Writes the names queued for closed connections. A name whose row is
@@ -234,6 +233,15 @@ struct ClosedName {
     record: TrafficEvent,
 }
 
+impl ClosedName {
+    /// Whether the connection is still worth holding at `now`, which is
+    /// `now_ms` in Unix epoch milliseconds: it has not been held for as long
+    /// as any is, and evidence arriving from now on could change its name.
+    fn awaited_at(&self, now: Instant, now_ms: u64) -> bool {
+        self.deadline > now && self.naming.open_at(now_ms)
+    }
+}
+
 /// A name waiting to be written to its closed connection's row.
 #[derive(Debug)]
 pub(super) struct ReadyUpgrade {
@@ -272,28 +280,40 @@ impl ClosedNames {
         self.rows += 1;
     }
 
-    /// Takes the connections to every address in `named`, oldest first.
-    fn take_named(&mut self, named: &NewlyNamed) -> Vec<(IpAddr, Vec<ClosedName>)> {
-        if named.is_empty() || self.rows == 0 {
-            return Vec::new();
-        }
-        let addresses: Vec<IpAddr> = self
-            .by_address
-            .keys()
-            .copied()
-            .filter(|address| named.names(*address))
-            .collect();
-        addresses
+    /// Takes the connections to every address in `named`, oldest first, with
+    /// when the evidence for the address arrived, and drops those left whose
+    /// wait is over at `now`.
+    ///
+    /// The named ones are taken first, whether or not their wait is over.
+    /// Evidence is asked about a flush tick after it arrived, or later, and
+    /// what arrived while a name could still change counts though that time
+    /// has since run out.
+    fn take_due(
+        &mut self,
+        named: &NewlyNamed,
+        now: Instant,
+        now_ms: u64,
+    ) -> Vec<(IpAddr, u64, Vec<ClosedName>)> {
+        let addresses: Vec<(IpAddr, u64)> = if named.is_empty() {
+            Vec::new()
+        } else {
+            self.by_address
+                .keys()
+                .filter_map(|address| Some((*address, named.arrived_at(*address)?)))
+                .collect()
+        };
+        let due = addresses
             .into_iter()
-            .filter_map(|address| {
+            .filter_map(|(address, arrived_ms)| {
                 let rows = self.by_address.remove(&address)?;
-                self.rows -= rows.len();
-                Some((address, rows))
+                Some((address, arrived_ms, rows))
             })
-            .collect()
+            .collect();
+        self.expire(now, now_ms);
+        due
     }
 
-    /// Returns connections [`Self::take_named`] gave out that are still held.
+    /// Returns connections [`Self::take_due`] gave out that are still held.
     fn put_back(&mut self, remote: IpAddr, rows: Vec<ClosedName>) {
         if rows.is_empty() {
             return;
@@ -310,7 +330,7 @@ impl ClosedNames {
     fn expire(&mut self, now: Instant, now_ms: u64) {
         let mut rows = 0;
         self.by_address.retain(|_, held| {
-            held.retain(|row| row.deadline > now && row.naming.open_at(now_ms));
+            held.retain(|row| row.awaited_at(now, now_ms));
             rows += held.len();
             !held.is_empty()
         });
@@ -321,5 +341,59 @@ impl ClosedNames {
     #[cfg(test)]
     pub(super) fn len(&self) -> usize {
         self.rows
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::net::Ipv4Addr;
+
+    /// A closed connection whose name is final from `complete_at_ms`.
+    fn confirmed_until(complete_at_ms: u64, now: Instant) -> ClosedName {
+        ClosedName {
+            pid: 1234,
+            executable: 0,
+            opening: Opening::at(complete_at_ms.saturating_sub(3_500)),
+            conn_id: 7,
+            conn_pid: 1234,
+            conn_start: OffsetDateTime::UNIX_EPOCH,
+            written: "earlier.example".to_owned(),
+            naming: Naming {
+                complete_at_ms,
+                lasting: true,
+            },
+            deadline: now + LATE_NAME_WINDOW,
+            record: TrafficEvent::default(),
+        }
+    }
+
+    /// The regression this guards: connections whose wait was over were
+    /// dropped before the evidence was looked at. Evidence is asked about on
+    /// the flush after it arrived, so a hint that came just inside a name's
+    /// time and was asked about just outside it never reached the row.
+    #[test]
+    fn a_connection_named_in_time_is_taken_though_its_wait_has_since_ended() {
+        let named_address = IpAddr::V4(Ipv4Addr::new(203, 0, 113, 9));
+        let quiet_address = IpAddr::V4(Ipv4Addr::new(203, 0, 113, 10));
+        let now = Instant::now();
+        let mut closed = ClosedNames::default();
+        closed.hold(named_address, confirmed_until(5_000, now));
+        closed.hold(quiet_address, confirmed_until(5_000, now));
+        let mut named = NewlyNamed::default();
+        named.note(named_address, 4_900);
+
+        let due = closed.take_due(&named, now, 5_100);
+        assert_eq!(due.len(), 1);
+        let (address, arrived_ms, rows) = &due[0];
+        assert_eq!(
+            (*address, *arrived_ms, rows.len()),
+            (named_address, 4_900, 1)
+        );
+        assert_eq!(
+            closed.len(),
+            0,
+            "the connection nothing arrived for is no longer waited on"
+        );
     }
 }
