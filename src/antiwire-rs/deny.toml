@@ -78,7 +78,6 @@ skip = [
     { crate = "hashbrown@0.15.5", reason = "transitional hashbrown line" },
     { crate = "base64@0.22.1", reason = "tonic 0.14, reqwest 0.12, and pem 3 require 0.22; ureq 3.4 requires 0.23. Unification needs upstream dependency migrations." },
     { crate = "cpufeatures@0.2.17", reason = "ring / older aes crates still on the 0.2 line" },
-    { crate = "ipnetwork@0.20.0", reason = "maxminddb / geo stack have not unified on 0.21" },
     { crate = "prefix-trie@0.8.4", reason = "a transitive consumer still on 0.8; workspace uses 0.9.4" },
     { crate = "core-foundation@0.9.4", reason = "system-configuration 0.7 (hickory-resolver) still on the 0.9 line" },
     { crate = "foldhash@0.1.5", reason = "hashbrown 0.15 still on foldhash 0.1; 0.16+ use 0.2" },
