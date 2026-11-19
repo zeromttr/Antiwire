@@ -22,7 +22,6 @@ yanked = "deny"
 unmaintained = "all"
 ignore = [
     { id = "RUSTSEC-2024-0436", reason = "paste is unmaintained; pulled only by netstat2 → netlink-packet-utils. No drop-in upgrade until netstat2 moves off paste." },
-    { id = "RUSTSEC-2025-0134", reason = "rustls-pemfile is unmaintained; tonic 0.12 still depends on it. Wait for a tonic upgrade that uses rustls-pki-types PemObject directly." },
 ]
 
 [licenses]
@@ -75,23 +74,19 @@ deny = [
 
 # Older lines that remain after skip-tree; keep the newest version of each crate.
 skip = [
-    { crate = "hashbrown@0.12.3", reason = "older indexmap / hashbrown consumers have not moved off 0.12" },
     { crate = "hashbrown@0.14.5", reason = "dashmap / rusqlite stay on 0.14" },
     { crate = "hashbrown@0.15.5", reason = "transitional hashbrown line" },
-    { crate = "base64@0.22.1", reason = "tonic 0.12, reqwest 0.12, and pem 3 require 0.22; ureq 3.4 requires 0.23. Unification needs upstream dependency migrations." },
+    { crate = "base64@0.22.1", reason = "tonic 0.14, reqwest 0.12, and pem 3 require 0.22; ureq 3.4 requires 0.23. Unification needs upstream dependency migrations." },
     { crate = "cpufeatures@0.2.17", reason = "ring / older aes crates still on the 0.2 line" },
     { crate = "ipnetwork@0.20.0", reason = "maxminddb / geo stack have not unified on 0.21" },
     { crate = "prefix-trie@0.8.4", reason = "a transitive consumer still on 0.8; workspace uses 0.9.4" },
     { crate = "core-foundation@0.9.4", reason = "system-configuration 0.7 (hickory-resolver) still on the 0.9 line" },
     { crate = "foldhash@0.1.5", reason = "hashbrown 0.15 still on foldhash 0.1; 0.16+ use 0.2" },
-    { crate = "indexmap@1.9.3", reason = "tower 0.4 (tonic 0.12) still depends on indexmap 1" },
     { crate = "rand@0.8.7", reason = "ferrisetw and tower 0.4 still on rand 0.8" },
     { crate = "getrandom@0.2.17", reason = "ring and rand 0.8 still use the getrandom 0.2 API" },
     { crate = "getrandom@0.3.4", reason = "ahash 0.8 still uses the getrandom 0.3 API" },
     { crate = "rand_core@0.6.4", reason = "crypto crates and rand 0.8 still use the rand_core 0.6 API" },
     { crate = "zerocopy@0.7.35", reason = "ferrisetw still uses zerocopy 0.7" },
-    { crate = "socket2@0.5.10", reason = "tonic 0.12 still depends on socket2 0.5; the rest of the graph is on 0.6" },
-    { crate = "tower@0.4.13", reason = "tonic 0.12 still depends on tower 0.4; reqwest/axum use 0.5" },
 ]
 
 skip-tree = [
