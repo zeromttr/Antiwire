@@ -14,6 +14,7 @@ use std::path::Path;
 use std::ptr;
 
 use crate::divert_error::DivertError;
+use crate::windivert_opt_in::refuse_unless_enabled;
 use windows::Win32::Foundation::{
     ERROR_ACCESS_DENIED, ERROR_INVALID_IMAGE_HASH, ERROR_INVALID_PARAMETER, FreeLibrary, HANDLE,
     HMODULE, WIN32_ERROR,
@@ -118,7 +119,10 @@ impl Divert {
     ///
     /// # Errors
     ///
-    /// Says whether a later call could succeed. The manual lists the errors of
+    /// Refuses, before anything is fetched or loaded, while `WinDivert` is turned off
+    /// ([`crate::set_windivert_enabled`]).
+    ///
+    /// Otherwise says whether a later call could succeed. The manual lists the errors of
     /// `WinDivertOpen` (<https://reqrypt.org/windivert-doc.html#divert_open>): a caller
     /// without Administrator privileges (`ERROR_ACCESS_DENIED`), an invalid filter, layer
     /// or flags (`ERROR_INVALID_PARAMETER`) and a driver without a valid signature
@@ -126,7 +130,11 @@ impl Divert {
     /// incompatible driver still loaded, a driver blocked by other software, and a Base
     /// Filtering Engine that is not running, which it is not yet early in boot.
     pub(crate) fn open(filter: &str, layer: u32, flags: u64) -> Result<Self, DivertError> {
+        refuse_unless_enabled()?;
         let directory = crate::windivert_package::ensure_official_package()?;
+        // The download can take minutes, and `WinDivert` may have been turned off
+        // meanwhile. Nothing is loaded then.
+        refuse_unless_enabled()?;
         // A file replaced or removed since it was verified is verified again, and fetched
         // again, by the next call.
         let files = crate::windivert_package::lock_verified_files(&directory)

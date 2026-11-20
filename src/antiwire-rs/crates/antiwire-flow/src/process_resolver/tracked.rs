@@ -16,6 +16,8 @@ use super::{is_synthetic_path, start_ts_compatible, ResolvedIdentity};
 
 struct TrackedProcess {
     path: String,
+    /// Empty only for a stop whose start has not arrived (see
+    /// [`TrackedProcesses::stopped_at`]): such an entry names nobody.
     name: String,
     /// Unconverted NT device path, kept while the drive map does not know the
     /// volume. Retried on every resolve so a transient map gap heals without
@@ -44,7 +46,8 @@ pub(super) struct TrackedIdentity {
 #[derive(Debug, Eq, PartialEq)]
 pub(super) enum TrackedLookup {
     Found(TrackedIdentity),
-    /// The entry's creation time proved the PID was recycled, so it was dropped.
+    /// The entry is another process with this PID than the one asked about.
+    /// It was dropped if it is the earlier of the two.
     Recycled,
     /// No entry, or a stopped one past its retention.
     Missing,
@@ -108,7 +111,10 @@ impl TrackedProcesses {
                 return false;
             }
             // The same generation keeps its stop state, and so does an unknown
-            // one whose stop came after this process started.
+            // one whose stop came after this process started. A stop that
+            // arrived before any start is such an unknown one: a PID belongs
+            // to one process at a time, so a process that had started by the
+            // stop is the one that stopped.
             if start_ts > 0
                 && (existing.start_ts == start_ts
                     || (existing.start_ts == 0
@@ -170,6 +176,12 @@ impl TrackedProcesses {
     }
 
     /// Records a process exit, which starts its retention period.
+    ///
+    /// The stop of a process never heard of is kept too, for as long as any
+    /// other stop. Its start can still arrive, from a source that runs behind
+    /// the one that reported the exit, and [`Self::started`] then joins the
+    /// two. Until it does the entry names nobody and [`Self::resolve`] does
+    /// not find it.
     pub(super) fn stopped_at(&self, pid: u32, stop_ts: u64) {
         if pid == 0 {
             return;
@@ -180,6 +192,20 @@ impl TrackedProcesses {
                 entry.stopped_at = Some(Instant::now());
                 entry.stop_ts = stop_ts;
             }
+        } else if stop_ts > 0 {
+            // Without its time a stop cannot be told from an earlier
+            // process's, so only a timed one is worth keeping.
+            state.entries.insert(
+                pid,
+                TrackedProcess {
+                    path: String::new(),
+                    name: String::new(),
+                    raw_nt: None,
+                    start_ts: 0,
+                    stopped_at: Some(Instant::now()),
+                    stop_ts,
+                },
+            );
         }
 
         state.stops_since_sweep += 1;
@@ -194,13 +220,23 @@ impl TrackedProcesses {
     /// `expected_start_ts`.
     pub(super) fn resolve(&self, pid: u32, expected_start_ts: Option<u64>) -> TrackedLookup {
         let mut state = self.state.lock();
-        let Some(entry) = state.entries.get_mut(&pid) else {
+        let Some(entry) = state
+            .entries
+            .get_mut(&pid)
+            .filter(|entry| !entry.name.is_empty())
+        else {
             return TrackedLookup::Missing;
         };
         if !start_ts_compatible(entry.start_ts, expected_start_ts) {
-            // A lifecycle event was lost and the PID has been recycled: the entry
-            // describes the previous process and must not attribute the new one.
-            state.entries.remove(&pid);
+            // The entry and the question are about two processes with this PID.
+            // An entry older than the process asked about is out of date: a
+            // lifecycle event was lost, and it must not attribute the new
+            // process, so it goes. An entry newer than the process asked about
+            // is the PID's current one. The question is the late one, from a
+            // delayed flow of the previous process, and takes nothing with it.
+            if expected_start_ts.is_some_and(|expected| expected > entry.start_ts) {
+                state.entries.remove(&pid);
+            }
             return TrackedLookup::Recycled;
         }
 
@@ -326,6 +362,47 @@ mod tests {
     }
 
     #[test]
+    fn a_stop_before_its_start_names_nobody_until_the_start_joins_it() {
+        let tracked = TrackedProcesses::new();
+        tracked.stopped_at(917_002, 12_000);
+        assert_eq!(tracked.resolve(917_002, None), TrackedLookup::Missing);
+        let stopped_at = tracked.stopped_instant(917_002);
+        assert!(stopped_at.is_some(), "the stop is kept");
+
+        tracked.started(917_002, r"C:\apps\quick.exe", "quick.exe", 10_000);
+        let TrackedLookup::Found(found) = tracked.resolve(917_002, Some(10_000)) else {
+            panic!("the start names the process");
+        };
+        assert_eq!(found.identity.path, r"C:\apps\quick.exe");
+        assert!(found.stopped);
+        assert_eq!(found.stop_ts, 12_000);
+        assert_eq!(
+            tracked.stopped_instant(917_002),
+            stopped_at,
+            "retention runs from the stop"
+        );
+    }
+
+    #[test]
+    fn an_early_stop_is_not_joined_to_a_later_or_undated_process() {
+        for start_ts in [12_001, 0] {
+            let tracked = TrackedProcesses::new();
+            tracked.stopped_at(917_003, 12_000);
+            tracked.started(917_003, r"C:\apps\quick.exe", "quick.exe", start_ts);
+            assert_eq!(
+                tracked.stopped_instant(917_003),
+                None,
+                "a process created at {start_ts} is not known to have stopped"
+            );
+        }
+        // A stop that carries no time cannot be placed, so it is not kept.
+        let tracked = TrackedProcesses::new();
+        tracked.stopped_at(917_003, 0);
+        tracked.started(917_003, r"C:\apps\quick.exe", "quick.exe", 10_000);
+        assert_eq!(tracked.stopped_instant(917_003), None);
+    }
+
+    #[test]
     fn basename_preserves_unmapped_nt_evidence_and_dos_path_keeps_quality() {
         let tracked = TrackedProcesses::new();
         let raw = r"\Device\AntiwireBogusVolume\dir\quick.exe";
@@ -366,6 +443,21 @@ mod tests {
         );
         // The stale entry is dropped rather than left to attribute the next flow.
         assert_eq!(tracked.resolve(42_005, None), TrackedLookup::Missing);
+    }
+
+    /// The regression this guards: any mismatch dropped the entry, so a lookup
+    /// for the PID's previous process erased the one that has it now.
+    #[test]
+    fn a_lookup_for_an_earlier_process_keeps_the_current_one() {
+        let tracked = TrackedProcesses::new();
+        tracked.started(42_008, r"C:\Apps\current.exe", "current.exe", 9_000);
+
+        assert_eq!(
+            tracked.resolve(42_008, Some(1_000)),
+            TrackedLookup::Recycled
+        );
+        let identity = tracked.identity(42_008, Some(9_000)).expect("kept");
+        assert_eq!(identity.path, r"C:\Apps\current.exe");
     }
 
     #[test]

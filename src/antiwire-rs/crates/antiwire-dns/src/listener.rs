@@ -26,7 +26,7 @@ use tracing::{error, info, warn};
 use antiwire_tuning::{DNS_MAX_TCP_CONNECTIONS, DNS_MAX_UDP_WORKERS};
 
 use crate::query_engine::QueryEngine;
-use crate::service::{Forward, Resolve};
+use crate::service::{Forward, Query, Resolve};
 use crate::tcp_server::serve_tcp;
 use crate::udp_server::serve_udp;
 use crate::{DnsError, Result};
@@ -118,14 +118,15 @@ struct BoundStack {
     tcp_addr: Option<SocketAddr>,
 }
 
+/// The transport a listener serves, and so the one a query arrived over.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum Transport {
+pub(crate) enum Transport {
     Udp,
     Tcp,
 }
 
 impl Transport {
-    const fn as_str(self) -> &'static str {
+    pub(crate) const fn as_str(self) -> &'static str {
         match self {
             Self::Udp => "udp",
             Self::Tcp => "tcp",
@@ -211,12 +212,14 @@ where
         shutdown: CancellationToken,
     ) -> BoxFuture<'static, Result<()>> {
         let resolve = self.resolve.clone();
-        let resolve = move |query| resolve.resolve(query);
+        let resolve = move |query: Query<'_>| resolve.resolve(query);
+        let forward = self.forward.clone();
+        let forward = move |miss| forward.answer(miss);
         match socket {
             BoundSocket::Udp(socket) => serve_udp(
                 socket,
                 resolve,
-                self.forward.clone(),
+                forward,
                 Arc::clone(&self.udp_workers),
                 shutdown,
             )
@@ -224,7 +227,7 @@ where
             BoundSocket::Tcp(listener) => serve_tcp(
                 listener,
                 resolve,
-                self.forward.clone(),
+                forward,
                 Arc::clone(&self.tcp_connections),
                 shutdown,
             )

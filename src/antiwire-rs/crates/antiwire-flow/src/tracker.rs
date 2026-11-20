@@ -199,16 +199,18 @@ struct NameLookup {
     made_for: Option<(u32, i32)>,
     /// What that lookup said of its answer.
     naming: Naming,
-    /// When DNS evidence that could change the answer was first noticed since
-    /// that lookup, in Unix epoch milliseconds.
+    /// When the first DNS evidence that could change the answer arrived, of
+    /// what has been noticed since that lookup, in Unix epoch milliseconds.
     evidence_at_ms: Option<u64>,
 }
 
 impl NameLookup {
-    /// DNS evidence for the flow's address was noticed at `now_ms`.
-    fn note_evidence(&mut self, now_ms: u64) {
-        if self.made_for.is_some() && self.naming.open_at(now_ms) {
-            self.evidence_at_ms.get_or_insert(now_ms);
+    /// DNS evidence for the flow's address arrived at `arrived_ms`. It is
+    /// noticed a flush tick later or more, and what it may do to the name
+    /// goes by when it arrived.
+    fn note_evidence(&mut self, arrived_ms: u64) {
+        if self.made_for.is_some() && self.naming.open_at(arrived_ms) {
+            self.evidence_at_ms.get_or_insert(arrived_ms);
         }
     }
 

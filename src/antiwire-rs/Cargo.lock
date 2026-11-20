@@ -123,7 +123,7 @@ dependencies = [
 
 [[package]]
 name = "antiwire-ai"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "antiwire-aibackend",
  "serde_json",
@@ -134,7 +134,7 @@ dependencies = [
 
 [[package]]
 name = "antiwire-aibackend"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "antiwire-http",
  "bytes",
@@ -149,7 +149,7 @@ dependencies = [
 
 [[package]]
 name = "antiwire-capture"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "antiwire-tuning",
  "libc",
@@ -164,7 +164,7 @@ dependencies = [
 
 [[package]]
 name = "antiwire-daemon"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "antiwire-dns-os",
  "antiwire-dns-redirect",
@@ -191,7 +191,7 @@ dependencies = [
 
 [[package]]
 name = "antiwire-dns"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "antiwire-ai",
  "antiwire-dns-redirect",
@@ -207,7 +207,6 @@ dependencies = [
  "futures-util",
  "hickory-proto",
  "hickory-resolver",
- "hickory-server",
  "ipnet",
  "moka",
  "netmetrics",
@@ -224,7 +223,6 @@ dependencies = [
  "time",
  "tokio",
  "tokio-util",
- "tower",
  "tracing",
  "url",
  "webpki-roots",
@@ -233,7 +231,7 @@ dependencies = [
 
 [[package]]
 name = "antiwire-dns-os"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "antiwire-secrets",
  "ipconfig",
@@ -247,7 +245,7 @@ dependencies = [
 
 [[package]]
 name = "antiwire-dns-redirect"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "antiwire-dns-os",
  "antiwire-secrets",
@@ -263,7 +261,7 @@ dependencies = [
 
 [[package]]
 name = "antiwire-downloader"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "antiwire-http",
  "antiwire-policy",
@@ -282,7 +280,7 @@ dependencies = [
 
 [[package]]
 name = "antiwire-enforce"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "antiwire-policy",
  "firew-rs",
@@ -293,7 +291,7 @@ dependencies = [
 
 [[package]]
 name = "antiwire-events"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "antiwire-capture",
  "antiwire-platform",
@@ -309,7 +307,7 @@ dependencies = [
 
 [[package]]
 name = "antiwire-flow"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "antiwire-capture",
  "antiwire-dns",
@@ -341,7 +339,7 @@ dependencies = [
 
 [[package]]
 name = "antiwire-geo"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "directories",
  "flate2",
@@ -352,7 +350,7 @@ dependencies = [
 
 [[package]]
 name = "antiwire-http"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "bytes",
  "flate2",
@@ -363,7 +361,7 @@ dependencies = [
 
 [[package]]
 name = "antiwire-ipc"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "antiwire-capture",
  "antiwire-dns",
@@ -403,7 +401,7 @@ dependencies = [
 
 [[package]]
 name = "antiwire-lookup"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "antiwire-http",
  "serde",
@@ -416,7 +414,7 @@ dependencies = [
 
 [[package]]
 name = "antiwire-netmap"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "futures-util",
  "hickory-proto",
@@ -431,7 +429,7 @@ dependencies = [
 
 [[package]]
 name = "antiwire-platform"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "antiwire-http",
  "antiwire-policy",
@@ -451,7 +449,7 @@ dependencies = [
 
 [[package]]
 name = "antiwire-policy"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "ahash",
  "antiwire-http",
@@ -472,7 +470,7 @@ dependencies = [
 
 [[package]]
 name = "antiwire-proto"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "prost",
  "protoc-bin-vendored",
@@ -483,7 +481,7 @@ dependencies = [
 
 [[package]]
 name = "antiwire-runtime"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "antiwire-capture",
  "antiwire-dns",
@@ -512,7 +510,7 @@ dependencies = [
 
 [[package]]
 name = "antiwire-secrets"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "libc",
  "tempfile",
@@ -523,7 +521,7 @@ dependencies = [
 
 [[package]]
 name = "antiwire-services"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "antiwire-ai",
  "antiwire-dns",
@@ -556,7 +554,7 @@ dependencies = [
 
 [[package]]
 name = "antiwire-store"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "aes",
  "aes-gcm",
@@ -579,11 +577,11 @@ dependencies = [
 
 [[package]]
 name = "antiwire-tuning"
-version = "0.1.0"
+version = "0.1.1"
 
 [[package]]
 name = "antiwire-update"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "antiwire-downloader",
  "antiwire-platform",
@@ -1794,7 +1792,6 @@ dependencies = [
  "prefix-trie 0.8.4",
  "rand 0.10.2",
  "ring",
- "serde",
  "thiserror 2.0.21",
  "tinyvec",
  "tracing",
@@ -1829,29 +1826,6 @@ dependencies = [
  "tokio-rustls",
  "tracing",
  "webpki-roots",
-]
-
-[[package]]
-name = "hickory-server"
-version = "0.26.3"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "950c2ad9ba2ad35d6890b725baff91305f65b87d7719a6c6071514dc70f13eeb"
-dependencies = [
- "async-trait",
- "bytes",
- "cfg-if",
- "data-encoding",
- "futures-util",
- "hickory-net",
- "hickory-proto",
- "ipnet",
- "prefix-trie 0.8.4",
- "serde",
- "thiserror 2.0.21",
- "time",
- "tokio",
- "tokio-util",
- "tracing",
 ]
 
 [[package]]
@@ -4465,7 +4439,6 @@ dependencies = [
  "idna",
  "percent-encoding",
  "serde",
- "serde_derive",
 ]
 
 [[package]]

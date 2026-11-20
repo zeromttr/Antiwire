@@ -109,10 +109,11 @@ pub async fn apply_dns_settings_change(
 ) -> Result<()> {
     let store = &dependencies.store;
     let enabled_changed = previous.dns_resolver_enabled != updated.dns_resolver_enabled;
-    // The port 53 divert is installed or left out as the resolver starts, so a change to
-    // whether packet rules are used restarts it like a change to its configuration.
-    let stub_changed = dns_config_changed(previous, updated)
-        || previous.uses_packet_rules() != updated.uses_packet_rules();
+    // The port 53 divert is installed, in one form or the other, or left out as the
+    // resolver starts. So a change to what becomes of DNS sent past the resolver restarts
+    // it like a change to its configuration.
+    let stub_changed =
+        dns_config_changed(previous, updated) || previous.dns_bypass() != updated.dns_bypass();
     let ai_changed = crate::ai_support::ai_config_changed(previous, updated);
 
     if !enabled_changed && !stub_changed && !ai_changed {
@@ -173,7 +174,7 @@ pub async fn apply_dns_settings_change(
     if updated.dns_resolver_enabled {
         let dns = slot
             .get_or_insert_with(|| DnsInterceptor::new(dependencies.clone(), arm_boot_recovery));
-        dns.restart(store.as_ref()).await?;
+        dns.restart().await?;
     } else if let Some(dns) = slot.as_mut() {
         dns.stop().await?;
     }
@@ -266,7 +267,7 @@ pub async fn bootstrap_dns_interceptor(
     let dns = slot.get_or_insert_with(|| DnsInterceptor::new(dependencies, arm_boot_recovery));
 
     if settings.dns_resolver_enabled {
-        if let Err(error) = dns.start(store.as_ref()).await {
+        if let Err(error) = dns.start().await {
             warn!(error = %error, "dns interceptor start failed; retrying in the background");
             report_start_failure(alerts.as_ref(), &error);
             // Its first attempt waits for this lock, so holding it here is fine.
@@ -341,7 +342,7 @@ fn retry_failed_start(
                 Ok(_) => {}
                 Err(error) => warn!(%error, "could not read settings before retrying the resolver"),
             }
-            match dns.start(store.as_ref()).await {
+            match dns.start().await {
                 Ok(()) => {
                     info!("dns interceptor started after an earlier failure");
                     return;

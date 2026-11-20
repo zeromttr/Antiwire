@@ -41,8 +41,8 @@ impl BlockResponseMode {
 /// Builds a policy block response echoing the request's transaction id,
 /// first question, and EDNS.
 ///
-/// Takes the pieces rather than an owned request `Message` so the block path
-/// clones only the one question it echoes (see `RequestView::first_query`).
+/// Takes the pieces rather than the request `Message`, so the block path
+/// clones only the one question it echoes.
 pub(crate) fn build_block_response(
     metadata: &Metadata,
     question: Query,

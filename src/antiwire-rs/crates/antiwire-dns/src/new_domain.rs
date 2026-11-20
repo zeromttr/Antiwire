@@ -35,7 +35,7 @@ pub(crate) const NEW_DOMAIN_BLOCK_LABEL: &str = "Newly Registered Domain";
 pub const NEW_DOMAIN_MAX_AGE_DAYS: [u32; 4] = [7, 14, 30, 90];
 
 /// Default age for the setting.
-pub const DEFAULT_NEW_DOMAIN_MAX_AGE_DAYS: u32 = 30;
+pub(crate) const DEFAULT_NEW_DOMAIN_MAX_AGE_DAYS: u32 = 30;
 
 /// Whether `days` is one of [`NEW_DOMAIN_MAX_AGE_DAYS`].
 #[must_use]

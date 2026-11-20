@@ -4,31 +4,18 @@ use netmetrics::Ownership;
 
 /// Receives blocked-query notifications after policy evaluation.
 pub trait DnsBlockSink: Send + Sync {
-    /// `pid` is zero when the querying process could not be resolved.
-    /// `blocklist_names` are catalog ids that matched; empty for DNS rules
-    /// and the fail-closed boot window.
-    fn record_blocked_query(&self, domain: &str, pid: u32, blocklist_names: &[String]);
-
-    /// Detailed record carrying the event timestamp and the full
-    /// [`Ownership`]. This is the method the resolver calls.
+    /// Records a blocked query of `domain` made at `timestamp`.
     ///
-    /// The default forwards only a pid to [`Self::record_blocked_query`]:
-    /// `Resolved(pid)` becomes `pid`, while `Ambiguous` and `NotFound` both
-    /// collapse to `0`, and the timestamp is dropped. A sink that needs either
-    /// must override this method.
-    fn record_blocked_query_with_ownership(
+    /// `ownership` is the owner of the client's socket. `blocklist_names` are
+    /// the catalog ids that matched; empty for DNS rules and the fail-closed
+    /// boot window.
+    fn record_blocked_query(
         &self,
         domain: &str,
         ownership: Ownership,
         blocklist_names: &[String],
-        _timestamp: Option<time::OffsetDateTime>,
-    ) {
-        self.record_blocked_query(
-            domain,
-            ownership.resolved_pid().unwrap_or(0),
-            blocklist_names,
-        );
-    }
+        timestamp: time::OffsetDateTime,
+    );
 
     /// Applies daemon settings that affect block recording side effects.
     fn update_runtime_settings(

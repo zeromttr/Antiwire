@@ -19,5 +19,5 @@ mod retention;
 mod settings;
 mod subdomains;
 
-pub use domain_decisions::{DeletionFence, Resident, ResidentDecision};
+pub use domain_decisions::{DeletionFence, OutcomeRevision, Resident, ResidentDecision};
 pub use subdomains::SeenSubdomain;

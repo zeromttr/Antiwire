@@ -2,12 +2,24 @@
 
 use std::collections::{HashMap, HashSet};
 use std::net::IpAddr;
+use std::sync::Arc;
 
 use hickory_proto::op::Message;
 use hickory_proto::rr::{Name, RData, Record};
 
-/// A/AAAA addresses owned by the queried name, and the shortest of their TTLs
-/// in milliseconds. `None` when the answer carries no such address.
+/// The addresses an answer gives for the name asked about, and how long they
+/// are good for.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct AnswerHint {
+    /// A/AAAA addresses owned by the queried name. Shared, so a hint kept for
+    /// many hits is handed out without copying it.
+    pub(crate) addresses: Arc<[IpAddr]>,
+    /// The shortest of their TTLs, in milliseconds, and at least one second.
+    pub(crate) ttl_ms: u64,
+}
+
+/// A/AAAA addresses owned by the queried name, and the shortest of their TTLs.
+/// `None` when the answer carries no such address.
 ///
 /// Addresses are collected from the answer and additional sections, but only
 /// for the question name and the targets of its CNAME chain. The additional
@@ -18,11 +30,13 @@ pub(crate) fn answered_addresses(
     message: &Message,
     answers: &[Record],
     additionals: &[Record],
-) -> Option<(Vec<IpAddr>, u64)> {
+) -> Option<AnswerHint> {
     let owned = owned_addresses(message, answers, additionals);
     let min_ttl = owned.iter().map(|(_, ttl)| *ttl).min()?;
-    let ips = owned.into_iter().map(|(ip, _)| ip).collect();
-    Some((ips, u64::from(min_ttl).saturating_mul(1_000).max(1_000)))
+    Some(AnswerHint {
+        addresses: owned.into_iter().map(|(ip, _)| ip).collect(),
+        ttl_ms: u64::from(min_ttl).saturating_mul(1_000).max(1_000),
+    })
 }
 
 /// Owned addresses with their record TTLs.
@@ -133,7 +147,7 @@ mod tests {
 
     fn addresses(message: &Message) -> Vec<IpAddr> {
         answered_addresses(message, &message.answers, &message.additionals)
-            .map(|(ips, _)| ips)
+            .map(|hint| hint.addresses.to_vec())
             .unwrap_or_default()
     }
 
@@ -163,10 +177,10 @@ mod tests {
             5,
             RData::A(rdata::A(Ipv4Addr::new(203, 0, 113, 53))),
         ));
-        let (ips, ttl_ms) =
+        let hint =
             answered_addresses(&message, &message.answers, &message.additionals).expect("hint");
-        assert_eq!(ips, vec![IpAddr::V4(Ipv4Addr::new(192, 0, 2, 1))]);
-        assert_eq!(ttl_ms, 300_000);
+        assert_eq!(*hint.addresses, [IpAddr::V4(Ipv4Addr::new(192, 0, 2, 1))]);
+        assert_eq!(hint.ttl_ms, 300_000);
     }
 
     #[test]

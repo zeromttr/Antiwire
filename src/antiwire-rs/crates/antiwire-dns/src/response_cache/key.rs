@@ -1,6 +1,5 @@
 //! Cache lookup keys and the query bits that make an answer valid.
 
-#[cfg(any(test, feature = "bench-internals"))]
 use hickory_proto::op::Message;
 
 use crate::domain_key::DomainKey;
@@ -25,7 +24,6 @@ pub(crate) struct QueryFlags {
 }
 
 impl QueryFlags {
-    #[cfg(any(test, feature = "bench-internals"))]
     #[must_use]
     pub(crate) fn from_request(request: &Message) -> Self {
         let edns = request.edns.as_ref();

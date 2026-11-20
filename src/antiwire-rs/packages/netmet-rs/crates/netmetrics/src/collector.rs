@@ -2451,6 +2451,187 @@ mod tests {
         assert_eq!(stopped, [42, 43]);
     }
 
+    /// The regression this guards: a stop that named a process the collector had not
+    /// heard of was recorded in its own table, and consumers were told only that a PID
+    /// had stopped. They could not name the process's connections, though the collector
+    /// could.
+    #[test]
+    fn a_stop_that_first_names_a_process_publishes_its_start_before_the_stop() {
+        let key = test_key(false, 50_031);
+        let (batch, flows, _) = apply_events(vec![
+            BackendEvent::Opened {
+                key,
+                pid: 42,
+                cookie: None,
+                timestamp: 250,
+                if_index: None,
+            },
+            BackendEvent::ProcessStopped {
+                pid: 42,
+                timestamp: 300,
+                identity: Some(identity(200)),
+            },
+            // Consumers already heard of this one: its stop repeats nothing.
+            BackendEvent::ProcessStarted(ProcessInfo {
+                pid: 43,
+                identity: identity(200),
+            }),
+            BackendEvent::ProcessStopped {
+                pid: 43,
+                timestamp: 300,
+                identity: Some(identity(200)),
+            },
+            // A stop that names nobody has no start to publish.
+            BackendEvent::ProcessStopped {
+                pid: 44,
+                timestamp: 300,
+                identity: None,
+            },
+        ]);
+        let started = |pid| {
+            FlowEvent::ProcessStarted(ProcessInfo {
+                pid,
+                identity: identity(200),
+            })
+        };
+        let stopped = |pid| FlowEvent::ProcessStopped { pid, stop_ts: 300 };
+        let lifecycle: Vec<_> = batch
+            .into_iter()
+            .filter(|event| {
+                matches!(
+                    event,
+                    FlowEvent::ProcessStarted(_) | FlowEvent::ProcessStopped { .. }
+                )
+            })
+            .collect();
+        assert_eq!(
+            lifecycle,
+            [
+                started(42),
+                stopped(42),
+                started(43),
+                stopped(43),
+                stopped(44)
+            ]
+        );
+        assert_eq!(
+            flows.get(&key).expect("flow").meta.process,
+            Some(identity(200)),
+            "the open flow of the process is named too"
+        );
+    }
+
+    /// The owners the opens in `batch` announced, and how many closes it holds.
+    fn opened_owners_and_closes(batch: &[FlowEvent]) -> (Vec<u32>, usize) {
+        let owners = batch
+            .iter()
+            .filter_map(|event| match event {
+                FlowEvent::Opened(_, meta) => Some(meta.pid),
+                _ => None,
+            })
+            .collect();
+        let closes = batch
+            .iter()
+            .filter(|event| matches!(event, FlowEvent::Closed(..)))
+            .count();
+        (owners, closes)
+    }
+
+    fn windows_cookie(value: u64) -> netmetrics_core::SocketCookie {
+        netmetrics_core::SocketCookie {
+            value,
+            source: netmetrics_core::CookieSource::WindowsCreateTimestamp,
+        }
+    }
+
+    /// The regression this guards: a close was applied to whatever flow had its addresses.
+    /// One delivered late, after a new socket had taken them, closed the new socket's flow,
+    /// and the next bytes opened a third flow with no owner.
+    #[test]
+    fn a_close_from_before_the_flow_opened_does_not_close_it() {
+        let key = test_key(false, 50_032);
+        let opened = |pid, cookie, timestamp| BackendEvent::Opened {
+            key,
+            pid,
+            cookie: Some(windows_cookie(cookie)),
+            timestamp,
+            if_index: None,
+        };
+        let (batch, flows, _) = apply_events(vec![
+            opened(11, 1, 100),
+            opened(22, 2, 200),
+            // The first socket's close, delivered after the second took its addresses.
+            BackendEvent::Closed {
+                key,
+                pid: 11,
+                timestamp: 150,
+            },
+            BackendEvent::Bytes {
+                key,
+                pid: 0,
+                delta: ByteDelta {
+                    sent: 10,
+                    received: 0,
+                },
+                timestamp: 210,
+                if_index: None,
+                cookie: None,
+            },
+        ]);
+        assert_eq!(
+            opened_owners_and_closes(&batch),
+            (vec![11, 22], 1),
+            "only the first socket's flow closes, when the second replaces it"
+        );
+        let flow = flows.get(&key).expect("the second socket's flow");
+        assert_eq!(flow.meta.pid, 22);
+        assert_eq!(flow.bytes_sent, 10);
+    }
+
+    /// A stale close names an earlier socket's owner, which the flow open now never had.
+    #[test]
+    fn a_close_from_before_the_flow_opened_does_not_name_its_owner() {
+        let key = test_key(false, 50_033);
+        let (batch, flows, _) = apply_events(vec![
+            BackendEvent::Opened {
+                key,
+                pid: 0,
+                cookie: None,
+                timestamp: 200,
+                if_index: None,
+            },
+            BackendEvent::Closed {
+                key,
+                pid: 11,
+                timestamp: 150,
+            },
+        ]);
+        assert_eq!(opened_owners_and_closes(&batch), (vec![0], 0));
+        assert_eq!(flows.get(&key).expect("still open").meta.pid, 0);
+
+        // A close at or after the opening is the flow's own, and may name its owner.
+        let (batch, flows, _) = apply_events(vec![
+            BackendEvent::Opened {
+                key,
+                pid: 0,
+                cookie: None,
+                timestamp: 200,
+                if_index: None,
+            },
+            BackendEvent::Closed {
+                key,
+                pid: 11,
+                timestamp: 200,
+            },
+        ]);
+        let closed_owner = batch.iter().find_map(|event| match event {
+            FlowEvent::Closed(_, meta) => Some(meta.pid),
+            _ => None,
+        });
+        assert_eq!(closed_owner, Some(11));
+        assert!(flows.get(&key).is_none());
+    }
+
     #[test]
     fn a_delayed_open_does_not_take_the_identity_of_a_later_process() {
         let key = test_key(false, 50_030);

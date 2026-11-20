@@ -197,6 +197,12 @@ impl ProcessTable {
         before - self.entries.len()
     }
 
+    /// Whether a process is retained for `pid`, running or stopped.
+    #[must_use]
+    pub fn contains(&self, pid: u32) -> bool {
+        self.entries.contains_key(&pid)
+    }
+
     /// Returns the number of retained PID rows.
     pub fn len(&self) -> usize {
         self.entries.len()
@@ -494,10 +500,12 @@ mod tests {
             table.stopped_with_identity(7, 300, None),
             StopOutcome::Untracked
         );
+        assert!(!table.contains(7));
         assert_eq!(
             table.stopped_with_identity(8, 300, Some(process(8, 200).identity)),
             StopOutcome::Stopped
         );
+        assert!(table.contains(8), "a stopped process is still retained");
         assert_eq!(table.resolve(8, 350).expect("in grace").start_ts, 200);
     }
 }

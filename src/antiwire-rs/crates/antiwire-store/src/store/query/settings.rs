@@ -43,7 +43,8 @@ impl crate::store::Store {
                         ai_cryptomining_enabled, ai_cryptomining_action, ai_tunnel_enabled,
                         ai_tunnel_action, save_domain_lookups, dns_answer_local_names_enabled,
                         dns_new_domain_blocking_enabled, dns_new_domain_max_age_days,
-                        update_channel, private_relay_compatibility
+                        update_channel, private_relay_compatibility, windivert_enabled,
+                        dns_bypass_blocking_enabled
                  FROM daemon_settings
                  WHERE id = 1",
                 [],
@@ -217,7 +218,9 @@ impl crate::store::Store {
                 dns_new_domain_blocking_enabled = ?77,
                 dns_new_domain_max_age_days = ?78,
                 update_channel = ?79,
-                private_relay_compatibility = ?80
+                private_relay_compatibility = ?80,
+                windivert_enabled = ?81,
+                dns_bypass_blocking_enabled = ?82
              WHERE id = 1",
             rusqlite::params![
                 settings.id,
@@ -300,6 +303,8 @@ impl crate::store::Store {
                 settings.dns_new_domain_max_age_days,
                 crate::models::normalize_update_channel(&settings.update_channel),
                 bool_to_i64(settings.private_relay_compatibility),
+                bool_to_i64(settings.windivert_enabled),
+                bool_to_i64(settings.dns_bypass_blocking_enabled),
             ],
         )?;
 
@@ -409,5 +414,7 @@ fn map_daemon_setting(row: &Row) -> std::result::Result<DaemonSetting, rusqlite:
         dns_new_domain_max_age_days: row.get(77)?,
         update_channel: crate::models::normalize_update_channel(&row.get::<_, String>(78)?),
         private_relay_compatibility: i64_to_bool(row.get(79)?),
+        windivert_enabled: i64_to_bool(row.get(80)?),
+        dns_bypass_blocking_enabled: i64_to_bool(row.get(81)?),
     })
 }

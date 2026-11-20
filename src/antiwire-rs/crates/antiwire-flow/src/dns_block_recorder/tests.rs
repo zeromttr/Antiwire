@@ -106,12 +106,7 @@ fn assert_reconciles_delivery_order(order: DeliveryOrder, caller_pid: u32) {
     if matches!(order, DeliveryOrder::QueryFirst) {
         correlator.record_query(&query);
     }
-    recorder.record_blocked_query_with_ownership(
-        "race.test",
-        Ownership::Resolved(1000),
-        &[],
-        Some(now),
-    );
+    recorder.record_blocked_query("race.test", Ownership::Resolved(1000), &[], now);
     if matches!(order, DeliveryOrder::BlockFirst) {
         let deadline = Instant::now() + Duration::from_secs(1);
         while recorder.pending_reconciliation_count() == 0 {
@@ -230,12 +225,7 @@ fn resolver_owned_block_falls_back_to_the_recorded_caller() {
 
     let now = OffsetDateTime::now_utc();
     correlator.record_query(&query_event("github.com", Some(7000), caller, now_ms()));
-    recorder.record_blocked_query_with_ownership(
-        "github.com",
-        Ownership::Resolved(9000),
-        &[],
-        Some(now),
-    );
+    recorder.record_blocked_query("github.com", Ownership::Resolved(9000), &[], now);
 
     assert_eq!(wait_for_persisted_app(&store).0, "caller.exe");
 }
@@ -268,12 +258,7 @@ fn scoped_ambiguity_falls_back_to_the_nearest_caller() {
         older,
         target - 3_000,
     ));
-    recorder.record_blocked_query_with_ownership(
-        "github.com",
-        Ownership::Resolved(9000),
-        &[],
-        Some(now),
-    );
+    recorder.record_blocked_query("github.com", Ownership::Resolved(9000), &[], now);
 
     assert_eq!(wait_for_persisted_app(&store).0, "nearest.exe");
 }
@@ -306,12 +291,7 @@ fn near_simultaneous_callers_fall_back_to_the_socket_owner() {
     let target = now_ms();
     correlator.record_query(&query_event("github.com", Some(9000), first, target - 100));
     correlator.record_query(&query_event("github.com", Some(9000), second, target - 200));
-    recorder.record_blocked_query_with_ownership(
-        "github.com",
-        Ownership::Resolved(resolver),
-        &[],
-        Some(now),
-    );
+    recorder.record_blocked_query("github.com", Ownership::Resolved(resolver), &[], now);
 
     assert_eq!(wait_for_persisted_app(&store).0, "resolver.exe");
 }
@@ -331,11 +311,11 @@ fn socket_owner_attributes_a_block_without_any_caller_evidence() {
         .processes()
         .process_started(direct, r"C:\apps\direct.exe", "direct.exe", 0);
 
-    recorder.record_blocked_query_with_ownership(
+    recorder.record_blocked_query(
         "github.com",
         Ownership::Resolved(direct),
         &[],
-        Some(OffsetDateTime::now_utc()),
+        OffsetDateTime::now_utc(),
     );
 
     assert_eq!(wait_for_persisted_app(&store).0, "direct.exe");
@@ -352,16 +332,41 @@ fn block_without_any_owner_stays_unknown_no_owner() {
     let correlator = Arc::new(DnsQueryCorrelator::default());
     let (recorder, _app_resolver) = block_recorder_fixture(&store, &correlator);
 
-    recorder.record_blocked_query_with_ownership(
+    recorder.record_blocked_query(
         "github.com",
         Ownership::NotFound,
         &[],
-        Some(OffsetDateTime::now_utc()),
+        OffsetDateTime::now_utc(),
     );
 
     let (name, path) = wait_for_persisted_app(&store);
     assert_eq!(name, crate::process_resolver::UNKNOWN_APP_NAME);
     assert_eq!(path, "Unknown (No Owner)");
+}
+
+/// The regression this guards: the socket's owner was found and had exited
+/// before it could be named. The unknown placeholder that said so was handed
+/// back to the resolver as a file name, and the row was filed under an
+/// application called "Unknown" with no path, not under the exited process.
+#[test]
+fn block_whose_owner_has_exited_unnamed_says_so() {
+    let dir = tempdir().expect("tempdir");
+    let keystore = UnixSecureFileKeyProvider::new(dir.path().join("key"));
+    let store =
+        Arc::new(Store::open_with_keystore(dir.path().join("db.sqlite"), &keystore).expect("open"));
+    let correlator = Arc::new(DnsQueryCorrelator::default());
+    let (recorder, _app_resolver) = block_recorder_fixture(&store, &correlator);
+
+    recorder.record_blocked_query(
+        "github.com",
+        Ownership::Resolved(5_300_031),
+        &[],
+        OffsetDateTime::now_utc(),
+    );
+
+    let (name, path) = wait_for_persisted_app(&store);
+    assert_eq!(name, crate::process_resolver::UNKNOWN_APP_NAME);
+    assert_eq!(path, "Unknown (Exited)");
 }
 
 fn block_key(domain: &str) -> DnsBlockKey {
@@ -442,20 +447,18 @@ fn shutdown_sheds_many_unresolved_records_without_delaying_known_record() {
     let (tx, rx) = mpsc::sync_channel(WRITE_QUEUE_CAPACITY);
     let start = OffsetDateTime::now_utc();
     for index in 0..200_u32 {
-        let mut item = pending_test_block_for_pid(
+        let item = socket_owned_test_block(
             &format!("shutdown-budget-bad-{index}.example"),
             bad_pid,
             start + time::Duration::milliseconds(i64::from(index)),
         );
-        item.ownership = PendingOwnership::Socket(Ownership::Resolved(bad_pid));
         tx.send(item).expect("queue unresolved block");
     }
-    let mut known = pending_test_block_for_pid(
+    let known = socket_owned_test_block(
         "shutdown-budget-known.example",
         known_pid,
         start + time::Duration::milliseconds(200),
     );
-    known.ownership = PendingOwnership::Socket(Ownership::Resolved(known_pid));
     tx.send(known)
         .expect("queue known block after unresolved records");
     drop(tx);
@@ -512,7 +515,7 @@ fn readmitted_dns_block_refreshes_its_queue_position() {
 #[test]
 fn update_settings_stores_both_flags() {
     let dir = tempdir().expect("tempdir");
-    let (_store, _hub, recorder, _resolver) = recorder_fixture(dir.path());
+    let (_store, _hub, recorder, _resolver, _correlator) = recorder_fixture(dir.path());
 
     recorder.update_settings(true, false);
 
@@ -653,19 +656,43 @@ fn siem_app_paths(path: &Path) -> Vec<String> {
 fn pending_test_block(domain: &str, timestamp: OffsetDateTime) -> PendingBlock {
     PendingBlock {
         domain: domain.to_owned(),
-        ownership: PendingOwnership::Caller(0),
+        ownership: Ownership::NotFound,
         blocklist_names: Vec::new(),
         timestamp,
     }
 }
 
-fn pending_test_block_for_pid(domain: &str, pid: u32, timestamp: OffsetDateTime) -> PendingBlock {
+/// A block from a socket `pid` owned, with no record of the query: it waits
+/// for reconciliation.
+fn socket_owned_test_block(domain: &str, pid: u32, timestamp: OffsetDateTime) -> PendingBlock {
     PendingBlock {
-        domain: domain.to_owned(),
-        ownership: PendingOwnership::Caller(pid),
-        blocklist_names: Vec::new(),
-        timestamp,
+        ownership: Ownership::Resolved(pid),
+        ..pending_test_block(domain, timestamp)
     }
+}
+
+/// A block from `pid`, whose query the DNS Client recorded in `correlator`,
+/// so it is attributed without waiting for reconciliation.
+fn attributed_test_block(
+    correlator: &DnsQueryCorrelator,
+    domain: &str,
+    pid: u32,
+    timestamp: OffsetDateTime,
+) -> PendingBlock {
+    record_caller(correlator, domain, pid, timestamp);
+    socket_owned_test_block(domain, pid, timestamp)
+}
+
+/// Records the DNS Client's event for a query of `domain` that `pid` made.
+fn record_caller(
+    correlator: &DnsQueryCorrelator,
+    domain: &str,
+    pid: u32,
+    timestamp: OffsetDateTime,
+) {
+    let timestamp_ms =
+        u64::try_from(timestamp.unix_timestamp_nanos() / 1_000_000).unwrap_or_default();
+    correlator.record_query(&query_event(domain, None, pid, timestamp_ms));
 }
 
 fn wait_for_shed(shed: &ShedReporter) {
@@ -796,9 +823,11 @@ fn failed_application_write_retries_before_dedup_and_fans_out_once_after_recover
     let (tx, rx) = mpsc::sync_channel(WRITE_QUEUE_CAPACITY);
     let stop = Arc::new(AtomicBool::new(false));
     let thread_stop = Arc::clone(&stop);
+    let correlator = Arc::clone(&worker.correlator);
     let thread = std::thread::spawn(move || worker.run(&rx, &thread_stop));
     let domain = "retry-after-application-failure.example";
-    tx.send(pending_test_block_for_pid(
+    tx.send(attributed_test_block(
+        &correlator,
         domain,
         pid,
         OffsetDateTime::now_utc(),
@@ -873,9 +902,11 @@ fn failed_application_write_keeps_captured_identity_after_pid_reuse() {
     let stop = Arc::new(AtomicBool::new(false));
     let thread_stop = Arc::clone(&stop);
     let siem_barrier = worker.siem.clone();
+    let correlator = Arc::clone(&worker.correlator);
     let thread = std::thread::spawn(move || worker.run(&rx, &thread_stop));
     let domain = "retry-after-pid-reuse.example";
-    tx.send(pending_test_block_for_pid(
+    tx.send(attributed_test_block(
+        &correlator,
         domain,
         pid,
         OffsetDateTime::now_utc(),
@@ -1028,24 +1059,28 @@ fn shutdown_persists_resolved_subset_when_one_application_stays_unresolved() {
     let (tx, rx) = mpsc::sync_channel(WRITE_QUEUE_CAPACITY);
     let stop = Arc::new(AtomicBool::new(false));
     let thread_stop = Arc::clone(&stop);
+    let correlator = Arc::clone(&worker.correlator);
     let thread = std::thread::spawn(move || worker.run(&rx, &thread_stop));
     let start = OffsetDateTime::now_utc();
     for (index, (pid, _, _)) in known.iter().take(9).enumerate() {
-        tx.send(pending_test_block_for_pid(
+        tx.send(attributed_test_block(
+            &correlator,
             &format!("mixed-known-{index}.example"),
             *pid,
             start + time::Duration::milliseconds(i64::try_from(index).unwrap_or(0)),
         ))
         .expect("queue known block");
     }
-    tx.send(pending_test_block_for_pid(
+    tx.send(attributed_test_block(
+        &correlator,
         "mixed-unresolved.example",
         unresolved_pid,
         start + time::Duration::milliseconds(9),
     ))
     .expect("queue unresolved block");
     let (queued_pid, _, _) = &known[9];
-    tx.send(pending_test_block_for_pid(
+    tx.send(attributed_test_block(
+        &correlator,
         "mixed-known-9.example",
         *queued_pid,
         start + time::Duration::milliseconds(10),
@@ -1130,7 +1165,7 @@ fn saturated_queue_drains_and_sustained_load_preserves_every_admitted_event() {
     let now = OffsetDateTime::now_utc();
     let item = PendingBlock {
         domain: "flood.example".to_owned(),
-        ownership: PendingOwnership::Caller(0),
+        ownership: Ownership::NotFound,
         blocklist_names: vec![],
         timestamp: now,
     };
@@ -1378,6 +1413,7 @@ fn recorder_fixture(
     AlertPublisher,
     Arc<DnsBlockRecorder>,
     Arc<AppIdResolver>,
+    Arc<DnsQueryCorrelator>,
 ) {
     let keystore = UnixSecureFileKeyProvider::new(dir.join("key"));
     let store =
@@ -1388,13 +1424,15 @@ fn recorder_fixture(
         alerts.clone(),
         SiemExporter::new(SiemConfig::default()),
     ));
-    let recorder = DnsBlockRecorder::new(
+    let correlator = Arc::new(DnsQueryCorrelator::default());
+    let recorder = DnsBlockRecorder::with_correlator(
         Arc::clone(&app_resolver),
         Arc::clone(&store),
         alerts.clone(),
         SiemExporter::new(SiemConfig::default()),
+        Arc::clone(&correlator),
     );
-    (store, alerts, recorder, app_resolver)
+    (store, alerts, recorder, app_resolver, correlator)
 }
 
 fn wait_for_domain_log(store: &Store, domain: &str) {
@@ -1418,9 +1456,14 @@ fn wait_for_domain_log(store: &Store, domain: &str) {
 #[tokio::test]
 async fn shutdown_flushes_queued_blocks_and_is_idempotent() {
     let dir = tempdir().expect("tempdir");
-    let (store, _alerts, recorder, _resolver) = recorder_fixture(dir.path());
+    let (store, _alerts, recorder, _resolver, _correlator) = recorder_fixture(dir.path());
 
-    recorder.record_blocked_query("shutdown-flush.example", 0, &[]);
+    recorder.record_blocked_query(
+        "shutdown-flush.example",
+        Ownership::NotFound,
+        &[],
+        OffsetDateTime::now_utc(),
+    );
     recorder.shutdown().await;
     recorder.shutdown().await;
 
@@ -1438,7 +1481,12 @@ async fn shutdown_flushes_queued_blocks_and_is_idempotent() {
         "shutdown must close admission before the worker exits"
     );
     let dropped = recorder.dropped.load(Ordering::Relaxed);
-    recorder.record_blocked_query("after-shutdown.example", 0, &[]);
+    recorder.record_blocked_query(
+        "after-shutdown.example",
+        Ownership::NotFound,
+        &[],
+        OffsetDateTime::now_utc(),
+    );
     assert_eq!(
         recorder.dropped.load(Ordering::Relaxed),
         dropped + 1,
@@ -1449,7 +1497,7 @@ async fn shutdown_flushes_queued_blocks_and_is_idempotent() {
 #[tokio::test]
 async fn daemon_blocks_persist_without_notifying_by_default() {
     let dir = tempdir().expect("tempdir");
-    let (store, alerts, recorder, _resolver) = recorder_fixture(dir.path());
+    let (store, alerts, recorder, _resolver, correlator) = recorder_fixture(dir.path());
     let mut notifications = alerts.subscribe();
 
     // Use the real test process so the resolver can verify the current
@@ -1458,7 +1506,9 @@ async fn daemon_blocks_persist_without_notifying_by_default() {
     // part of daemon suppression.
     let pid = std::process::id();
 
-    recorder.record_blocked_query("daemon-blocked.example", pid, &[]);
+    let now = OffsetDateTime::now_utc();
+    record_caller(&correlator, "daemon-blocked.example", pid, now);
+    recorder.record_blocked_query("daemon-blocked.example", Ownership::Resolved(pid), &[], now);
 
     wait_for_domain_log(&store, "daemon-blocked.example");
 
@@ -1483,7 +1533,7 @@ async fn daemon_blocks_persist_without_notifying_by_default() {
 #[tokio::test]
 async fn a_spoofed_daemon_name_does_not_suppress_the_audit_trail() {
     let dir = tempdir().expect("tempdir");
-    let (store, alerts, recorder, app_resolver) = recorder_fixture(dir.path());
+    let (store, alerts, recorder, app_resolver, correlator) = recorder_fixture(dir.path());
     let mut notifications = alerts.subscribe();
 
     let pid = 52_111;
@@ -1496,7 +1546,14 @@ async fn a_spoofed_daemon_name_does_not_suppress_the_audit_trail() {
         .processes()
         .process_started(pid, spoof, "antiwire-daemon.exe", 0);
 
-    recorder.record_blocked_query("spoofed-blocked.example", pid, &[]);
+    let now = OffsetDateTime::now_utc();
+    record_caller(&correlator, "spoofed-blocked.example", pid, now);
+    recorder.record_blocked_query(
+        "spoofed-blocked.example",
+        Ownership::Resolved(pid),
+        &[],
+        now,
+    );
 
     wait_for_domain_log(&store, "spoofed-blocked.example");
 
@@ -1519,7 +1576,7 @@ async fn a_spoofed_daemon_name_does_not_suppress_the_audit_trail() {
 #[tokio::test]
 async fn blocked_dns_names_and_labels_are_sanitized() {
     let dir = tempdir().expect("tempdir");
-    let (store, alerts, recorder, app_resolver) = recorder_fixture(dir.path());
+    let (store, alerts, recorder, app_resolver, correlator) = recorder_fixture(dir.path());
     let mut notifications = alerts.subscribe();
 
     let pid = 52_112;
@@ -1527,7 +1584,15 @@ async fn blocked_dns_names_and_labels_are_sanitized() {
         .processes()
         .process_started(pid, r"C:\apps\evil.exe", "evil.exe", 0);
 
-    recorder.record_blocked_query("evil\nexample.com", pid, &["list\ninjected".to_owned()]);
+    // The recorder correlates the name it sanitized.
+    let now = OffsetDateTime::now_utc();
+    record_caller(&correlator, "evilexample.com", pid, now);
+    recorder.record_blocked_query(
+        "evil\nexample.com",
+        Ownership::Resolved(pid),
+        &["list\ninjected".to_owned()],
+        now,
+    );
 
     wait_for_domain_log(&store, "evilexample.com");
 

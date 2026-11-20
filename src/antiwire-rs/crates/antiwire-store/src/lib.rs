@@ -22,11 +22,12 @@ pub use models::{
     activity_bucket_start, clamp_ai_confidence, decode_blocklist_names, encode_blocklist_names,
     ActivityBucket, Alert, Application, ApplicationLogSummary, ApplicationLogSummaryQuery,
     ApplicationSighting, ConnectionDomainUpgrade, ConnectionLog, ConnectionLogAttribution,
-    ConnectionLogPage, ConnectionLogQuery, CountryStatistics, DaemonSetting, DnsCacheEntry,
-    DomainDecision, DomainDecisionPage, DomainDecisionQuery, DomainDecisionVerdictFilter,
-    DomainLookup, FirewallRule, NetworkDevice, NetworkDeviceWatch, NetworkScanRange, NewAlert,
-    NewConnectionLog, ACTIVITY_BUCKET_SECONDS, MIN_AI_CONFIDENCE,
+    ConnectionLogPage, ConnectionLogQuery, CountryStatistics, DaemonSetting, DnsBypass,
+    DnsCacheEntry, DomainDecision, DomainDecisionPage, DomainDecisionQuery,
+    DomainDecisionVerdictFilter, DomainLookup, FirewallRule, NetworkDevice, NetworkDeviceWatch,
+    NetworkScanRange, NewAlert, NewConnectionLog, ACTIVITY_BUCKET_SECONDS, MIN_AI_CONFIDENCE,
 };
 pub use store::{
-    normalize_domain_key, DeletionFence, Resident, ResidentDecision, SeenSubdomain, Store,
+    normalize_domain_key, DeletionFence, OutcomeRevision, Resident, ResidentDecision,
+    SeenSubdomain, Store,
 };

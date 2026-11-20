@@ -6,9 +6,10 @@
 //! - `prefetch`: background refresh of entries nearing expiry.
 //! - `ai`: the AI gate and post-response classification work.
 //! - `hints`: reporting answered addresses to the flow tracker.
-//! - `response`: the parsed response handed to hickory-server.
+//! - `response`: the parsed response a reply is encoded from.
 
 mod ai;
+mod gates;
 mod hints;
 mod local;
 mod miss;
@@ -168,14 +169,13 @@ where
         runtime: crate::ai_support::AiRuntimeConfig,
     ) {
         let crate::ai_support::AiRuntimeConfig {
-            mut policy,
+            policy,
             classifier,
             bootstrap_host,
         } = runtime;
         if let Some(ai) = self.ai_coordinator() {
-            // The coordinator owns the generation. Passing a fresh snapshot
-            // invalidates all work started under the previous configuration.
-            policy.generation = ai.generation();
+            // The coordinator advances the generation, which invalidates all
+            // work started under the previous configuration.
             ai.update_config(&policy, classifier, bootstrap_host);
         } else if policy.enabled {
             // Keep a coordinator alive even when the provider client is

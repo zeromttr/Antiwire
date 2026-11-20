@@ -18,10 +18,31 @@ pub(crate) type SharedFetchResult = std::result::Result<CachedAnswer, Arc<DnsErr
 #[derive(Clone)]
 pub(crate) enum SharedOutcome {
     Ready(SharedFetchResult),
-    /// The generation this fetch started under was retired mid-flight, so the
-    /// answer was discarded instead of served or cached. Every waiter may
-    /// safely retry under the current generation.
+    /// The generation this fetch started under was retired mid-flight, so its
+    /// answer or error was discarded instead of served, cached or shared.
+    /// Every waiter may safely retry under the current generation.
     GenerationRetired,
+    /// The fetch gave up for reasons of its own, not the name's (see
+    /// [`Fetched::Withdrawn`]). Its cell is gone from the map, so a waiter
+    /// that wants an answer fetches again under its own terms.
+    Withdrawn,
+}
+
+/// What one fetch made of its attempt.
+pub(crate) enum Fetched {
+    Done(Result<CachedAnswer>),
+    /// It ended without an answer for a reason of its own: a background
+    /// refresh that was not sent under its narrower admission, or whose
+    /// answer rebinding protection kept out of the cache. Another caller,
+    /// with its own admission and its own use for the answer, may still get
+    /// one, so it must not inherit this.
+    Withdrawn,
+}
+
+impl From<Result<CachedAnswer>> for Fetched {
+    fn from(result: Result<CachedAnswer>) -> Self {
+        Self::Done(result)
+    }
 }
 
 /// Total cache admission attempts the query engine allows, bounding the retry
@@ -78,7 +99,7 @@ impl super::ResponseCache {
     /// earlier attempt. A caller whose initializer needs no external state can
     /// simply retry the same closure under [`Self::current_generation`] when
     /// this returns [`SharedOutcome::GenerationRetired`].
-    pub(crate) async fn resolve_once<F, Fut>(
+    pub(crate) async fn resolve_once<F, Fut, Out>(
         &self,
         key: &CacheKey,
         generation_at_start: u64,
@@ -86,7 +107,8 @@ impl super::ResponseCache {
     ) -> SharedOutcome
     where
         F: Fn() -> Fut,
-        Fut: std::future::Future<Output = Result<CachedAnswer>>,
+        Fut: std::future::Future<Output = Out>,
+        Out: Into<Fetched>,
     {
         // Entering the in-flight map must be atomic against `bump_generation`,
         // which increments the counter *before* clearing the map. A caller that
@@ -140,31 +162,42 @@ impl super::ResponseCache {
             cell: Arc::clone(&cell),
         };
 
-        cell.result
+        let outcome = cell
+            .result
             .get_or_init(|| async move {
                 if self.generation.load(Ordering::Acquire) != generation_at_start {
                     return SharedOutcome::GenerationRetired;
                 }
 
-                match init().await {
-                    Ok(entry) => {
-                        let _generation_guard = self.generation_gate.read();
-                        if self.generation.load(Ordering::Acquire) == generation_at_start {
-                            if entry.cacheable {
-                                self.inner.insert(key.clone(), entry.clone());
-                            }
-                            self.clear_failure(key);
-                            SharedOutcome::Ready(Ok(entry))
-                        } else {
-                            // The upstream exchange raced a generation bump;
-                            // discard rather than adopt or cache it.
-                            SharedOutcome::GenerationRetired
+                let fetched = init().await.into();
+                let _generation_guard = self.generation_gate.read();
+                if self.generation.load(Ordering::Acquire) != generation_at_start {
+                    // The upstream exchange raced a generation bump. An answer
+                    // came over the retired network, and an error may say only
+                    // that the network went away: discard either rather than
+                    // adopt, cache or share it, so the waiters retry.
+                    return SharedOutcome::GenerationRetired;
+                }
+                match fetched {
+                    Fetched::Done(Ok(entry)) => {
+                        if entry.cacheable {
+                            self.inner.insert(key.clone(), entry.clone());
                         }
+                        self.clear_failure(key);
+                        SharedOutcome::Ready(Ok(entry))
                     }
-                    Err(error) => SharedOutcome::Ready(Err(Arc::new(error))),
+                    Fetched::Done(Err(error)) => SharedOutcome::Ready(Err(Arc::new(error))),
+                    Fetched::Withdrawn => SharedOutcome::Withdrawn,
                 }
             })
             .await
-            .clone()
+            .clone();
+        if matches!(outcome, SharedOutcome::Withdrawn) {
+            // A caller arriving next must start a fetch of its own, not join
+            // this one and be told it was withdrawn.
+            self.inflight
+                .remove_if(key, |_, current| Arc::ptr_eq(current, &cell));
+        }
+        outcome
     }
 }

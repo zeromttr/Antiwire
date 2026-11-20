@@ -12,8 +12,9 @@ use std::panic::AssertUnwindSafe;
 use std::sync::atomic::{AtomicU64, Ordering};
 
 use futures_util::FutureExt;
-use hickory_server::server::Request;
 use tracing::error;
+
+use crate::listener::Transport;
 
 static QUERY_PANICS: AtomicU64 = AtomicU64::new(0);
 
@@ -22,27 +23,33 @@ static QUERY_PANICS: AtomicU64 = AtomicU64::new(0);
 /// Unwinding runs the same destructors cancelling the query would, and the
 /// shared locks on the query path either cannot poison (`parking_lot`) or
 /// recover from it, so later queries see the state a cancelled query leaves.
-pub(crate) async fn catch_query_panic<F: Future>(request: &Request, query: F) -> Option<F::Output> {
+pub(crate) async fn catch_query_panic<F: Future>(
+    transport: Transport,
+    query: F,
+) -> Option<F::Output> {
     AssertUnwindSafe(query)
         .catch_unwind()
         .await
-        .map_err(|payload| note_panic(request, payload.as_ref()))
+        .map_err(|payload| note_panic(transport, payload.as_ref()))
         .ok()
 }
 
 /// Synchronous [`catch_query_panic`], for the local answer path.
-pub(crate) fn catch_sync_query_panic<T>(request: &Request, query: impl FnOnce() -> T) -> Option<T> {
+pub(crate) fn catch_sync_query_panic<T>(
+    transport: Transport,
+    query: impl FnOnce() -> T,
+) -> Option<T> {
     std::panic::catch_unwind(AssertUnwindSafe(query))
-        .map_err(|payload| note_panic(request, payload.as_ref()))
+        .map_err(|payload| note_panic(transport, payload.as_ref()))
         .ok()
 }
 
-fn note_panic(request: &Request, payload: &(dyn Any + Send)) {
+fn note_panic(transport: Transport, payload: &(dyn Any + Send)) {
     let panics = QUERY_PANICS.fetch_add(1, Ordering::Relaxed) + 1;
     if panics.is_power_of_two() {
         error!(
             panics,
-            protocol = %request.protocol(),
+            protocol = transport.as_str(),
             message = panic_message(payload),
             "dns query handler panicked; answered SERVFAIL and kept the listener serving"
         );
@@ -74,35 +81,19 @@ mod tests {
         assert_eq!(panic_message(other.as_ref()), "non-string panic payload");
     }
 
-    fn request() -> Request {
-        let mut query = hickory_proto::op::Message::new(
-            7,
-            hickory_proto::op::MessageType::Query,
-            hickory_proto::op::OpCode::Query,
-        );
-        query.add_query(hickory_proto::op::Query::query(
-            hickory_proto::rr::Name::from_ascii("guard.test.").expect("name"),
-            hickory_proto::rr::RecordType::A,
-        ));
-        Request::from_bytes(
-            crate::messages::encode_message(&query).expect("encode"),
-            "127.0.0.1:53000".parse().expect("address"),
-            hickory_server::net::xfer::Protocol::Udp,
-        )
-        .expect("parse")
-    }
-
     #[tokio::test]
     async fn panics_become_none_on_both_paths() {
-        let request = request();
-        assert_eq!(catch_sync_query_panic(&request, || 3), Some(3));
+        assert_eq!(catch_sync_query_panic(Transport::Udp, || 3), Some(3));
         assert_eq!(
-            catch_sync_query_panic(&request, || -> u8 { panic!("sync") }),
+            catch_sync_query_panic(Transport::Udp, || -> u8 { panic!("sync") }),
             None
         );
-        assert_eq!(catch_query_panic(&request, async { 4 }).await, Some(4));
         assert_eq!(
-            catch_query_panic(&request, async { panic!("async") }).await,
+            catch_query_panic(Transport::Udp, async { 4 }).await,
+            Some(4)
+        );
+        assert_eq!(
+            catch_query_panic(Transport::Udp, async { panic!("async") }).await,
             None::<u8>
         );
     }

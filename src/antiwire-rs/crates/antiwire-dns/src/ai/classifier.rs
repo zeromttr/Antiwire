@@ -9,7 +9,7 @@ use std::time::Duration;
 
 /// Classification failure, distinguishing retryable outages from permanent input errors.
 #[derive(Debug, Clone)]
-pub enum ClassifierError {
+pub(crate) enum ClassifierError {
     /// Timeout, overload, or provider error: fail open, retry in background.
     Transient(String),
     /// Invalid domain: do not retry as-is. An incomplete provider answer is
@@ -21,7 +21,7 @@ pub enum ClassifierError {
 
 impl ClassifierError {
     #[must_use]
-    pub const fn is_retryable(&self) -> bool {
+    pub(crate) const fn is_retryable(&self) -> bool {
         matches!(self, Self::Transient(_))
     }
 }
@@ -38,7 +38,7 @@ impl std::fmt::Display for ClassifierError {
 
 /// Narrow classifier interface shared by proactive and retroactive paths.
 #[async_trait::async_trait]
-pub trait Classifier: Send + Sync {
+pub(crate) trait Classifier: Send + Sync {
     async fn classify(
         &self,
         domain: &str,
@@ -46,7 +46,7 @@ pub trait Classifier: Send + Sync {
 }
 
 /// Production classifier backed by [`antiwire_ai::AiBackend`].
-pub struct AiBackendClassifier {
+pub(crate) struct AiBackendClassifier {
     backend: antiwire_ai::AiBackend,
 }
 
@@ -57,7 +57,10 @@ impl AiBackendClassifier {
     ///
     /// Returns a description when the backend cannot be built (missing key,
     /// bad timeout, ...).
-    pub fn from_settings(api_key: &str, background_timeout: Duration) -> Result<Self, String> {
+    pub(crate) fn from_settings(
+        api_key: &str,
+        background_timeout: Duration,
+    ) -> Result<Self, String> {
         antiwire_ai::AiBackend::with_api_key(api_key, background_timeout)
             .map(|backend| Self { backend })
             .map_err(|error| error.to_string())
@@ -83,7 +86,7 @@ impl Classifier for AiBackendClassifier {
 }
 
 /// Shared classifier handle used by the coordinator.
-pub type SharedClassifier = Arc<dyn Classifier>;
+pub(crate) type SharedClassifier = Arc<dyn Classifier>;
 
 #[cfg(test)]
 pub(crate) mod test_helpers {
@@ -92,20 +95,20 @@ pub(crate) mod test_helpers {
     use std::sync::atomic::{AtomicUsize, Ordering};
 
     /// Controllable mock classifier with event recording and barriers.
-    pub struct MockClassifier {
+    pub(crate) struct MockClassifier {
         calls: AtomicUsize,
         handler: parking_lot::Mutex<HashMap<String, MockBehavior>>,
         default: MockBehavior,
     }
 
     #[derive(Debug, Clone)]
-    pub enum MockBehavior {
+    pub(crate) enum MockBehavior {
         Assess(antiwire_ai::DomainAssessment),
         Transient(String),
     }
 
     impl MockClassifier {
-        pub fn with_assessment(
+        pub(crate) fn with_assessment(
             domain: &str,
             assessment: antiwire_ai::DomainAssessment,
         ) -> Arc<Self> {
@@ -118,7 +121,7 @@ pub(crate) mod test_helpers {
             mock
         }
 
-        pub fn failing(message: &str) -> Arc<Self> {
+        pub(crate) fn failing(message: &str) -> Arc<Self> {
             Arc::new(Self {
                 calls: AtomicUsize::new(0),
                 handler: parking_lot::Mutex::new(HashMap::new()),
@@ -126,18 +129,36 @@ pub(crate) mod test_helpers {
             })
         }
 
-        pub fn set(&self, domain: &str, behavior: MockBehavior) {
+        pub(crate) fn set(&self, domain: &str, behavior: MockBehavior) {
             if let Some(key) = crate::ai::decision::canonical_ai_key(domain) {
                 self.handler.lock().insert(key, behavior);
             }
         }
 
-        pub fn call_count(&self) -> usize {
+        pub(crate) fn call_count(&self) -> usize {
             self.calls.load(Ordering::SeqCst)
         }
     }
 
-    pub fn assessment_for(domain: &str, malicious: f64) -> antiwire_ai::DomainAssessment {
+    /// Judges every name after `delay`, as a classifier behind a slow link
+    /// does, with `malicious` as its malicious score.
+    pub(crate) struct SlowClassifier {
+        pub delay: std::time::Duration,
+        pub malicious: f64,
+    }
+
+    #[async_trait::async_trait]
+    impl Classifier for SlowClassifier {
+        async fn classify(
+            &self,
+            domain: &str,
+        ) -> Result<antiwire_ai::DomainAssessment, ClassifierError> {
+            tokio::time::sleep(self.delay).await;
+            Ok(assessment_for(domain, self.malicious))
+        }
+    }
+
+    pub(crate) fn assessment_for(domain: &str, malicious: f64) -> antiwire_ai::DomainAssessment {
         antiwire_ai::DomainAssessment {
             domain: domain.to_owned(),
             model: "mock".to_owned(),

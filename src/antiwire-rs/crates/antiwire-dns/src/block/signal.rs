@@ -14,21 +14,19 @@ use tracing::{info, warn};
 
 use super::response::BlockResponseMode;
 use super::sink::DnsBlockSink;
+use crate::listener::Transport;
 use crate::port_mapper::{
     deferred_query_owner, recorded_owners_available, reply_path_query_owner, Ownership,
+    PromisedOwner, Purpose, QueryClient, ReplyPathOwner,
 };
-use hickory_server::net::xfer::Protocol;
 use std::net::IpAddr;
 
 /// Optional per-query client metadata for block attribution.
 #[derive(Debug, Clone, Copy)]
 pub(crate) struct DnsQueryContext {
-    // Read only by the Windows socket-owner lookup in `port_mapper`.
-    #[cfg_attr(not(windows), allow(dead_code))]
     pub(crate) client_addr: IpAddr,
     pub(crate) client_port: u16,
-    pub(crate) protocol: Protocol,
-    #[cfg_attr(not(windows), allow(dead_code))]
+    pub(crate) transport: Transport,
     pub(crate) received_at: Instant,
 }
 
@@ -45,6 +43,9 @@ enum BlockOwner {
     /// later lookup misses the short-lived UDP socket that a blocked query
     /// closes as soon as it receives the answer.
     Resolved(Ownership),
+    /// Resolved from the socket table off the receive loop, before the block
+    /// response was sent, as `Resolved` is; the worker waits for it.
+    Promised(PromisedOwner, DnsQueryContext),
     /// Resolved on the worker from the owner an event source recorded, which
     /// outlives the socket (see `port_mapper::deferred_query_owner`), or from
     /// a socket-table scan the reply path could not run itself.
@@ -153,7 +154,7 @@ impl BlockSignalLogger {
         qtype: RecordType,
         source: Option<&str>,
         mode: BlockResponseMode,
-        context: Option<DnsQueryContext>,
+        client: Option<QueryClient<'_>>,
         resolve_blocklist_names: F,
     ) where
         F: FnOnce() -> Vec<String>,
@@ -174,7 +175,10 @@ impl BlockSignalLogger {
         if should_log {
             let mode = mode.as_str();
             let source = source.unwrap_or("policy");
-            if let Some(ctx) = context.filter(|ctx| ctx.client_port > 0) {
+            if let Some(ctx) = client
+                .map(|client| client.context)
+                .filter(|ctx| ctx.client_port > 0)
+            {
                 info!(
                     domain,
                     ?qtype,
@@ -203,13 +207,18 @@ impl BlockSignalLogger {
         // Without recorded owners, resolve while the client is still waiting
         // for this response. The socket is gone once the block answer is
         // delivered, and a lookup on the worker then records Unknown (No Owner).
-        // A lookup that needs a scan the reply path may not run now is the
-        // exception: the worker scans at once, racing the client's close,
+        // A lookup that has to scan the socket table still runs before the
+        // answer goes out, but off the UDP receive loop (see
+        // `port_mapper::Scans`). One whose scan is not due yet is the
+        // exception: the worker scans when it is, racing the client's close,
         // rather than stall every other query behind it.
-        let owner = match context {
-            Some(context) if recorded_owners_available() => BlockOwner::Deferred(context),
-            Some(context) => reply_path_query_owner(&context)
-                .map_or(BlockOwner::Deferred(context), BlockOwner::Resolved),
+        let owner = match client {
+            Some(client) if recorded_owners_available() => BlockOwner::Deferred(client.context),
+            Some(client) => match reply_path_query_owner(client, Purpose::BlockedQuery) {
+                ReplyPathOwner::Known(owner) => BlockOwner::Resolved(owner),
+                ReplyPathOwner::Promised(owner) => BlockOwner::Promised(owner, client.context),
+                ReplyPathOwner::Busy => BlockOwner::Deferred(client.context),
+            },
             None => BlockOwner::Resolved(Ownership::NotFound),
         };
         let timestamp = time::OffsetDateTime::now_utc();
@@ -296,13 +305,16 @@ fn block_signal_worker(
         }
         let ownership = match event.owner {
             BlockOwner::Resolved(ownership) => ownership,
-            BlockOwner::Deferred(context) => deferred_query_owner(&context),
+            BlockOwner::Promised(owner, context) => owner
+                .wait(&context)
+                .unwrap_or_else(|| deferred_query_owner(&context, Purpose::BlockedQuery)),
+            BlockOwner::Deferred(context) => deferred_query_owner(&context, Purpose::BlockedQuery),
         };
-        sink.record_blocked_query_with_ownership(
+        sink.record_blocked_query(
             &event.domain,
             ownership,
             &event.blocklist_names,
-            Some(event.timestamp),
+            event.timestamp,
         );
     }
 }
@@ -317,14 +329,12 @@ mod tests {
     }
 
     impl DnsBlockSink for OwnershipSink {
-        fn record_blocked_query(&self, _domain: &str, _pid: u32, _blocklist_names: &[String]) {}
-
-        fn record_blocked_query_with_ownership(
+        fn record_blocked_query(
             &self,
             _domain: &str,
             ownership: crate::port_mapper::Ownership,
             _blocklist_names: &[String],
-            _timestamp: Option<time::OffsetDateTime>,
+            _timestamp: time::OffsetDateTime,
         ) {
             *self.ownership.lock() = Some(ownership);
         }
@@ -354,7 +364,8 @@ mod tests {
         assert_eq!(*sink.ownership.lock(), Some(Ownership::Resolved(4242)));
     }
 
-    #[cfg(windows)]
+    /// The regression this guards, off Windows: the lookup was compiled only there, and
+    /// everywhere else answered that the socket had no owner without looking.
     #[test]
     fn signal_block_records_the_sender_even_after_its_socket_closes() {
         let socket = std::net::UdpSocket::bind("127.0.0.1:0").expect("bind");
@@ -367,12 +378,12 @@ mod tests {
             RecordType::A,
             Some("blocklist"),
             BlockResponseMode::NxDomain,
-            Some(DnsQueryContext {
+            Some(QueryClient::scanned_here(DnsQueryContext {
                 client_addr: addr.ip(),
                 client_port: addr.port(),
-                protocol: Protocol::Udp,
+                transport: Transport::Udp,
                 received_at: Instant::now(),
-            }),
+            })),
             Vec::new,
         );
         drop(socket);
@@ -390,24 +401,14 @@ mod tests {
         );
     }
 
-    #[test]
-    fn sink_contract_preserves_ambiguous_socket_ownership() {
-        let sink = OwnershipSink::default();
-        sink.record_blocked_query_with_ownership(
-            "shared.example",
-            crate::port_mapper::Ownership::Ambiguous,
-            &[],
-            None,
-        );
-
-        assert_eq!(
-            *sink.ownership.lock(),
-            Some(crate::port_mapper::Ownership::Ambiguous)
-        );
-    }
-
     impl DnsBlockSink for CountingSink {
-        fn record_blocked_query(&self, _domain: &str, _pid: u32, _blocklist_names: &[String]) {
+        fn record_blocked_query(
+            &self,
+            _domain: &str,
+            _ownership: netmetrics::Ownership,
+            _blocklist_names: &[String],
+            _timestamp: time::OffsetDateTime,
+        ) {
             self.recorded.fetch_add(1, Ordering::Relaxed);
         }
     }

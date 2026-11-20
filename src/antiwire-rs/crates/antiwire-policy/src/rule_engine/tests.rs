@@ -506,6 +506,35 @@ fn an_exact_app_rule_beats_the_family_rule_for_the_same_path() {
     );
 }
 
+/// The family lookup is skipped while no application rule blocks, so the
+/// count behind that check has to follow every change of verdict.
+#[test]
+fn a_family_block_is_inherited_exactly_while_a_block_rule_exists() {
+    let target = r"c:\apps\app-1.0\app.exe";
+    let newer = r"C:\apps\app-3.0\app.exe";
+    let mut engine = RuleEngine::new();
+    let _ = engine.upsert_rule(app_rule(1, target, Verdict::Allow));
+    assert_eq!(engine.evaluate(newer, "", ""), None);
+
+    let _ = engine.upsert_rule(app_rule(1, target, Verdict::Block));
+    assert_eq!(engine.evaluate(newer, "", ""), Some(Verdict::Block));
+
+    // Another block coming and going leaves this one in force.
+    let other = app_rule(2, r"c:\tools\tool-1.0\tool.exe", Verdict::Block);
+    let _ = engine.upsert_rule(other.clone());
+    let _ = engine.remove_rule(&other);
+    assert_eq!(engine.evaluate(newer, "", ""), Some(Verdict::Block));
+
+    let _ = engine.upsert_rule(app_rule(1, target, Verdict::Allow));
+    assert_eq!(engine.evaluate(newer, "", ""), None);
+
+    engine.replace_user_rules([app_rule(3, target, Verdict::Block)], []);
+    assert_eq!(engine.evaluate(newer, "", ""), Some(Verdict::Block));
+    engine.clear_user_rules();
+    let _ = engine.upsert_rule(app_rule(4, target, Verdict::Block));
+    assert_eq!(engine.evaluate(newer, "", ""), Some(Verdict::Block));
+}
+
 #[test]
 fn host_prefix_lookup_needs_a_non_empty_executable() {
     assert_eq!(super::evaluate::host_exe_prefix(""), None);

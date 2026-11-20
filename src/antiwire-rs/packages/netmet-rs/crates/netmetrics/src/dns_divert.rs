@@ -1,7 +1,13 @@
 //! Diverts outbound port 53 that bypasses the local stub.
 //!
-//! Dropping [`DnsDivert`] removes the platform filter: the `WinDivert` handle on
-//! Windows, the nftables table on Linux, and the pf anchor on macOS.
+//! Dropping [`DnsDivert`] removes the platform filter: the nftables table on Linux, the pf
+//! anchor on macOS, and on Windows the filters in the Windows Filtering Platform or, with
+//! `WinDivert` turned on, the `WinDivert` handle.
+//!
+//! Linux and macOS send such DNS back to the stub, and so does Windows with `WinDivert`.
+//! Windows without it cannot: redirecting needs a kernel driver there. It refuses the
+//! traffic instead, so a program that names its own resolver fails to resolve where
+//! elsewhere it would get the stub's answer. See [`start`].
 
 pub use netmetrics_core::DivertEvent;
 use netmetrics_core::{LocalEndpoint, Protocol};
@@ -54,10 +60,20 @@ impl std::fmt::Debug for DnsDivert {
 /// divert checks its rules every [`DIVERT_CHECK_INTERVAL`] and puts them back
 /// when they are removed, emptied or, on macOS, pf is switched off.
 ///
+/// On Windows the form is chosen when this is called. With `WinDivert` turned on
+/// ([`crate::windivert::set_enabled`]), which only `x86_64` can do, bypassing DNS is sent
+/// to the stub. Otherwise filters in the Windows Filtering Platform refuse outbound TCP
+/// and UDP to ports 53 and 853 for every program but this one and the service host that
+/// runs the system resolver, loopback excepted; no driver is involved, and Windows deletes
+/// the filters if this process ends without dropping the divert. Drop the divert and start
+/// it again after turning `WinDivert` on or off. In the filter form the report hears of
+/// filters that another tool deleted, checked every [`DIVERT_CHECK_INTERVAL`] as on Linux
+/// and macOS.
+///
 /// # Errors
 ///
-/// Returns an error when the platform filter cannot be installed. The caller
-/// should keep resolving through the stub; a missing divert is not fatal.
+/// Returns an error when the platform filter cannot be installed. The caller should keep
+/// resolving through the stub; a missing divert is not fatal.
 pub fn start(report: impl Fn(DivertEvent) + Send + 'static) -> Result<DnsDivert, String> {
     clear_leftover();
     install(Box::new(report))

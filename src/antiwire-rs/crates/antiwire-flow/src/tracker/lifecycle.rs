@@ -642,6 +642,21 @@ impl<S: FlowStore> FlowTracker<S> {
         } else if app_path.is_empty()
             || app_name.eq_ignore_ascii_case(process_resolver::UNKNOWN_APP_NAME)
         {
+            if flow.pid != 0 || meta.pid == 0 || !is_unknown_attribution(&flow) {
+                return flow;
+            }
+            // The close is the first to say which process had the connection,
+            // and that process cannot be named now. Who it was is kept all the
+            // same: its lifecycle events can name it after the close, and the
+            // row is found again by this PID.
+            flow.pid = meta.pid;
+            flow.process_start_ts = attributable_process_start_ts(meta);
+            if app_id > 0 {
+                // It had an owner, so the row says why that owner is unknown.
+                flow.app_id = app_id;
+                flow.app_path = app_path;
+                flow.app_name = app_name;
+            }
             return flow;
         }
 

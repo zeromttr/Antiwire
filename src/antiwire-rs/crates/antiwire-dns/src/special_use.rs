@@ -790,7 +790,7 @@ mod tests {
             crate::listener::dns_listen_addr_v6(),
         ] {
             assert_eq!(
-                classify_special_use(&crate::reverse_name(addr.ip())),
+                classify_special_use(&crate::domain_key::from_name(&Name::from(addr.ip()))),
                 Some(SpecialUseKind::ResolverAddress),
                 "{addr}"
             );

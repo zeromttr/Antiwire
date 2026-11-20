@@ -15,18 +15,16 @@ use hickory_proto::op::{DnsRequest, DnsRequestOptions, Message, MessageType};
 use hickory_resolver::net::xfer::{DnsHandle, FirstAnswer};
 use hickory_resolver::net::{NetError, RetryDnsHandle};
 use hickory_resolver::{NameServerPool, PoolContext};
-use tokio::sync::{OwnedSemaphorePermit, Semaphore};
+use tokio::sync::{OwnedSemaphorePermit, Semaphore, SemaphorePermit};
 use tracing::{debug, info, warn};
 
-use antiwire_tuning::{
-    DNS_UPSTREAM_RECOVERY_INTERVAL, DOH_ENDPOINT_FAILURE_THRESHOLD, DOH_FORWARD_TIMEOUT,
-};
+use antiwire_tuning::{DNS_UPSTREAM_RECOVERY_INTERVAL, DOH_ENDPOINT_FAILURE_THRESHOLD};
 
 use super::endpoint::UpstreamEndpoint;
 use super::error_kind::{
     empty_answer_for_error, is_benign_empty_answer, is_dns_level_error, upstream_error_kind,
 };
-use super::exchange::UpstreamAnswer;
+use super::exchange::{Turn, UpstreamAnswer};
 use super::runtime::UpstreamRuntime;
 use super::{resolve_error_msg, transport_tag, MAX_IN_FLIGHT_PER_TIER};
 use crate::settings::DnsProtocol;
@@ -37,8 +35,9 @@ pub(super) struct Tier {
     handle: RetryDnsHandle<NameServerPool<UpstreamRuntime>>,
     request_options: DnsRequestOptions,
     pub(super) health: TierHealth,
-    /// Bounds sends into Hickory's smaller per-connection queues. The permit
-    /// stays with the attempt even if its caller times out or a fallback wins.
+    /// Bounds sends into Hickory's smaller per-connection queues. Once an
+    /// attempt is sent, the permit stays with it even if its caller times out
+    /// or a fallback wins.
     in_flight: Semaphore,
     /// `None` for UDP, which has no connection to stampede.
     cold_start: Option<ColdStart>,
@@ -99,32 +98,33 @@ impl Tier {
         }
     }
 
-    /// Sends `request` through this tier's pool, queueing for an in-flight
-    /// slot until `slot_deadline` at the latest.
+    /// Sends `request` through this tier's pool once it is `turn`'s turn.
+    /// `recovering` says the attempt owns the recovery of a tier that is down.
     pub(super) async fn send(
         &self,
         request: &Message,
-        slot_deadline: tokio::time::Instant,
+        turn: &Turn,
+        recovering: bool,
     ) -> (Result<UpstreamAnswer, NetError>, Reach) {
-        let _warming = match &self.cold_start {
-            Some(gate) => match gate.admit().await {
-                Ok(permit) => permit,
-                Err(error) => return (Err(error), Reach::NotSent),
-            },
-            None => None,
-        };
-
         // The outer admission budget bounds exchanges across all tiers, not
         // requests on one pooled connection. Queue excess work here, and
         // refuse it locally once its wait runs out, before Hickory turns its
         // Busy into an ambiguous NoConnections failure.
-        let Ok(Ok(_slot)) = tokio::time::timeout_at(slot_deadline, self.in_flight.acquire()).await
-        else {
+        let Some(_turn) = self.wait_for(turn).await else {
             return (
                 Err(resolve_error_msg(crate::upstream::TIER_BUSY)),
                 Reach::NotSent,
             );
         };
+        // The tier may have gone down during the wait. A down tier is asked
+        // by its recovery attempt alone: anything else sent to it would be a
+        // second, unspaced recovery attempt.
+        if !recovering && self.health.is_down() {
+            return (
+                Err(resolve_error_msg(crate::upstream::TIER_WENT_DOWN)),
+                Reach::NotSent,
+            );
+        }
 
         let started = Instant::now();
         let mut query = request.clone();
@@ -189,6 +189,44 @@ impl Tier {
         }
     }
 
+    /// Waits until an attempt may be sent: behind the attempt that is opening
+    /// the tier's connection, if one is, and then for an in-flight slot.
+    /// `None` when the turn does not come.
+    ///
+    /// Nothing has been sent while this waits, so it ends with `turn`'s
+    /// exchange: an attempt nobody is waiting for is not worth a query, and
+    /// must not go on holding what admitted its exchange. The wait behind a
+    /// connection has no other limit, because the connection may be all that
+    /// stands between a client and its answer. The wait for a slot also ends
+    /// at the turn's deadline.
+    async fn wait_for(
+        &self,
+        turn: &Turn,
+    ) -> Option<(Option<OwnedSemaphorePermit>, SemaphorePermit<'_>)> {
+        let wait = async {
+            let opening = match &self.cold_start {
+                Some(gate) => gate.admit().await,
+                None => None,
+            };
+            let slot = tokio::time::timeout_at(turn.slot_deadline, self.in_flight.acquire())
+                .await
+                .ok()?
+                .ok()?;
+            Some((opening, slot))
+        };
+        tokio::select! {
+            biased;
+            () = turn.exchange_over.cancelled() => None,
+            waited = wait => waited,
+        }
+    }
+
+    /// Whether another attempt is opening this tier's connection, so one
+    /// started now would wait behind it.
+    pub(super) fn is_opening(&self) -> bool {
+        self.cold_start.as_ref().is_some_and(ColdStart::is_held)
+    }
+
     /// Applies one attempt's outcome, settling `recovery` if it held one.
     pub(super) fn record(&self, reach: Reach, recovery: Option<RecoveryClaim>) {
         match reach {
@@ -250,6 +288,11 @@ impl TierHealth {
 
     pub(super) fn is_down(&self) -> bool {
         self.down.load(Ordering::Acquire)
+    }
+
+    /// Whether the tier has failed since it last answered.
+    pub(super) fn has_failed(&self) -> bool {
+        self.failures.load(Ordering::Acquire) > 0
     }
 
     #[cfg(test)]
@@ -398,22 +441,20 @@ impl ColdStart {
         }
     }
 
-    /// Waits for the gate. `Ok(None)` means the tier is warm.
-    async fn admit(&self) -> Result<Option<OwnedSemaphorePermit>, NetError> {
+    /// Waits for the gate. `None` means the tier is warm. The caller bounds
+    /// the wait.
+    async fn admit(&self) -> Option<OwnedSemaphorePermit> {
         if self.ready.load(Ordering::Acquire) {
-            return Ok(None);
+            return None;
         }
-        // No client waits longer than its whole query deadline.
-        let permit =
-            tokio::time::timeout(DOH_FORWARD_TIMEOUT, Arc::clone(&self.slot).acquire_owned())
-                .await
-                .map_err(|_| NetError::Timeout)?
-                .map_err(|_| super::resolve_error_msg("upstream cold-start gate closed"))?;
-        if self.ready.load(Ordering::Acquire) {
-            Ok(None)
-        } else {
-            Ok(Some(permit))
-        }
+        // The gate is never closed, so the wait only ends with a permit.
+        let permit = Arc::clone(&self.slot).acquire_owned().await.ok()?;
+        (!self.ready.load(Ordering::Acquire)).then_some(permit)
+    }
+
+    /// Whether the tier is cold and an attempt holds the gate.
+    fn is_held(&self) -> bool {
+        !self.ready.load(Ordering::Acquire) && self.slot.available_permits() == 0
     }
 
     fn mark_ready(&self) {

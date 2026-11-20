@@ -1,4 +1,4 @@
-//! Tower services that answer DNS queries for the loopback listeners.
+//! The services that answer DNS queries for the loopback listeners.
 //!
 //! A query is answered in two steps. [`Resolve`] parses the raw wire and tries
 //! to answer without upstream I/O — policy blocks and cache hits — returning
@@ -11,38 +11,39 @@
 //! Replies are encoded here rather than in the transports, so UDP and TCP share
 //! one size limit and truncation rule.
 
-use std::convert::Infallible;
+use std::future::Future;
 use std::net::SocketAddr;
 use std::sync::Arc;
-use std::task::{Context, Poll};
 use std::time::Instant;
 
 use antiwire_policy::PolicyEngine;
 use antiwire_tuning::{DNS_DEFAULT_UDP_PAYLOAD_SIZE, DNS_MAX_UDP_DATAGRAM_SIZE};
-use futures_util::future::BoxFuture;
-use hickory_proto::op::{Edns, MessageType, ResponseCode};
+use hickory_proto::op::{
+    emit_message_parts, Edns, EmitAndCount, Header, HeaderCounts, Message, MessageType, Metadata,
+    OpCode, ResponseCode,
+};
 use hickory_proto::rr::Record;
 use hickory_proto::serialize::binary::{BinEncodable, BinEncoder};
-use hickory_server::net::xfer::Protocol;
-use hickory_server::proto::op::{Header, HeaderCounts, Metadata, OpCode};
-use hickory_server::server::Request;
-use hickory_server::zone_handler::{MessageResponse, MessageResponseBuilder};
-use tower::Service;
+use hickory_proto::ProtoError;
 use tracing::warn;
 
 use crate::ai::{AiCoordinator, PostResponseWork};
 use crate::block::DnsQueryContext;
+use crate::listener::Transport;
+use crate::port_mapper::{HandedOffLookups, QueryClient, Scans};
 #[cfg(test)]
 use crate::query_engine::prepare_uncached_message;
 use crate::query_engine::QueryEngine;
 use crate::query_engine::{PreparedQuery, PreparedResponse};
 use crate::query_guard::{catch_query_panic, catch_sync_query_panic};
 
-/// One query as read off the wire, before parsing.
-pub(crate) struct Query {
-    pub(crate) wire: Vec<u8>,
+/// One query as read off the wire, before parsing. The wire stays in the
+/// listener's buffer: parsing copies out what the answer needs.
+#[derive(Clone, Copy)]
+pub(crate) struct Query<'a> {
+    pub(crate) wire: &'a [u8],
     pub(crate) src: SocketAddr,
-    pub(crate) protocol: Protocol,
+    pub(crate) transport: Transport,
     /// Taken when the bytes arrived, so parsing counts against the client's
     /// query deadline.
     pub(crate) received_at: Instant,
@@ -62,15 +63,73 @@ pub(crate) enum Answer<M> {
 /// A query [`Resolve`] could not answer locally, carrying the parse and policy
 /// work already done so [`Forward`] never repeats it.
 pub(crate) struct Miss {
-    request: Request,
+    request: Message,
+    /// The question section as it arrived. The listener reuses its buffer
+    /// before the reply is encoded, so the miss keeps a copy.
+    questions: Box<[u8]>,
+    context: DnsQueryContext,
     query: PreparedQuery,
-    received_at: Instant,
+}
+
+/// A request's question section exactly as it arrived.
+///
+/// Replies echo it byte for byte, which keeps the client's casing for one
+/// copy. Encoding the questions again would cost the encoder's compression
+/// bookkeeping for every label.
+#[derive(Clone, Copy)]
+pub(crate) struct Questions<'a> {
+    section: &'a [u8],
+    count: usize,
+}
+
+impl EmitAndCount for Questions<'_> {
+    fn emit(&mut self, encoder: &mut BinEncoder<'_>) -> Result<usize, ProtoError> {
+        encoder.emit_vec(self.section)?;
+        Ok(self.count)
+    }
+}
+
+/// Parses a query, and finds its question section in `wire`.
+pub(crate) fn parse(wire: &[u8]) -> Option<(Message, Questions<'_>)> {
+    let request = Message::from_vec(wire).ok()?;
+    let count = request.queries.len();
+    let section = question_section(wire, count)?;
+    Some((request, Questions { section, count }))
+}
+
+/// The `count` questions after the header of a message Hickory parsed: each
+/// a name, ended by a zero-length label or a compression pointer, then its
+/// type and class.
+fn question_section(wire: &[u8], count: usize) -> Option<&[u8]> {
+    const HEADER: usize = 12;
+    const POINTER: u8 = 0xC0;
+    const TYPE_AND_CLASS: usize = 4;
+    let mut end = HEADER;
+    for _ in 0..count {
+        loop {
+            let length = *wire.get(end)?;
+            if length & POINTER == POINTER {
+                end += 2;
+                break;
+            }
+            end += 1 + usize::from(length);
+            if length == 0 {
+                break;
+            }
+        }
+        end += TYPE_AND_CLASS;
+    }
+    wire.get(HEADER..end)
 }
 
 /// An encoded reply and the work owed once a transport accepts it.
 pub(crate) struct Reply {
     bytes: Vec<u8>,
     receipt: Receipt,
+    /// Owner lookups handed off the receive loop that answered it, to run
+    /// before it is sent: they may scan the socket tables, and must see the
+    /// client's socket while the client still waits. Only UDP hands them off.
+    lookups: Option<HandedOffLookups>,
 }
 
 impl Reply {
@@ -79,7 +138,13 @@ impl Reply {
         Self {
             bytes,
             receipt: Receipt(None),
+            lookups: None,
         }
+    }
+
+    /// The lookups to run before this reply is sent, if it has any.
+    pub(crate) fn take_lookups(&mut self) -> Option<HandedOffLookups> {
+        self.lookups.take()
     }
 
     pub(crate) fn bytes(&self) -> &[u8] {
@@ -130,7 +195,7 @@ where
 {
     /// Synchronous: nothing here waits on I/O, so the listeners call it on
     /// their receive task.
-    pub(crate) fn resolve(&self, query: Query) -> Answer<Miss> {
+    pub(crate) fn resolve(&self, query: Query<'_>) -> Answer<Miss> {
         resolve_query(&self.engine, query)
     }
 }
@@ -142,46 +207,62 @@ impl<P> Clone for Resolve<P> {
 }
 
 /// Parses `query` and answers it locally, or returns what its miss needs.
-fn resolve_query<P>(engine: &QueryEngine<P>, query: Query) -> Answer<Miss>
+fn resolve_query<P>(engine: &QueryEngine<P>, query: Query<'_>) -> Answer<Miss>
 where
     P: PolicyEngine + Send + Sync + Unpin + 'static,
 {
-    // Kept for a FORMERR: parsing consumes the wire.
-    let header = query
-        .wire
-        .get(..12)
-        .and_then(|header| <[u8; 12]>::try_from(header).ok());
-    let Ok(request) = Request::from_bytes(query.wire, query.src, query.protocol) else {
-        return header.and_then(formerr).map_or(Answer::Ignored, |bytes| {
+    let Some((request, questions)) = parse(query.wire) else {
+        return formerr(query.wire).map_or(Answer::Ignored, |bytes| {
             Answer::Local(Reply {
                 bytes,
                 receipt: Receipt(None),
+                lookups: None,
             })
         });
     };
     if request.metadata.message_type == MessageType::Response {
         return Answer::Ignored;
     }
-    let received_at = query.received_at;
+    let context = DnsQueryContext {
+        client_addr: query.src.ip(),
+        client_port: query.src.port(),
+        transport: query.transport,
+        received_at: query.received_at,
+    };
+    // A UDP listener answers every datagram from one receive loop, so an owner
+    // lookup that would scan the socket tables is handed to its reply instead.
+    // A TCP connection has a task of its own and looks owners up where it is.
+    let lookups = HandedOffLookups::default();
+    let scans = match query.transport {
+        Transport::Udp => Scans::HandedOff(&lookups),
+        Transport::Tcp => Scans::Here,
+    };
     #[expect(
         clippy::result_large_err,
         reason = "the miss keeps its PreparedQuery so upstream never re-parses"
     )]
-    let local = catch_sync_query_panic(&request, || answer_locally(engine, &request, received_at));
+    let local = catch_sync_query_panic(query.transport, || {
+        answer_locally(engine, &request, questions, context, scans)
+    });
     match local {
-        Some(Ok(Some(reply))) => Answer::Local(reply),
+        Some(Ok(Some(mut reply))) => {
+            reply.lookups = lookups.any();
+            Answer::Local(reply)
+        }
         Some(Ok(None)) => Answer::Ignored,
         Some(Err(query)) => Answer::Miss(Miss {
             request,
+            questions: questions.section.into(),
+            context,
             query,
-            received_at,
         }),
-        None => Answer::Local(servfail(&request)),
+        None => Answer::Local(servfail(&request, questions, query.transport)),
     }
 }
 
 /// Answers `request` from policy or cache, or returns the state its miss needs.
-/// `None` means the query is owed no reply.
+/// `None` means the query is owed no reply. An owner lookup that has to scan
+/// the socket tables goes where `scans` says.
 ///
 /// `try_handle_parsed_sync` evaluates policy *before* probing the cache, which is what
 /// makes a newly added block rule take effect immediately without any cache
@@ -192,14 +273,25 @@ where
 )]
 pub(crate) fn answer_locally<P>(
     engine: &QueryEngine<P>,
-    request: &Request,
-    received_at: Instant,
+    request: &Message,
+    questions: Questions<'_>,
+    context: DnsQueryContext,
+    scans: Scans<'_>,
 ) -> Result<Option<Reply>, PreparedQuery>
 where
     P: PolicyEngine + Send + Sync + Unpin + 'static,
 {
-    let prepared = engine.try_handle_parsed_sync(request, Some(context(request, received_at)))?;
-    Ok(prepared.map(|prepared| encode_prepared(request, prepared, engine.ai_coordinator())))
+    let client = QueryClient { context, scans };
+    let prepared = engine.try_handle_parsed_sync(request, Some(client))?;
+    Ok(prepared.map(|prepared| {
+        encode_prepared(
+            request,
+            questions,
+            context.transport,
+            prepared,
+            engine.ai_coordinator(),
+        )
+    }))
 }
 
 /// Finishes a [`Miss`] over upstream.
@@ -219,21 +311,15 @@ impl<P> Clone for Forward<P> {
     }
 }
 
-impl<P> Service<Miss> for Forward<P>
+impl<P> Forward<P>
 where
     P: PolicyEngine + Send + Sync + Unpin + 'static,
 {
-    type Response = Reply;
-    type Error = Infallible;
-    type Future = BoxFuture<'static, Result<Reply, Infallible>>;
-
-    fn poll_ready(&mut self, _cx: &mut Context<'_>) -> Poll<Result<(), Infallible>> {
-        Poll::Ready(Ok(()))
-    }
-
-    fn call(&mut self, miss: Miss) -> Self::Future {
+    /// Finishes `miss` over upstream. The future owns what it needs, so a
+    /// listener can run it on a task of its own.
+    pub(crate) fn answer(&self, miss: Miss) -> impl Future<Output = Reply> + Send + 'static {
         let engine = Arc::clone(&self.engine);
-        Box::pin(async move { Ok(answer_miss(&engine, miss).await) })
+        async move { answer_miss(&engine, miss).await }
     }
 }
 
@@ -244,27 +330,28 @@ where
 {
     let Miss {
         request,
+        questions,
+        context,
         query,
-        received_at,
     } = miss;
-    let context = context(&request, received_at);
-    let answered = catch_query_panic(&request, async {
+    let questions = Questions {
+        section: &questions,
+        count: request.queries.len(),
+    };
+    let answered = catch_query_panic(context.transport, async {
         let prepared = engine
-            .handle_parsed_miss(&request, Some(context), query, received_at)
+            .handle_parsed_miss(&request, Some(context), query, context.received_at)
             .await;
-        encode_prepared(&request, prepared, engine.ai_coordinator())
+        encode_prepared(
+            &request,
+            questions,
+            context.transport,
+            prepared,
+            engine.ai_coordinator(),
+        )
     })
     .await;
-    answered.unwrap_or_else(|| servfail(&request))
-}
-
-fn context(request: &Request, received_at: Instant) -> DnsQueryContext {
-    DnsQueryContext {
-        client_addr: request.src().ip(),
-        client_port: request.src().port(),
-        protocol: request.protocol(),
-        received_at,
-    }
+    answered.unwrap_or_else(|| servfail(&request, questions, context.transport))
 }
 
 /// FORMERR for a query whose header can be read but whose body cannot.
@@ -273,11 +360,13 @@ fn context(request: &Request, received_at: Instant) -> DnsQueryContext {
 /// for a query with more than one OPT record. Dropping the query instead
 /// leaves the client waiting out its timeout. The reply is a bare header with
 /// the transaction ID, opcode and RD bit copied and no sections, since the
-/// question could not be read. A message marked as a response gets nothing.
-fn formerr(header: [u8; 12]) -> Option<Vec<u8>> {
+/// question could not be read. A message marked as a response gets nothing,
+/// and so does one shorter than a header.
+fn formerr(wire: &[u8]) -> Option<Vec<u8>> {
     const QR: u8 = 0x80;
     const OPCODE_AND_RD: u8 = 0x79;
     const RA: u8 = 0x80;
+    let header = <&[u8; 12]>::try_from(wire.get(..12)?).ok()?;
     if header[2] & QR != 0 {
         return None;
     }
@@ -289,17 +378,20 @@ fn formerr(header: [u8; 12]) -> Option<Vec<u8>> {
 }
 
 /// SERVFAIL for a query whose handling panicked.
-pub(crate) fn servfail(request: &Request) -> Reply {
-    let response = MessageResponseBuilder::from_message_request(request)
-        .error_msg(&request.metadata, ResponseCode::ServFail);
+pub(crate) fn servfail(request: &Message, questions: Questions<'_>, transport: Transport) -> Reply {
+    let mut metadata = Metadata::response_from_request(&request.metadata);
+    metadata.response_code = ResponseCode::ServFail;
     Reply {
-        bytes: encode(response, request.protocol(), None),
+        bytes: encode(questions, transport, &metadata, &[], &[], &[], None),
         receipt: Receipt(None),
+        lookups: None,
     }
 }
 
 fn encode_prepared(
-    request: &Request,
+    request: &Message,
+    questions: Questions<'_>,
+    transport: Transport,
     mut prepared: PreparedResponse,
     ai: Option<Arc<AiCoordinator>>,
 ) -> Reply {
@@ -319,56 +411,61 @@ fn encode_prepared(
             ));
         }
     }
-    let mut builder = MessageResponseBuilder::from_message_request(request);
-    if let Some(edns) = edns.as_ref() {
-        builder.edns(edns);
-    }
-
-    // The question section comes from the request, so the client's original
-    // casing is echoed back without the byte-level fixup the cache path does.
     // Records are borrowed from the cached parse tree when no TTL aging is due.
-    let message = builder.build(
-        prepared.metadata,
-        prepared.answers(),
-        prepared.authorities(),
-        std::iter::empty(),
-        prepared.additionals(),
-    );
     Reply {
-        bytes: encode(message, request.protocol(), edns.as_ref()),
+        bytes: encode(
+            questions,
+            transport,
+            &prepared.metadata,
+            prepared.answers(),
+            prepared.authorities(),
+            prepared.additionals(),
+            edns.as_ref(),
+        ),
         receipt,
+        lookups: None,
     }
 }
 
-/// Encodes a response, capped at what the client can receive.
+/// Encodes a reply with `metadata` as its header, capped at what the client
+/// can receive.
+///
+/// The question section is the request's own, so the client's original casing
+/// is echoed back without the byte-level fixup the cache path does.
 ///
 /// A UDP response is capped at the client's advertised payload size, or at
 /// the 512 bytes RFC 1035 §4.2.1 allows a client that sent no OPT record.
 /// Hickory's encoder writes the records that fit and sets TC, so the client
 /// retries over TCP. A response that cannot be encoded at all becomes a bare
 /// SERVFAIL header.
-fn encode<'a, A, N, S, D>(
-    response: MessageResponse<'_, 'a, A, N, S, D>,
-    protocol: Protocol,
+fn encode(
+    mut questions: Questions<'_>,
+    transport: Transport,
+    metadata: &Metadata,
+    answers: &[Record],
+    authorities: &[Record],
+    additionals: &[Record],
     edns: Option<&Edns>,
-) -> Vec<u8>
-where
-    A: Iterator<Item = &'a Record> + Send + 'a,
-    N: Iterator<Item = &'a Record> + Send + 'a,
-    S: Iterator<Item = &'a Record> + Send + 'a,
-    D: Iterator<Item = &'a Record> + Send + 'a,
-{
-    let id = response.metadata().id;
-    let max_size = match protocol {
-        Protocol::Udp => edns.map_or_else(min_udp_payload_size, Edns::max_payload),
-        _ => u16::MAX,
+) -> Vec<u8> {
+    let max_size = match transport {
+        Transport::Udp => edns.map_or_else(min_udp_payload_size, Edns::max_payload),
+        Transport::Tcp => u16::MAX,
     };
 
     let mut bytes = Vec::with_capacity(512);
     let emitted = {
         let mut encoder = BinEncoder::new(&mut bytes);
         encoder.set_max_size(max_size);
-        response.destructive_emit(&mut encoder)
+        emit_message_parts(
+            metadata,
+            &mut questions,
+            &mut answers.iter(),
+            &mut authorities.iter(),
+            &mut additionals.iter(),
+            edns,
+            None,
+            &mut encoder,
+        )
     };
     let Err(error) = emitted else {
         return bytes;
@@ -376,7 +473,7 @@ where
 
     warn!(%error, "error encoding dns response; answering SERVFAIL");
     bytes.clear();
-    let mut metadata = Metadata::new(id, MessageType::Response, OpCode::Query);
+    let mut metadata = Metadata::new(metadata.id, MessageType::Response, OpCode::Query);
     metadata.response_code = ResponseCode::ServFail;
     let header = Header {
         metadata,
@@ -433,10 +530,10 @@ fn max_udp_payload_size() -> u16 {
 pub(crate) mod testing {
     use std::sync::atomic::{AtomicUsize, Ordering};
 
-    use hickory_proto::op::{Message, OpCode, Query as Question};
+    use futures_util::future::{BoxFuture, FutureExt};
+    use hickory_proto::op::{OpCode, Query as Question};
     use hickory_proto::rr::{Name, RecordType};
     use tokio::sync::Semaphore;
-    use tower::service_fn;
 
     use super::*;
     use crate::messages::encode_message;
@@ -457,9 +554,9 @@ pub(crate) mod testing {
     }
 
     /// Answers `cached.test.` locally and sends every other name upstream.
-    pub(crate) fn resolve() -> impl Fn(Query) -> Answer<Message> + Clone + Send + 'static {
-        |query: Query| {
-            let message = Message::from_vec(&query.wire).expect("test query parses");
+    pub(crate) fn resolve() -> impl Fn(Query<'_>) -> Answer<Message> + Clone + Send + 'static {
+        |query: Query<'_>| {
+            let message = Message::from_vec(query.wire).expect("test query parses");
             let name = message.queries[0].name().to_utf8();
             if name == "cached.test." {
                 Answer::Local(reply_to(&message))
@@ -474,11 +571,10 @@ pub(crate) mod testing {
     pub(crate) fn forward(
         started: &Arc<AtomicUsize>,
         release: &Arc<Semaphore>,
-    ) -> impl Service<Message, Response = Reply, Error = Infallible, Future: Send + 'static> + Clone + Send
-    {
+    ) -> impl Fn(Message) -> BoxFuture<'static, Reply> + Clone + Send {
         let started = Arc::clone(started);
         let release = Arc::clone(release);
-        service_fn(move |message: Message| {
+        move |message: Message| {
             let started = Arc::clone(&started);
             let release = Arc::clone(&release);
             async move {
@@ -488,18 +584,20 @@ pub(crate) mod testing {
                     .await
                     .expect("test gate remains open")
                     .forget();
-                Ok(reply_to(&message))
+                reply_to(&message)
             }
-        })
+            .boxed()
+        }
     }
 
     const CLIENT: &str = "127.0.0.1:53000";
 
-    pub(crate) fn wire_query(request: &Message, received_at: Instant) -> Query {
+    /// `wire` as a UDP query from one loopback client.
+    pub(crate) fn client_query(wire: &[u8], received_at: Instant) -> Query<'_> {
         Query {
-            wire: encode_message(request).expect("encode query"),
+            wire,
             src: CLIENT.parse().expect("client address"),
-            protocol: Protocol::Udp,
+            transport: Transport::Udp,
             received_at,
         }
     }
@@ -522,7 +620,8 @@ pub(crate) mod testing {
     where
         P: PolicyEngine + Send + Sync + Unpin + 'static,
     {
-        match resolve_query(engine, wire_query(request, received_at)) {
+        let wire = encode_message(request).expect("encode query");
+        match resolve_query(engine, client_query(&wire, received_at)) {
             Answer::Local(reply) => sent(reply),
             Answer::Miss(miss) => sent(answer_miss(engine, miss).await),
             Answer::Ignored => Vec::new(),
@@ -535,7 +634,8 @@ pub(crate) mod testing {
     where
         P: PolicyEngine + Send + Sync + Unpin + 'static,
     {
-        match resolve_query(engine, wire_query(request, Instant::now())) {
+        let wire = encode_message(request).expect("encode query");
+        match resolve_query(engine, client_query(&wire, Instant::now())) {
             Answer::Local(reply) => Some(sent(reply)),
             Answer::Miss(_) | Answer::Ignored => None,
         }
@@ -550,7 +650,6 @@ mod tests {
     use antiwire_policy::{DomainDecision, RuleEngine};
     use hickory_proto::op::{Message, Query as Question};
     use hickory_proto::rr::{rdata, Name, RData, RecordType};
-    use tower::ServiceExt;
 
     use super::*;
     use crate::messages::encode_message;
@@ -598,12 +697,20 @@ mod tests {
         (ai, called)
     }
 
-    use super::testing::wire_query;
+    use super::testing::client_query;
     use crate::test_support::a_query as query_message;
 
-    fn request_for(name: &str) -> Request {
-        let query = wire_query(&query_message(0x1234, name), Instant::now());
-        Request::from_bytes(query.wire, query.src, query.protocol).expect("hickory parses request")
+    /// A UDP reply to an A query for `name`, carrying `prepared`.
+    fn reply_for(name: &str, prepared: PreparedResponse, ai: &Arc<AiCoordinator>) -> Reply {
+        let wire = encode_message(&query_message(0x1234, name)).expect("encode query");
+        let (request, questions) = parse(&wire).expect("parse query");
+        encode_prepared(
+            &request,
+            questions,
+            Transport::Udp,
+            prepared,
+            Some(Arc::clone(ai)),
+        )
     }
 
     fn response_with_work(name: &str, answer_count: usize) -> PreparedResponse {
@@ -628,8 +735,6 @@ mod tests {
             response,
             Some(PostResponseWork {
                 domain: name.trim_end_matches('.').to_owned(),
-                was_block: false,
-                eligible: true,
             }),
         )
     }
@@ -725,7 +830,8 @@ mod tests {
             cached,
         );
 
-        let answer = Resolve::new(stub).resolve(wire_query(&query, Instant::now()));
+        let wire = encode_message(&query).expect("encode query");
+        let answer = Resolve::new(stub).resolve(client_query(&wire, Instant::now()));
         let Answer::Local(reply) = answer else {
             panic!("cached response completes on the local fast path");
         };
@@ -757,16 +863,14 @@ mod tests {
         let received_at = Instant::now()
             .checked_sub(antiwire_tuning::DNS_QUERY_DEADLINE)
             .expect("instant supports subtraction");
-        let answer = Resolve::new(Arc::clone(&stub)).resolve(wire_query(
-            &query_message(0xD1E, "deadline.example."),
-            received_at,
-        ));
+        let wire = encode_message(&query_message(0xD1E, "deadline.example.")).expect("encode");
+        let answer = Resolve::new(Arc::clone(&stub)).resolve(client_query(&wire, received_at));
         let Answer::Miss(miss) = answer else {
             panic!("an uncached name needs upstream");
         };
 
         let started = Instant::now();
-        let reply = Forward::new(stub).oneshot(miss).await.expect("infallible");
+        let reply = Forward::new(stub).answer(miss).await;
         let decoded = Message::from_vec(reply.bytes()).expect("decode response");
         assert_eq!(decoded.metadata.response_code, ResponseCode::ServFail);
         assert!(
@@ -792,10 +896,8 @@ mod tests {
                 ..DnsConfig::default()
             },
         ));
-        let answer = Resolve::new(stub).resolve(wire_query(
-            &query_message(0xBAD, "panic.example."),
-            Instant::now(),
-        ));
+        let wire = encode_message(&query_message(0xBAD, "panic.example.")).expect("encode");
+        let answer = Resolve::new(stub).resolve(client_query(&wire, Instant::now()));
         let Answer::Local(reply) = answer else {
             panic!("a panic is answered locally");
         };
@@ -817,21 +919,47 @@ mod tests {
 
         let mut response = query_message(1, "response.example.");
         response.metadata.message_type = MessageType::Response;
-        let mut garbage = wire_query(&response, Instant::now());
-        garbage.wire.truncate(5);
-        for query in [wire_query(&response, Instant::now()), garbage] {
-            let answer = resolve.resolve(query);
+        let wire = encode_message(&response).expect("encode");
+        for wire in [&wire[..], &wire[..5]] {
+            let answer = resolve.resolve(client_query(wire, Instant::now()));
             assert!(matches!(answer, Answer::Ignored));
         }
     }
 
-    fn local_reply(resolve: &Resolve<RuleEngine>, wire: Vec<u8>) -> Message {
-        let answer = resolve.resolve(Query {
-            wire,
-            src: "127.0.0.1:53000".parse().expect("client address"),
-            protocol: Protocol::Udp,
-            received_at: Instant::now(),
-        });
+    /// The question section ends after each question's type and class,
+    /// whether its name ends in a zero-length label or a pointer, and a reply
+    /// carries it back byte for byte.
+    #[test]
+    fn replies_echo_the_question_section_as_it_arrived() {
+        const HEADER: usize = 12;
+        // 7 "ExAmPlE", 7 "example", the root label, then type and class.
+        const QUESTION: usize = 8 + 8 + 1 + 4;
+        let mut query = query_message(1, "ExAmPlE.example.");
+        query.set_edns(Edns::new());
+        let wire = encode_message(&query).expect("encode");
+        let (_, questions) = parse(&wire).expect("parse");
+        assert_eq!(questions.section, &wire[HEADER..HEADER + QUESTION]);
+        assert_eq!(questions.count, 1);
+
+        // The OPT record goes, and a second question points back at the
+        // first one's name.
+        let mut two = wire[..HEADER + QUESTION].to_vec();
+        two[5] = 2;
+        two[11] = 0;
+        two.extend_from_slice(&[0xC0, 12, 0, 28, 0, 1]);
+        let (request, questions) = parse(&two).expect("parse");
+        assert_eq!(request.queries.len(), 2);
+        assert_eq!(questions.section, &two[HEADER..]);
+
+        let reply = servfail(&request, questions, Transport::Udp);
+        assert_eq!(&reply.bytes()[HEADER..], &two[HEADER..]);
+        let decoded = Message::from_vec(reply.bytes()).expect("decode reply");
+        assert_eq!(decoded.queries, request.queries);
+        assert_eq!(decoded.metadata.response_code, ResponseCode::ServFail);
+    }
+
+    fn local_reply(resolve: &Resolve<RuleEngine>, wire: &[u8]) -> Message {
+        let answer = resolve.resolve(client_query(wire, Instant::now()));
         let Answer::Local(reply) = answer else {
             panic!("answered locally");
         };
@@ -859,7 +987,7 @@ mod tests {
         let wire = encode_message(&query).expect("encode query");
 
         // The question is cut off mid-name.
-        let reply = local_reply(&resolve, wire[..16].to_vec());
+        let reply = local_reply(&resolve, &wire[..16]);
         assert_eq!(reply.metadata.id, 0x5151);
         assert_eq!(reply.metadata.message_type, MessageType::Response);
         assert_eq!(reply.metadata.response_code, ResponseCode::FormErr);
@@ -871,7 +999,7 @@ mod tests {
         two_opts.extend_from_slice(&[0, 0, 41, 0x10, 0, 0, 0, 0, 0, 0, 0]);
         let additionals = u16::from_be_bytes([two_opts[10], two_opts[11]]) + 1;
         two_opts[10..12].copy_from_slice(&additionals.to_be_bytes());
-        let reply = local_reply(&resolve, two_opts);
+        let reply = local_reply(&resolve, &two_opts);
         assert_eq!(reply.metadata.response_code, ResponseCode::FormErr);
     }
 
@@ -884,7 +1012,7 @@ mod tests {
         let mut edns = Edns::new();
         edns.set_version(1);
         query.set_edns(edns);
-        let reply = local_reply(&resolve, encode_message(&query).expect("encode"));
+        let reply = local_reply(&resolve, &encode_message(&query).expect("encode"));
         // RCODE 16 is BADVERS with an OPT and BADSIG with a TSIG, and hickory
         // decodes it as the latter, so compare the number.
         assert_eq!(u16::from(reply.metadata.response_code), 16);
@@ -894,10 +1022,10 @@ mod tests {
     #[tokio::test]
     async fn post_ai_work_waits_for_the_transport_to_accept_the_reply() {
         let (ai, called) = classifying_ai();
-        let reply = encode_prepared(
-            &request_for("ordered.example."),
+        let reply = reply_for(
+            "ordered.example.",
             response_with_work("ordered.example.", 1),
-            Some(Arc::clone(&ai)),
+            &ai,
         );
         tokio::time::sleep(Duration::from_millis(20)).await;
         assert!(
@@ -913,10 +1041,10 @@ mod tests {
     #[tokio::test]
     async fn an_undelivered_reply_drops_its_post_ai_work() {
         let (ai, called) = classifying_ai();
-        let reply = encode_prepared(
-            &request_for("send-error.example."),
+        let reply = reply_for(
+            "send-error.example.",
             response_with_work("send-error.example.", 1),
-            Some(Arc::clone(&ai)),
+            &ai,
         );
         drop(reply);
         tokio::time::sleep(Duration::from_millis(20)).await;
@@ -927,10 +1055,10 @@ mod tests {
     #[tokio::test]
     async fn truncated_udp_reply_still_submits_ai_once_delivered() {
         let (ai, called) = classifying_ai();
-        let reply = encode_prepared(
-            &request_for("truncated.example."),
+        let reply = reply_for(
+            "truncated.example.",
             response_with_work("truncated.example.", 40),
-            Some(Arc::clone(&ai)),
+            &ai,
         );
         assert!(
             reply.bytes().len() <= 512,

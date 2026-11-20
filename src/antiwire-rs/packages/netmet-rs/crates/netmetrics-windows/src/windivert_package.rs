@@ -41,6 +41,8 @@ static INSTALL: Mutex<()> = Mutex::new(());
 /// Directory containing the checked official x64 DLL and driver.
 ///
 /// Compiled only for `x86_64` (see `lib.rs`): `WinDivert` 2.2.2 has no ARM64 driver.
+/// Its one caller, `Divert::open`, refuses first while `WinDivert` is turned off, so
+/// nothing is fetched then.
 ///
 /// # Errors
 ///

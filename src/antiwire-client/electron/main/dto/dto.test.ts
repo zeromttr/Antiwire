@@ -197,16 +197,19 @@ describe('settings', () => {
       ...defaults,
       notifyEveryConnection: true,
       aiApiKeySet: true,
+      windivertSupported: true,
       geoipDatabaseLastUpdated: '2026-01-01',
     });
     expect(dto.clearAiApiKey).toBe(false);
     expect(dto.aiApiKeySet).toBe(true);
+    expect(dto.windivertSupported).toBe(true);
 
     const parsed = settingsSchema.parse({ ...dto, clearSiemAuthToken: true, extra: 'dropped' });
     const request = settingsToRequest(parsed);
     expect(request.clearSiemAuthToken).toBe(true);
     expect('geoipDatabaseLastUpdated' in request).toBe(false);
     expect('aiApiKeySet' in request).toBe(false);
+    expect('windivertSupported' in request).toBe(false);
     expect('extra' in request).toBe(false);
   });
 });

@@ -7,6 +7,8 @@ use std::fmt;
 pub(crate) struct DivertError {
     detail: String,
     passes: bool,
+    /// Whether this is the refusal made while `WinDivert` is turned off.
+    turned_off: bool,
 }
 
 impl DivertError {
@@ -17,6 +19,19 @@ impl DivertError {
         Self {
             detail: detail.into(),
             passes: true,
+            turned_off: false,
+        }
+    }
+
+    /// The refusal made while `WinDivert` is turned off: nothing was downloaded or loaded.
+    /// It lasts until the application turns `WinDivert` on.
+    #[cfg(target_arch = "x86_64")]
+    pub(crate) fn turned_off() -> Self {
+        Self {
+            detail: "WinDivert is turned off, so its driver is neither downloaded nor loaded"
+                .to_owned(),
+            passes: false,
+            turned_off: true,
         }
     }
 
@@ -26,12 +41,18 @@ impl DivertError {
         Self {
             detail: detail.into(),
             passes: false,
+            turned_off: false,
         }
     }
 
     /// Whether trying again later could succeed.
     pub(crate) const fn passes(&self) -> bool {
         self.passes
+    }
+
+    /// Whether this is the refusal made while `WinDivert` is turned off.
+    pub(crate) const fn is_turned_off(&self) -> bool {
+        self.turned_off
     }
 }
 

@@ -31,7 +31,7 @@ use self::failure::{new_failure_cache, ResolutionFailure};
 use self::prefetch::{new_backoff_cache, PrefetchBackoff};
 
 pub(crate) use self::aging::AgedSections;
-pub(crate) use self::coalesce::{SharedOutcome, FETCH_GENERATION_ATTEMPTS};
+pub(crate) use self::coalesce::{Fetched, SharedOutcome, FETCH_GENERATION_ATTEMPTS};
 pub(crate) use self::entry::{CacheProbe, CachedAnswer};
 pub(crate) use self::key::{CacheKey, QueryFlags};
 pub(crate) use self::prefetch::PrefetchReservation;

@@ -12,21 +12,23 @@ use std::time::{Duration, Instant};
 use antiwire_policy::{DomainBlockSource, DomainDecision, PolicyEngine, RuleEngine, Verdict};
 use hickory_proto::op::{Message, MessageType, OpCode, Query};
 use hickory_proto::rr::{rdata, Name, RData, Record, RecordType};
-use hickory_server::net::xfer::Protocol;
-use hickory_server::server::Request;
 
-use crate::block::DnsBlockSink;
+use crate::block::{DnsBlockSink, DnsQueryContext};
+use crate::listener::Transport;
 use crate::messages::encode_message;
+use crate::port_mapper::Scans;
 use crate::query_engine::{EngineServices, QueryEngine};
 use crate::response_cache::{CacheKey, QueryFlags, ResponseCache};
-use crate::service::answer_locally;
+use crate::service::{answer_locally, parse};
 use crate::settings::DnsConfig;
 use crate::DnsHintSink;
 
 const QUERIES: usize = 2_000;
 const ROUNDS: usize = 5;
 
-struct NoopSink;
+/// A hint and block sink that keeps nothing, so the reply path's own work is
+/// what is measured.
+pub(super) struct NoopSink;
 
 impl DnsHintSink for NoopSink {
     fn record_hint(&self, _: u32, _: &str, _: &[std::net::IpAddr], _: u64, _: u64) {}
@@ -34,7 +36,14 @@ impl DnsHintSink for NoopSink {
 }
 
 impl DnsBlockSink for NoopSink {
-    fn record_blocked_query(&self, _: &str, _: u32, _: &[String]) {}
+    fn record_blocked_query(
+        &self,
+        _: &str,
+        _: netmetrics::Ownership,
+        _: &[String],
+        _: time::OffsetDateTime,
+    ) {
+    }
 }
 
 struct BlockAll;
@@ -144,7 +153,9 @@ fn report<P>(label: &str, engine: &QueryEngine<P>, client: Client)
 where
     P: PolicyEngine + Send + Sync + Unpin + 'static,
 {
+    // Parsed from the wire, as the listener would.
     let wire = encode_message(&query_message()).expect("encode");
+    let (request, questions) = parse(&wire).expect("parse request");
     let same = UdpSocket::bind("127.0.0.1:0").expect("bind");
     let mut rounds = Vec::with_capacity(ROUNDS);
     for _ in 0..=ROUNDS {
@@ -157,10 +168,14 @@ where
                 .unwrap_or(&same)
                 .local_addr()
                 .expect("local addr");
-            let request =
-                Request::from_bytes(wire.clone(), src, Protocol::Udp).expect("parse request");
             let start = Instant::now();
-            let reply = answer_locally(engine, &request, start);
+            let context = DnsQueryContext {
+                client_addr: src.ip(),
+                client_port: src.port(),
+                transport: Transport::Udp,
+                received_at: start,
+            };
+            let reply = answer_locally(engine, &request, questions, context, Scans::Here);
             samples.push(start.elapsed());
             assert!(matches!(reply, Ok(Some(_))), "{label}: answered locally");
         }

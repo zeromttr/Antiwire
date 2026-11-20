@@ -47,7 +47,7 @@ static SHARED_POOL: parking_lot::Mutex<Option<SharedPool>> = parking_lot::Mutex:
 
 /// DKIM keys live under a selector the domain chooses; these are the ones
 /// the large mail and marketing providers use.
-pub const DKIM_SELECTORS: &[&str] = &[
+pub(crate) const DKIM_SELECTORS: &[&str] = &[
     "google",     // Google Workspace
     "selector1",  // Microsoft 365
     "selector2",  // Microsoft 365
@@ -117,7 +117,7 @@ pub struct RecordLookup {
 
 /// One question to ask.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct PlannedQuery {
+pub(crate) struct PlannedQuery {
     pub purpose: RecordPurpose,
     pub name: String,
     pub record_type: RecordType,
@@ -126,7 +126,7 @@ pub struct PlannedQuery {
 /// The questions for `host` under the registered `domain`, plus reverse DNS
 /// for `address` when there is one. Duplicate questions are asked once.
 #[must_use]
-pub fn plan_queries(host: &str, domain: &str, address: Option<IpAddr>) -> Vec<PlannedQuery> {
+pub(crate) fn plan_queries(host: &str, domain: &str, address: Option<IpAddr>) -> Vec<PlannedQuery> {
     let host = host.trim().trim_end_matches('.').to_ascii_lowercase();
     let domain = domain.trim().trim_end_matches('.').to_ascii_lowercase();
     let mut plan: Vec<PlannedQuery> = Vec::new();
@@ -173,33 +173,11 @@ pub fn plan_queries(host: &str, domain: &str, address: Option<IpAddr>) -> Vec<Pl
         );
     }
     if let Some(address) = address {
-        push(
-            RecordPurpose::Reverse,
-            reverse_name(address),
-            RecordType::PTR,
-        );
+        let mut name = Name::from(address);
+        name.set_fqdn(false);
+        push(RecordPurpose::Reverse, name.to_ascii(), RecordType::PTR);
     }
     plan
-}
-
-/// `in-addr.arpa` or `ip6.arpa` name for `address`.
-#[must_use]
-pub fn reverse_name(address: IpAddr) -> String {
-    match address {
-        IpAddr::V4(v4) => {
-            let [a, b, c, d] = v4.octets();
-            format!("{d}.{c}.{b}.{a}.in-addr.arpa")
-        }
-        IpAddr::V6(v6) => {
-            let mut labels: Vec<String> = Vec::with_capacity(34);
-            for byte in v6.octets().iter().rev() {
-                labels.push(format!("{:x}", byte & 0x0f));
-                labels.push(format!("{:x}", byte >> 4));
-            }
-            labels.push("ip6.arpa".to_owned());
-            labels.join(".")
-        }
-    }
 }
 
 /// Asks the configured upstream about `host`, its domain, and the reverse
@@ -563,15 +541,22 @@ mod tests {
     }
 
     #[test]
-    fn builds_reverse_names() {
-        assert_eq!(
-            reverse_name("2001:db8::1".parse().unwrap()),
-            "1.0.0.0.0.0.0.0.0.0.0.0.0.0.0.0.0.0.0.0.0.0.0.0.8.b.d.0.1.0.0.2.ip6.arpa"
-        );
-        assert_eq!(
-            reverse_name("198.51.100.20".parse().unwrap()),
-            "20.100.51.198.in-addr.arpa"
-        );
+    fn asks_for_the_reverse_name_of_the_address() {
+        for (address, name) in [
+            (
+                "2001:db8::1",
+                "1.0.0.0.0.0.0.0.0.0.0.0.0.0.0.0.0.0.0.0.0.0.0.0.8.b.d.0.1.0.0.2.ip6.arpa",
+            ),
+            ("198.51.100.20", "20.100.51.198.in-addr.arpa"),
+        ] {
+            let plan = plan_queries("example.com", "example.com", Some(address.parse().unwrap()));
+            let reverse = plan
+                .iter()
+                .find(|query| query.purpose == RecordPurpose::Reverse)
+                .expect("a reverse question");
+            assert_eq!(reverse.name, name);
+            assert_eq!(reverse.record_type, RecordType::PTR);
+        }
     }
 
     #[test]

@@ -4,7 +4,7 @@
 use netmetrics::Ownership;
 use time::OffsetDateTime;
 
-use super::{PendingBlock, PendingOwnership};
+use super::PendingBlock;
 use crate::correlator::{DnsAttributionStatus, DnsCorrelationResult, DnsQueryCorrelator};
 
 pub(super) fn attributed_requesting_pid(correlation: DnsCorrelationResult) -> Option<u32> {
@@ -33,15 +33,9 @@ pub(super) fn started_after(start_ts: u64, event: OffsetDateTime) -> bool {
 /// Caller evidence wins; otherwise the resolved socket owner is the sender of
 /// record — the requesting application for a direct query and the system
 /// resolver for a mediated one. Zero means no owner could be established.
-pub(super) fn attributed_owner_pid(
-    correlation: DnsCorrelationResult,
-    ownership: PendingOwnership,
-) -> u32 {
+pub(super) fn attributed_owner_pid(correlation: DnsCorrelationResult, ownership: Ownership) -> u32 {
     attributed_requesting_pid(correlation)
-        .or_else(|| {
-            let pid = ownership.socket_owner_pid();
-            (pid > 0).then_some(pid)
-        })
+        .or_else(|| ownership.resolved_pid().filter(|pid| *pid > 0))
         .unwrap_or(0)
 }
 
@@ -50,16 +44,8 @@ pub(super) fn correlate_block(
     block: &PendingBlock,
 ) -> DnsCorrelationResult {
     match block.ownership {
-        PendingOwnership::Caller(pid) if pid > 0 => DnsCorrelationResult {
-            requesting_pid: Some(pid),
-            resolver_pid: None,
-            ambiguous: false,
-            status: DnsAttributionStatus::Correlated,
-        },
-        PendingOwnership::Caller(_) | PendingOwnership::Socket(Ownership::NotFound) => {
-            correlator.correlate(&block.domain, 0, Some(block.timestamp))
-        }
-        PendingOwnership::Socket(Ownership::Resolved(pid)) => {
+        Ownership::NotFound => correlator.correlate(&block.domain, 0, Some(block.timestamp)),
+        Ownership::Resolved(pid) => {
             let scoped = correlator.correlate(&block.domain, pid, Some(block.timestamp));
             if attributed_requesting_pid(scoped).is_some() {
                 scoped
@@ -77,7 +63,7 @@ pub(super) fn correlate_block(
                 }
             }
         }
-        PendingOwnership::Socket(Ownership::Ambiguous) => {
+        Ownership::Ambiguous => {
             let mut correlation = correlator.correlate(&block.domain, 0, Some(block.timestamp));
             if correlation.status == DnsAttributionStatus::Unattributed {
                 correlation.status = DnsAttributionStatus::Ambiguous;

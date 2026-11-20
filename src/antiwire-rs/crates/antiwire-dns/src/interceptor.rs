@@ -3,7 +3,7 @@
 use std::sync::Arc;
 
 use antiwire_events::{Alert, AlertKind, AlertPublisher, Severity};
-use antiwire_store::{DaemonSetting, Store};
+use antiwire_store::{DaemonSetting, DnsBypass, Store};
 use futures_util::future::BoxFuture;
 use netmetrics::dns_divert::DivertEvent;
 use parking_lot::Mutex;
@@ -14,6 +14,7 @@ use crate::lifecycle::DnsDependencies;
 use crate::listener::DnsListener;
 use crate::network_watch::{NetworkEvent, NetworkWatcher, TransitionHook};
 use crate::policy_adapter::EnginePolicy;
+use crate::port53_divert::{DivertInstall, InstalledDivert, Port53Divert};
 use crate::query_engine::{EngineServices, QueryEngine};
 use crate::settings::dns_config_from_settings;
 use crate::{DnsError, Result};
@@ -21,7 +22,7 @@ use crate::{DnsError, Result};
 use antiwire_dns_redirect::{DnsRedirect, RedirectOutcome};
 
 /// Manages the loopback DNS listener and persisted redirect state.
-pub struct DnsInterceptor {
+pub(crate) struct DnsInterceptor {
     dependencies: DnsDependencies,
     hint_sink: Option<Arc<dyn DnsHintSink>>,
     stub: Option<Arc<QueryEngine<EnginePolicy>>>,
@@ -30,7 +31,11 @@ pub struct DnsInterceptor {
     /// System DNS pointed at the listener. Its extender goes to the network
     /// watcher, and as it drops it restores whatever is still redirected.
     redirect: DnsRedirect,
-    dns_divert: Option<netmetrics::dns_divert::DnsDivert>,
+    /// Its install is replaceable in tests, as the listener's construction is.
+    dns_divert: Port53Divert,
+    /// What the divert was last installed to do. A restart for settings that ask for
+    /// something else takes it out first.
+    dns_bypass: DnsBypass,
     /// Listener construction, replaceable in lifecycle fault-injection tests.
     bind_listener: fn(Arc<QueryEngine<EnginePolicy>>) -> Result<DnsListener>,
 }
@@ -49,7 +54,8 @@ impl DnsInterceptor {
             listener: None,
             network_watcher: None,
             redirect,
-            dns_divert: None,
+            dns_divert: Port53Divert::on_host(),
+            dns_bypass: DnsBypass::Open,
             bind_listener: DnsListener::start_default,
         }
     }
@@ -98,11 +104,10 @@ impl DnsInterceptor {
         if let Some(stub) = self.stub.as_ref() {
             let stub = Arc::clone(stub);
             let store = Arc::clone(store);
-            tokio::task::spawn_blocking(move || stub.update_ai_config(&store, runtime))
-                .await
-                .map_err(|error| {
-                    DnsError::Runtime(format!("AI settings publish task failed: {error}"))
-                })?;
+            blocking("AI settings publish", move || {
+                stub.update_ai_config(&store, runtime);
+            })
+            .await?;
         }
         Ok(())
     }
@@ -111,7 +116,7 @@ impl DnsInterceptor {
         self.listener.as_ref().is_some_and(DnsListener::is_running)
     }
 
-    pub(crate) async fn start(&mut self, store: &Store) -> Result<()> {
+    pub(crate) async fn start(&mut self) -> Result<()> {
         self.redirect.stop_restoring().await;
         if self.is_running() {
             return Ok(());
@@ -120,13 +125,13 @@ impl DnsInterceptor {
             // The previous stack died. Its redirect stays in place, so adapters
             // keep pointing at loopback for the stack started below, which
             // recovers the persisted snapshot rather than capturing loopback.
-            self.disable_dns_divert();
+            self.disable_dns_divert().await;
             self.shutdown_stack().await;
         }
 
-        let settings = store.get_settings()?;
-        match self.build_engine(&settings) {
-            Ok(stub) => self.serve(stub, settings.uses_packet_rules()).await,
+        let settings = self.settings().await?;
+        match self.build_engine(&settings).await {
+            Ok(stub) => self.serve(stub, settings.dns_bypass()).await,
             Err(error) => {
                 self.recover_after_failed_start().await;
                 Err(error)
@@ -148,38 +153,61 @@ impl DnsInterceptor {
     /// never lets queries reach the network unfiltered, and adapter DNS is not
     /// rewritten twice. The new engine is built before the old stack stops: a
     /// configuration it rejects leaves the running resolver serving.
-    pub(crate) async fn restart(&mut self, store: &Store) -> Result<()> {
+    ///
+    /// A port 53 divert the settings no longer want, or want in the other form, is taken
+    /// out before that, so a rejected configuration cannot keep it installed.
+    pub(crate) async fn restart(&mut self) -> Result<()> {
         self.redirect.stop_restoring().await;
         if !self.is_running() {
-            return self.start(store).await;
+            return self.start().await;
         }
-        let settings = store.get_settings()?;
-        let stub = self.build_engine(&settings)?;
-        self.disable_dns_divert();
+        let settings = self.settings().await?;
+        if settings.dns_bypass() != self.dns_bypass {
+            self.disable_dns_divert().await;
+        }
+        let stub = self.build_engine(&settings).await?;
+        self.disable_dns_divert().await;
         self.shutdown_stack().await;
-        self.serve(stub, settings.uses_packet_rules()).await
+        self.serve(stub, settings.dns_bypass()).await
     }
 
-    /// Builds the query engine for `settings`.
-    fn build_engine(&self, settings: &DaemonSetting) -> Result<Arc<QueryEngine<EnginePolicy>>> {
+    /// The saved settings, read on a blocking thread: SQLite is synchronous.
+    async fn settings(&self) -> Result<DaemonSetting> {
+        let store = Arc::clone(&self.dependencies.store);
+        Ok(blocking("settings read", move || store.get_settings()).await??)
+    }
+
+    /// Builds the query engine for `settings`, on a blocking thread: the
+    /// engine loads the OS trust store, and reads the store to build the AI
+    /// client. A restart builds it while the resolver it replaces still serves.
+    async fn build_engine(
+        &self,
+        settings: &DaemonSetting,
+    ) -> Result<Arc<QueryEngine<EnginePolicy>>> {
         let config = dns_config_from_settings(settings);
-        let stub = QueryEngine::try_new(
-            EnginePolicy::from_engine_lock(&self.dependencies.engine),
-            &config,
-            EngineServices {
-                store: Some(Arc::clone(&self.dependencies.store)),
-                block_sink: self.dependencies.block_sink.clone(),
-                registration_dates: self.dependencies.registration_dates.clone(),
-            },
-        )
-        .inspect_err(|error| {
-            error!(
-                %error,
-                protocol = %settings.dns_protocol,
-                provider = %settings.doh_provider,
-                "dns interceptor: upstream resolver build failed"
-            );
-        })?;
+        let dependencies = self.dependencies.clone();
+        let protocol = settings.dns_protocol.clone();
+        let provider = settings.doh_provider.clone();
+        let stub = blocking("dns engine build", move || {
+            QueryEngine::try_new(
+                EnginePolicy::from_engine_lock(&dependencies.engine),
+                &config,
+                EngineServices {
+                    store: Some(Arc::clone(&dependencies.store)),
+                    block_sink: dependencies.block_sink.clone(),
+                    registration_dates: dependencies.registration_dates.clone(),
+                },
+            )
+            .inspect_err(|error| {
+                error!(
+                    %error,
+                    %protocol,
+                    %provider,
+                    "dns interceptor: upstream resolver build failed"
+                );
+            })
+        })
+        .await??;
         self.report_skipped_upstreams(stub.upstream_config_warnings());
         let stub = Arc::new(stub);
         if let Some(sink) = &self.hint_sink {
@@ -188,13 +216,26 @@ impl DnsInterceptor {
         Ok(stub)
     }
 
-    /// Binds the listener for `stub`, then redirects OS DNS to it and, with `divert`,
-    /// installs the port 53 divert. Expects no stack to be running.
+    /// Binds the listener for `stub`, then redirects OS DNS to it and installs the port 53
+    /// divert that `bypass` asks for (`DaemonSetting::dns_bypass`). Expects no stack to be
+    /// running.
     ///
-    /// Without `divert` the user has switched packet rules off
-    /// (`DaemonSetting::uses_packet_rules`): DNS sent past the system's settings is then
-    /// not filtered, by their choice, and is not reported as a gap.
-    async fn serve(&mut self, stub: Arc<QueryEngine<EnginePolicy>>, divert: bool) -> Result<()> {
+    /// The divert takes its form from `netmetrics`: DNS sent past the system's settings is
+    /// sent to the resolver, or, on Windows without `WinDivert`, refused.
+    ///
+    /// With [`DnsBypass::Open`] nothing is installed: the user has switched packet rules
+    /// off, or is on Windows without `WinDivert` and has not asked for the block. DNS sent
+    /// past the system's settings is then not filtered, by their choice, and is not
+    /// reported as a gap.
+    ///
+    /// The install is waited for only briefly (`DNS_DIVERT_INSTALL_WAIT`): one that has to
+    /// download the `WinDivert` package first carries on after this returns, and a failure
+    /// then reaches the user as an alert of its own.
+    async fn serve(
+        &mut self,
+        stub: Arc<QueryEngine<EnginePolicy>>,
+        bypass: DnsBypass,
+    ) -> Result<()> {
         let listener = match (self.bind_listener)(Arc::clone(&stub)) {
             Ok(listener) => listener,
             Err(error) => {
@@ -222,48 +263,60 @@ impl DnsInterceptor {
             }
         };
 
-        self.dns_divert = if divert {
-            match netmetrics::dns_divert::start(self.divert_report()) {
-                Ok(divert) => {
-                    info!("outbound port 53 that bypasses the stub is diverted to it");
-                    Some(divert)
-                }
-                Err(detail) => {
-                    warn!(%detail, "port 53 bypass divert was not installed");
-                    None
-                }
-            }
+        let divert = if bypass == DnsBypass::Open {
+            info!("port 53 bypass divert left out, as the settings say");
+            true
         } else {
-            info!("port 53 bypass divert left out: Private Relay compatibility is on");
-            None
+            self.install_dns_divert(bypass).await
         };
 
         self.report_enforcement_gaps(DnsEnforcement {
             redirect,
             ipv6: redirect_v6,
-            divert: self.dns_divert.is_some() || !divert,
+            divert,
         });
         info!("dns interceptor started");
         Ok(())
     }
 
+    /// Installs the port 53 divert to do what `bypass` says, and returns whether nothing
+    /// is known to be wrong with it once the wait is over: it is installed, or still being
+    /// installed.
+    async fn install_dns_divert(&mut self, bypass: DnsBypass) -> bool {
+        self.dns_bypass = bypass;
+        let alerts = self.dependencies.alerts.clone();
+        let late_failure = move |detail: String| {
+            warn!(%detail, "port 53 bypass divert was not installed");
+            report_enforcement_gaps(alerts.as_ref(), &[DIVERT_GAP]);
+        };
+        let installed = self
+            .dns_divert
+            .install(
+                Box::new(self.divert_report()),
+                antiwire_tuning::DNS_DIVERT_INSTALL_WAIT,
+                late_failure,
+            )
+            .await;
+        match installed {
+            DivertInstall::Installed => {
+                info!(?bypass, "port 53 bypass divert is in place");
+                true
+            }
+            DivertInstall::Failed(detail) => {
+                warn!(%detail, "port 53 bypass divert was not installed");
+                false
+            }
+            DivertInstall::Pending => {
+                info!("port 53 bypass divert is still being installed; the resolver does not wait for it");
+                true
+            }
+        }
+    }
+
     /// Tells the user when the resolver is running but does not filter every
     /// lookup, which the resolver's own state would otherwise hide.
     fn report_enforcement_gaps(&self, enforcement: DnsEnforcement) {
-        let gaps = enforcement.gaps();
-        if gaps.is_empty() {
-            return;
-        }
-        let detail = gaps.join("; ");
-        warn!(%detail, "dns filtering is incomplete");
-        if let Some(alerts) = &self.dependencies.alerts {
-            alerts.publish(Alert::new(
-                AlertKind::DnsEnforcementIncomplete,
-                Severity::High,
-                "DNS filtering incomplete",
-                format!("The DNS resolver is running, but not every lookup is filtered: {detail}."),
-            ));
-        }
+        report_enforcement_gaps(self.dependencies.alerts.as_ref(), &enforcement.gaps());
     }
 
     /// What hears the port 53 divert once it has started: every change is
@@ -294,16 +347,22 @@ impl DnsInterceptor {
         }))
     }
 
-    fn disable_dns_divert(&mut self) {
-        self.dns_divert.take();
-        netmetrics::dns_divert::clear_leftover();
+    /// Releases the port 53 divert, and whatever an earlier run left of one,
+    /// on a blocking thread: see [`release_divert`].
+    async fn disable_dns_divert(&mut self) {
+        self.dns_bypass = DnsBypass::Open;
+        let divert = self.dns_divert.take();
+        if let Err(error) = blocking("port 53 divert release", move || release_divert(divert)).await
+        {
+            warn!(%error, "port 53 divert release did not finish");
+        }
     }
 
     pub(crate) async fn stop(&mut self) -> Result<()> {
         self.redirect.stop_restoring().await;
         // Release the port 53 divert before anything else. A later restore or
         // listener shutdown can fail; the divert must not stay installed.
-        self.disable_dns_divert();
+        self.disable_dns_divert().await;
         // Join any adapter extension before restoring its snapshot. No new
         // transition may redirect adapters while shutdown is restoring them,
         // even when the restore fails and the listener must keep serving.
@@ -409,9 +468,29 @@ struct DnsEnforcement {
     /// Whether the redirect includes IPv6. It does not when `[::1]:53` is
     /// not served, and IPv6 DNS is then left alone.
     ipv6: bool,
-    /// Port 53 traffic that bypasses adapter DNS is diverted to the listener, or the user
-    /// has switched the divert off, which is their choice and no gap.
+    /// Port 53 traffic that bypasses adapter DNS is diverted to the listener, or is about
+    /// to be, or the user has switched the divert off, which is their choice and no gap.
     divert: bool,
+}
+
+/// What a missing port 53 divert leaves unfiltered, in words for the user.
+const DIVERT_GAP: &str = "applications that send DNS straight to port 53 bypass filtering";
+
+/// Tells the user that the resolver is running but leaves `gaps` unfiltered.
+fn report_enforcement_gaps(alerts: Option<&AlertPublisher>, gaps: &[&str]) {
+    if gaps.is_empty() {
+        return;
+    }
+    let detail = gaps.join("; ");
+    warn!(%detail, "dns filtering is incomplete");
+    if let Some(alerts) = alerts {
+        alerts.publish(Alert::new(
+            AlertKind::DnsEnforcementIncomplete,
+            Severity::High,
+            "DNS filtering incomplete",
+            format!("The DNS resolver is running, but not every lookup is filtered: {detail}."),
+        ));
+    }
 }
 
 impl DnsEnforcement {
@@ -438,8 +517,7 @@ impl DnsEnforcement {
         );
         let ipv6 = (redirected && !self.ipv6)
             .then_some("IPv6 DNS was not redirected, so lookups sent over IPv6 are not filtered");
-        let divert = (!self.divert)
-            .then_some("applications that send DNS straight to port 53 bypass filtering");
+        let divert = (!self.divert).then_some(DIVERT_GAP);
         redirect.into_iter().chain(ipv6).chain(divert).collect()
     }
 }
@@ -489,62 +567,86 @@ impl DivertLoss {
     }
 }
 
-/// Releases `value` without running its destructor on a runtime worker.
+/// Runs `work` on a blocking thread and waits for it.
+async fn blocking<T: Send + 'static>(
+    what: &str,
+    work: impl FnOnce() -> T + Send + 'static,
+) -> Result<T> {
+    tokio::task::spawn_blocking(work)
+        .await
+        .map_err(|error| DnsError::Runtime(format!("{what} task failed: {error}")))
+}
+
+/// Runs `work` without blocking a runtime worker, and without waiting for it.
 ///
-/// For a destructor that only frees memory this would be pointless; it exists
-/// for the ones that block. Off a runtime there is nothing to protect, so the
-/// drop happens in place.
-fn release_off_runtime<T: Send + 'static>(value: T) {
+/// It exists for work that blocks, such as a destructor that joins a thread.
+/// Off a runtime there is nothing to protect, so the work runs in place.
+fn off_runtime(work: impl FnOnce() + Send + 'static) {
     match tokio::runtime::Handle::try_current() {
         Ok(handle) => {
             // Detached: `Drop` cannot await, and the join has no result anyone
             // is waiting on.
-            handle.spawn_blocking(move || drop(value));
+            handle.spawn_blocking(work);
         }
-        Err(_) => drop(value),
+        Err(_) => work(),
     }
+}
+
+/// Removes `divert`, then anything an earlier run left of one. On Windows
+/// that joins the divert's packet thread; on Linux and macOS it runs `nft`
+/// or `pfctl`.
+fn release_divert(divert: Option<InstalledDivert>) {
+    drop(divert);
+    netmetrics::dns_divert::clear_leftover();
 }
 
 impl Drop for DnsInterceptor {
     fn drop(&mut self) {
-        self.disable_dns_divert();
+        // `NetworkWatcher::drop` cancels the watcher and aborts its task.
+        self.network_watcher = None;
+
+        // This destructor runs on paths that never reach `stop`: a cancelled
+        // gRPC handler dropping the interceptor mid-`stop`, or a shutdown that
+        // overran its deadline. Both run on a runtime worker, and what is left
+        // here blocks: releasing the divert, and dropping the last
+        // `QueryEngine` reference, which joins the block-signal worker thread
+        // while it may be mid-event. So it all runs on a blocking thread, the
+        // listener after the divert: until the divert is gone, DNS it catches
+        // is still answered. `DnsListener::drop` cancels the listener
+        // and aborts its task.
+        //
         // `self.redirect` restores whatever is still redirected as it drops,
         // after this, off the runtime: see `DnsRedirect`.
-
-        // `DnsListener::drop` cancels the hickory server and aborts its task,
-        // and `NetworkWatcher::drop` does the same for the watcher.
-        self.network_watcher = None;
-        self.listener = None;
-
-        // Dropping the last `QueryEngine` reference joins the block-signal
-        // worker thread, which may be mid-event. `stop` already moves that join
-        // off the runtime, but this destructor also runs on paths that never
-        // reach `stop`: a cancelled gRPC handler dropping the interceptor
-        // mid-`stop`, or a shutdown that overran its deadline. Both cancel on a
-        // runtime worker, so the join must not happen inline.
-        if let Some(stub) = self.stub.take() {
-            release_off_runtime(stub);
-        }
+        let divert = self.dns_divert.take();
+        let listener = self.listener.take();
+        let stub = self.stub.take();
+        off_runtime(move || {
+            release_divert(divert);
+            drop(listener);
+            drop(stub);
+        });
     }
 }
 
 #[cfg(test)]
 mod tests {
+    use std::sync::atomic::{AtomicBool, Ordering};
     use std::sync::mpsc::{self, Sender};
     use std::sync::Arc;
     use std::thread::ThreadId;
     use std::time::Duration;
 
     use antiwire_policy::RuleEngine;
-    use antiwire_store::Store;
+    use antiwire_store::{DaemonSetting, DnsBypass, Store};
     use parking_lot::RwLock;
 
     use antiwire_dns_redirect::{AppliedRedirect, RedirectBackend};
 
-    use super::{release_off_runtime, DnsEnforcement, DnsInterceptor, RedirectOutcome};
+    use super::{off_runtime, DnsEnforcement, DnsInterceptor, RedirectOutcome};
     use crate::lifecycle::DnsDependencies;
     use crate::listener::DnsListener;
     use crate::policy_adapter::EnginePolicy;
+    use crate::port53_divert::{InstalledDivert, Port53Divert};
     use crate::query_engine::QueryEngine;
     use crate::settings::DnsConfig;
     use antiwire_events::{
@@ -572,11 +674,13 @@ mod tests {
         }
     }
 
-    /// An interceptor whose redirect cannot change this host's DNS, even when
-    /// the tests run elevated.
+    /// An interceptor whose redirect cannot change this host's DNS, and whose port 53
+    /// divert installs nothing, even when the tests run elevated.
     fn interceptor(store: &Arc<Store>) -> DnsInterceptor {
         let mut interceptor = DnsInterceptor::new(dependencies(store, None), false);
         interceptor.redirect.set_backend(RedirectBackend::INERT);
+        interceptor.dns_divert =
+            Port53Divert::installing_with(Arc::new(|_| Err("no divert in tests".to_owned())));
         interceptor
     }
 
@@ -594,11 +698,12 @@ mod tests {
     /// Pinned to a single-threaded runtime, where "another thread" and "not the
     /// runtime" are the same statement.
     #[tokio::test(flavor = "current_thread")]
-    async fn a_released_value_drops_off_the_runtime_thread() {
+    async fn work_sent_off_the_runtime_runs_on_another_thread() {
         let runtime_thread = std::thread::current().id();
         let (tx, rx) = mpsc::channel();
 
-        release_off_runtime(WhereDropped { tx });
+        let value = WhereDropped { tx };
+        off_runtime(move || drop(value));
 
         let dropped_on = rx
             .recv_timeout(Duration::from_secs(10))
@@ -607,11 +712,12 @@ mod tests {
     }
 
     #[test]
-    fn released_outside_a_runtime_it_drops_in_place() {
+    fn work_sent_off_the_runtime_from_outside_one_runs_in_place() {
         let this_thread = std::thread::current().id();
         let (tx, rx) = mpsc::channel();
 
-        release_off_runtime(WhereDropped { tx });
+        let value = WhereDropped { tx };
+        off_runtime(move || drop(value));
 
         let dropped_on = rx.try_recv().expect("the destructor already ran");
         assert_eq!(dropped_on, this_thread);
@@ -631,7 +737,7 @@ mod tests {
         let mut interceptor = interceptor(&store);
         interceptor.redirect.set_backend(restoring(|_| false));
 
-        assert!(interceptor.start(store.as_ref()).await.is_err());
+        assert!(interceptor.start().await.is_err());
         assert_eq!(
             interceptor.redirect.snapshot().as_deref(),
             Some(saved_dns),
@@ -772,21 +878,121 @@ mod tests {
         assert_eq!(RESTORES.load(std::sync::atomic::Ordering::SeqCst), 1);
     }
 
-    #[tokio::test]
-    async fn a_rejected_configuration_leaves_the_running_resolver_and_redirect() {
-        let (_dir, store) = crate::test_support::temp_store();
+    /// Saves settings whose upstream the engine rejects, changed further by `change`.
+    fn save_rejected_settings(store: &Store, change: impl FnOnce(&mut DaemonSetting)) {
         let mut settings = store.get_settings().expect("settings");
         settings.dns_protocol = "doh".to_owned();
         settings.doh_provider = "custom".to_owned();
         settings.doh_custom_url = "not a URL".to_owned();
+        change(&mut settings);
         store.update_settings(&settings).expect("settings");
+    }
+
+    /// Stands in for an installed port 53 divert, and records that it was removed.
+    struct FakeDivert(Arc<AtomicBool>);
+
+    impl Drop for FakeDivert {
+        fn drop(&mut self) {
+            self.0.store(true, Ordering::SeqCst);
+        }
+    }
+
+    /// Installs a stand-in divert for `interceptor`, to do what `bypass` says, and returns
+    /// what its removal sets.
+    async fn install_fake_divert(
+        interceptor: &mut DnsInterceptor,
+        bypass: DnsBypass,
+    ) -> Arc<AtomicBool> {
+        let removed = Arc::new(AtomicBool::new(false));
+        let fake = Arc::clone(&removed);
+        interceptor.dns_divert = Port53Divert::installing_with(Arc::new(move |_| {
+            Ok(Box::new(FakeDivert(Arc::clone(&fake))) as InstalledDivert)
+        }));
+        assert!(interceptor.install_dns_divert(bypass).await);
+        assert!(interceptor.dns_divert.is_installed());
+        removed
+    }
+
+    /// The divert is a choice of the settings, and a resolver the new settings cannot
+    /// build must not keep it in place against them.
+    #[tokio::test]
+    async fn a_rejected_configuration_still_takes_out_a_divert_the_settings_no_longer_want() {
+        let (_dir, store) = crate::test_support::temp_store();
+        // Packet rules off leaves the divert out on every platform.
+        save_rejected_settings(&store, |settings| {
+            settings.private_relay_compatibility = true;
+        });
+        let mut interceptor = running_interceptor(&store);
+        let removed = install_fake_divert(&mut interceptor, DnsBypass::Redirected).await;
+
+        assert!(interceptor.restart().await.is_err());
+
+        assert!(removed.load(Ordering::SeqCst));
+        assert!(!interceptor.dns_divert.is_installed());
+        assert!(interceptor.is_running(), "the old resolver keeps serving");
+    }
+
+    /// A redirect is `WinDivert`, and it must not stay once the settings turn that off; nor
+    /// may a block stay once they ask for the redirect.
+    #[tokio::test]
+    async fn a_rejected_configuration_still_takes_out_a_divert_of_the_other_form() {
+        let (_dir, store) = crate::test_support::temp_store();
+        save_rejected_settings(&store, |_| ());
+        let wanted = store.get_settings().expect("settings").dns_bypass();
+        let other = match wanted {
+            DnsBypass::Redirected => DnsBypass::Refused,
+            _ => DnsBypass::Redirected,
+        };
+        let mut interceptor = running_interceptor(&store);
+        let removed = install_fake_divert(&mut interceptor, other).await;
+
+        assert!(interceptor.restart().await.is_err());
+
+        assert!(removed.load(Ordering::SeqCst));
+        assert!(!interceptor.dns_divert.is_installed());
+    }
+
+    #[tokio::test]
+    async fn a_rejected_configuration_keeps_a_divert_the_settings_still_want() {
+        let (_dir, store) = crate::test_support::temp_store();
+        // Windows catches DNS sent past the resolver only when asked to.
+        save_rejected_settings(&store, |settings| {
+            settings.dns_bypass_blocking_enabled = true;
+        });
+        let wanted = store.get_settings().expect("settings").dns_bypass();
+        assert_ne!(wanted, DnsBypass::Open);
+        let mut interceptor = running_interceptor(&store);
+        let removed = install_fake_divert(&mut interceptor, wanted).await;
+
+        assert!(interceptor.restart().await.is_err());
+
+        assert!(!removed.load(Ordering::SeqCst));
+        assert!(interceptor.dns_divert.is_installed());
+    }
+
+    /// A divert that cannot be installed is a gap the start reports with the others.
+    #[tokio::test]
+    async fn a_divert_that_fails_to_install_is_known_when_the_wait_ends() {
+        let (_dir, store) = crate::test_support::temp_store();
+        let mut interceptor = interceptor(&store);
+        interceptor.dns_divert =
+            Port53Divert::installing_with(Arc::new(|_| Err("no permission".to_owned())));
+
+        assert!(!interceptor.install_dns_divert(DnsBypass::Redirected).await);
+        assert!(!interceptor.dns_divert.is_installed());
+    }
+
+    #[tokio::test]
+    async fn a_rejected_configuration_leaves_the_running_resolver_and_redirect() {
+        let (_dir, store) = crate::test_support::temp_store();
+        save_rejected_settings(&store, |_| ());
         let mut interceptor = running_interceptor(&store);
         interceptor.redirect.assume_redirected("adapter snapshot");
         interceptor
             .redirect
             .set_backend(restoring(|_| panic!("a restart must not restore")));
 
-        assert!(interceptor.restart(store.as_ref()).await.is_err());
+        assert!(interceptor.restart().await.is_err());
         assert!(interceptor.is_running());
         assert!(interceptor.redirect.is_applied());
 
@@ -960,7 +1166,7 @@ mod tests {
         };
 
         assert!(matches!(
-            interceptor.restart(&store).await,
+            interceptor.restart().await,
             Err(crate::DnsError::Bind(_))
         ));
         assert!(
@@ -1167,5 +1373,61 @@ mod tests {
         let alert = subscription.recv().await.expect("alert");
         assert_eq!(alert.kind, AlertKind::DnsUpstreamSkipped);
         assert!(alert.message.contains("bad.example"));
+    }
+
+    /// The regression this guards: a restart read the settings and built the
+    /// new engine, which loads the OS trust store, on the runtime worker it
+    /// ran on. Everything else there waited several milliseconds, while the
+    /// resolver being replaced was still answering queries.
+    #[tokio::test(flavor = "current_thread")]
+    async fn a_restart_leaves_its_runtime_free_for_other_work() {
+        use std::sync::atomic::{AtomicBool, Ordering};
+
+        let (_dir, store) = crate::test_support::temp_store();
+        // No port 53 divert, even when the tests run elevated.
+        let mut settings = store.get_settings().expect("settings");
+        settings.private_relay_compatibility = true;
+        store.update_settings(&settings).expect("settings");
+        let mut interceptor = interceptor(&store);
+        interceptor.bind_listener =
+            |stub| DnsListener::start_on(stub, "127.0.0.1:0".parse().expect("addr"));
+        interceptor.start().await.expect("start");
+
+        // A task that yields in a loop is polled again as soon as nothing else
+        // runs, so the longest gap between its polls is the longest the
+        // runtime was held.
+        let longest = Arc::new(parking_lot::Mutex::new(Duration::ZERO));
+        let stop = Arc::new(AtomicBool::new(false));
+        let ticker = {
+            let longest = Arc::clone(&longest);
+            let stop = Arc::clone(&stop);
+            tokio::spawn(async move {
+                let mut last = std::time::Instant::now();
+                while !stop.load(Ordering::Relaxed) {
+                    tokio::task::yield_now().await;
+                    let now = std::time::Instant::now();
+                    let mut longest = longest.lock();
+                    *longest = (*longest).max(now - last);
+                    last = now;
+                }
+            })
+        };
+        tokio::task::yield_now().await;
+        let mut held = Vec::new();
+        for _ in 0..5 {
+            *longest.lock() = Duration::ZERO;
+            interceptor.restart().await.expect("restart");
+            held.push(*longest.lock());
+        }
+        stop.store(true, Ordering::Relaxed);
+        ticker.await.expect("ticker");
+        interceptor.stop().await.expect("stop");
+
+        // The shortest of them, so one descheduled thread cannot fail this.
+        let shortest = held.iter().min().copied().expect("restarts");
+        assert!(
+            shortest < Duration::from_millis(2),
+            "every restart held the runtime for {shortest:?} or more: {held:?}"
+        );
     }
 }

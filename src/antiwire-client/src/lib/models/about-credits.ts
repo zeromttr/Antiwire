@@ -244,7 +244,7 @@ export const RUNTIME_CREDITS: CreditEntry[] = [
     license: 'LGPL-3.0',
     role: 'Windows flow ownership and DNS packet diversion (runtime)',
     url: 'https://reqrypt.org/windivert.html',
-    note: 'WinDivert 2.2 is loaded dynamically from the official package published by basil. It is not statically linked, and the driver and DLL are not vendored in this repository. Use is subject to the GNU Lesser General Public License v3: https://github.com/basil00/WinDivert/blob/master/LICENSE',
+    note: 'WinDivert 2.2 is used only when you turn it on in the settings. It is then loaded dynamically from the official package published by basil. It is not statically linked, and the driver and DLL are not vendored in this repository. Use is subject to the GNU Lesser General Public License v3: https://github.com/basil00/WinDivert/blob/master/LICENSE',
   },
   {
     name: 'libpcap',

@@ -95,11 +95,17 @@ pub(super) fn process_backend_event(
             timestamp,
             pid,
         } => {
-            if pid > 0 {
-                let process = process_table.resolve(pid, timestamp);
-                flow_table.adopt_pid_if_present(key, pid, process);
+            // A close from before the flow opened is an earlier socket's on the
+            // same addresses, delivered after a new socket took them. That
+            // socket's flow closed when the new one replaced it, and the owner
+            // this close names is not the new flow's.
+            if !flow_table.opened_after(&key, timestamp) {
+                if pid > 0 {
+                    let process = process_table.resolve(pid, timestamp);
+                    flow_table.adopt_pid_if_present(key, pid, process);
+                }
+                close_displaced(flow_table.close(&key, timestamp), coalescer, batch);
             }
-            close_displaced(flow_table.close(&key, timestamp), coalescer, batch);
         }
         BackendEvent::Finishing { key, timestamp } => {
             if let Some(key) = flow_table.finish(&key, timestamp) {
@@ -165,9 +171,21 @@ pub(super) fn process_backend_event(
             timestamp,
             identity,
         } => {
+            let first_heard = !process_table.contains(pid);
             // A stale stop belongs to an earlier process with this PID. The
             // tracked one is still running, so consumers must not hear of it.
             if process_table.stopped_with_identity(pid, timestamp, identity) != StopOutcome::Stale {
+                // A stop that names a process the table had not heard of is
+                // recorded as that process. Consumers had not heard of it
+                // either, and a stop says only a PID and a time, so they are
+                // told who started before they are told it stopped.
+                if first_heard && let Some(identity) = process_table.resolve_ref(pid, timestamp) {
+                    flow_table.update_process(pid, identity);
+                    batch.push(FlowEvent::ProcessStarted(netmetrics_core::ProcessInfo {
+                        pid,
+                        identity: identity.clone(),
+                    }));
+                }
                 batch.push(FlowEvent::ProcessStopped {
                     pid,
                     stop_ts: timestamp,

@@ -177,10 +177,10 @@ impl RuleEngine {
     /// not prove the executable is the same application, because those
     /// directories are often user-writable; an allow reaches a new version only
     /// when the rule service moves it there after checking the publisher.
-    /// The empty check keeps the per-flow path allocation-free when the user
-    /// has no application rules at all.
+    /// Every flow comes through here, so the family is worked out only when
+    /// some application rule blocks: without one there is nothing to inherit.
     fn lookup_normalized_app_verdict(&self, app_path: &str) -> Option<Verdict> {
-        if self.app_rules_normalized.is_empty() {
+        if self.app_block_rules == 0 {
             return None;
         }
         self.app_rules_normalized
