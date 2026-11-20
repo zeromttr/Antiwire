@@ -94,6 +94,12 @@ struct recv_args {
     struct msghdr *msg;
     // Set by trace_skb_consume_udp when the read left its datagram queued.
     __u64 peeked;
+    // The datagram's sender, which trace_skb_consume_udp reads from its headers when the
+    // read takes it from an unconnected socket: the IP version of the datagram (4 or 6), or
+    // zero when it did not, and the address and port as the headers carry them.
+    __u8 sender_version;
+    __be16 sender_port;
+    __u8 sender_addr[16];
 };
 
 struct send_args {
@@ -226,9 +232,15 @@ static __always_inline int remote_unspecified(const struct wire_flow_record *rec
     return 1;
 }
 
+// The sender address the kernel copied to the reader's msg_name. Only a kernel that sets
+// msg_namelen before udp_recvmsg() returns lets the return probe read it: Linux 6.8 sets it
+// in inet_recvmsg() afterwards (net/ipv4/af_inet.c), and the system calls zero it before
+// (net/socket.c), so there the probe always sees zero. A read that asks for no address, as
+// recv(2) does, has no msg_name at all. So this only stands in for the sender the datagram
+// itself names (see overlay_sender), when trace_skb_consume_udp is not attached.
 static __always_inline void overlay_msg_name(struct wire_flow_record *record, struct msghdr *msg)
 {
-    if (!msg || !remote_unspecified(record))
+    if (!msg)
         return;
     void *name = NULL;
     BPF_CORE_READ_INTO(&name, msg, msg_name);
@@ -251,6 +263,37 @@ static __always_inline void overlay_msg_name(struct wire_flow_record *record, st
         __builtin_memcpy(record->remote_addr, buf + 8, 16);
         __builtin_memcpy(&record->remote_port, buf + 2, 2);
     }
+}
+
+// Names the remote end of a datagram an unconnected socket received: its sender, as the
+// kernel gives it to the reader in msg_name. A connected socket receives only from the end
+// its record already names.
+static __always_inline void overlay_sender(
+    struct wire_flow_record *record,
+    const struct recv_args *received
+) {
+    if (!remote_unspecified(record))
+        return;
+    if (received->sender_version == 4) {
+        if (record->family == FAMILY_V6) {
+            // An IPv6 socket gives an IPv4 sender as an IPv4-mapped address
+            // (ipv6_addr_set_v4mapped() in udpv6_recvmsg(), net/ipv6/udp.c). The rest of
+            // the address is already zero.
+            record->remote_addr[10] = 0xff;
+            record->remote_addr[11] = 0xff;
+            __builtin_memcpy(record->remote_addr + 12, received->sender_addr, 4);
+        } else {
+            __builtin_memcpy(record->remote_addr, received->sender_addr, 4);
+        }
+        record->remote_port = received->sender_port;
+        return;
+    }
+    if (received->sender_version == 6 && record->family == FAMILY_V6) {
+        __builtin_memcpy(record->remote_addr, received->sender_addr, 16);
+        record->remote_port = received->sender_port;
+        return;
+    }
+    overlay_msg_name(record, received->msg);
 }
 
 static __always_inline void capture_msg_name(struct send_args *args, struct msghdr *msg)
@@ -371,9 +414,10 @@ static __always_inline __u32 recorded_owner(
 
 // `owned_by_task` is false where the running task is not evidence of the socket's owner.
 // The record then names the owner an earlier system call on the socket recorded, if any.
+// `received` is the UDP read whose bytes the record counts, and NULL for every other record.
 static __always_inline int emit_socket(
     struct sock *sk,
-    struct msghdr *msg,
+    const struct recv_args *received,
     __u8 protocol,
     __u8 kind,
     __u64 byte_count,
@@ -395,8 +439,8 @@ static __always_inline int emit_socket(
     }
     if (!owned_by_task)
         record->pid = recorded_owner(sk, record);
-    if (protocol == PROTO_UDP)
-        overlay_msg_name(record, msg);
+    if (received)
+        overlay_sender(record, received);
     bpf_ringbuf_submit(record, 0);
     return 0;
 }
@@ -660,27 +704,73 @@ int BPF_KRETPROBE(trace_udp_recvmsg, int copied) {
     struct recv_args *args = bpf_map_lookup_elem(&UDP_RECV_ARGS, &id);
     if (!args)
         return 0;
-    struct sock *sk = args->sk;
-    struct msghdr *msg = args->msg;
-    __u64 peeked = args->peeked;
+    struct recv_args received = *args;
     bpf_map_delete_elem(&UDP_RECV_ARGS, &id);
-    if (copied <= 0 || peeked)
+    if (copied <= 0 || received.peeked)
         return 0;
-    return emit_socket(sk, msg, PROTO_UDP, FLOW_RECEIVED, copied, 1);
+    return emit_socket(received.sk, &received, PROTO_UDP, FLOW_RECEIVED, copied, 1);
+}
+
+// Reads the sender of the datagram `skb` from its IP and UDP headers into `args`: the same
+// fields udp_recvmsg() and udpv6_recvmsg() copy to msg_name, ip_hdr(skb)->saddr or
+// ipv6_hdr(skb)->saddr and udp_hdr(skb)->source (net/ipv4/udp.c, net/ipv6/udp.c). An IPv6
+// socket can receive IPv4, so the version comes from the IP header, not from the socket.
+// Leaves `args` unchanged when a header cannot be read.
+static __always_inline void read_sender(struct recv_args *args, struct sk_buff *skb)
+{
+    unsigned char *head = BPF_CORE_READ(skb, head);
+    __u16 network = BPF_CORE_READ(skb, network_header);
+    __u16 transport = BPF_CORE_READ(skb, transport_header);
+    // An offset the kernel never set is all ones (skb_transport_header_was_set() in
+    // include/linux/skbuff.h).
+    if (!head || network == (__u16)~0U || transport == (__u16)~0U)
+        return;
+    __u8 version_ihl = 0;
+    if (bpf_probe_read_kernel(&version_ihl, sizeof(version_ihl), head + network) != 0)
+        return;
+    __be16 port = 0;
+    struct udphdr *udp = (struct udphdr *)(head + transport);
+    if (bpf_core_read(&port, sizeof(port), &udp->source) != 0)
+        return;
+    __u8 version = version_ihl >> 4;
+    __u8 addr[16] = {};
+    if (version == 4) {
+        struct iphdr *ip = (struct iphdr *)(head + network);
+        if (bpf_core_read(addr, 4, &ip->saddr) != 0)
+            return;
+    } else if (version == 6) {
+        struct ipv6hdr *ip = (struct ipv6hdr *)(head + network);
+        if (bpf_core_read(addr, sizeof(addr), &ip->saddr) != 0)
+            return;
+    } else {
+        return;
+    }
+    __builtin_memcpy(args->sender_addr, addr, sizeof(addr));
+    args->sender_port = port;
+    args->sender_version = version;
 }
 
 // udp_recvmsg() and udpv6_recvmsg() end in skb_consume_udp(sk, skb, peeking ? -err : err)
-// (net/ipv4/udp.c, net/ipv6/udp.c), in the task that is reading: the length is negative
-// when the read was MSG_PEEK. The datagram is then still queued, and the read that takes
-// it is the one to count. Without this probe a peeked datagram is counted at each read.
+// (net/ipv4/udp.c, net/ipv6/udp.c), in the task that is reading, once they have copied the
+// datagram out. The length is negative when the read was MSG_PEEK: the datagram is then
+// still queued, and the read that takes it is the one to count. Otherwise the read took the
+// datagram, and for an unconnected socket its sender is read here, from the datagram itself,
+// since the return probe can rely on nothing else (see overlay_msg_name). Without this probe
+// a peeked datagram is counted at each read, and an unconnected socket's sender is named
+// only where msg_name can be read.
 SEC("kprobe/skb_consume_udp")
 int BPF_KPROBE(trace_skb_consume_udp, struct sock *sk, struct sk_buff *skb, int len) {
-    if (len >= 0)
-        return 0;
     __u64 id = bpf_get_current_pid_tgid();
     struct recv_args *args = bpf_map_lookup_elem(&UDP_RECV_ARGS, &id);
-    if (args && args->sk == sk)
+    if (!args || args->sk != sk)
+        return 0;
+    if (len < 0) {
         args->peeked = 1;
+        return 0;
+    }
+    // A connected socket's record already names its remote end (see overlay_sender).
+    if (BPF_CORE_READ(sk, __sk_common.skc_dport) == 0)
+        read_sender(args, skb);
     return 0;
 }
 

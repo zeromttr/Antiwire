@@ -46,11 +46,17 @@ the verified filter cannot be loaded and attached.
   programs were attached, has its first call counted by the length
 - paired kprobe/kretprobe `track_udp_recvmsg`/`trace_udp_recvmsg`, which emit a
   positive return value as received bytes, and kprobe `trace_skb_consume_udp` on
-  `skb_consume_udp`, which the receive functions call with a negative length for a
-  `MSG_PEEK` read: such a read is not counted, since its datagram stays queued for the
-  read that takes it. Without that probe the pair still counts, and counts a peeked
-  datagram at each read. A datagram longer than the buffer it is read into counts as the
-  bytes copied, or as its full length when the read asked for it with `MSG_TRUNC`
+  `skb_consume_udp`, which the receive functions call once they have copied a datagram
+  out, with a negative length for a `MSG_PEEK` read: such a read is not counted, since its
+  datagram stays queued for the read that takes it. For a read that takes a datagram from
+  an unconnected socket, it reads the sender from the datagram's IP and UDP headers, and
+  the received record names that sender as its remote end; an IPv6 socket names an IPv4
+  sender by its IPv4-mapped address, as the kernel does. Without that probe the pair still
+  counts, counts a peeked datagram at each read, and names the sender only from the
+  reader's `msg_name`, which the return probe can read only on a kernel that sets
+  `msg_namelen` inside `udp_recvmsg` (Linux 6.8 sets it afterwards), and only for a read
+  that asked for the address. A datagram longer than the buffer it is read into counts as
+  the bytes copied, or as its full length when the read asked for it with `MSG_TRUNC`
 - kprobe `trace_udp_destroy_sock`
 - BTF tracing programs `assign_tcp_cookie` (`tp_btf/inet_sock_set_state`),
   `assign_udp_cookie` (`fentry/udp_sendmsg`) and `assign_udp6_cookie`
