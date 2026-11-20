@@ -2371,3 +2371,146 @@ async fn a_process_created_after_the_flow_opened_is_not_its_owner() {
     let skewed = processor.resolve_app(pid, &meta(current.start_ts - 500));
     assert_eq!(skewed.app_id, current.app_id);
 }
+
+/// The regression this guards: a PID's image was remembered without the time
+/// it held from. Once a new process had been given an answer, a delayed
+/// answer to the process that had the PID before it was credited to the new
+/// one's executable, and confirmed that name for its other processes.
+#[test]
+fn a_delayed_answer_to_an_earlier_holder_of_the_pid_is_not_its_successors() {
+    const EDITOR: &str = r"C:\apps\editor\editor.exe";
+    let dir = tempdir().expect("tempdir");
+    let keystore = UnixSecureFileKeyProvider::new(dir.path().join("key"));
+    let store =
+        Arc::new(Store::open_with_keystore(dir.path().join("db.sqlite"), &keystore).expect("open"));
+    let processor = test_processor(store, TrafficStreamingHub::with_capacity(4));
+    let key = sample_key();
+    let pid = 919_101;
+    let now_ms = netmetrics_core::unix_now_ms();
+    let ran = |executable: &str, name: &str, started_at: u64, stopped_at: u64| {
+        processor.handle_event(&FlowEvent::ProcessStarted(netmetrics_core::ProcessInfo {
+            pid,
+            identity: ProcessIdentity {
+                executable: executable.to_owned(),
+                name: name.to_owned(),
+                start_ts: started_at,
+            },
+        }));
+        processor.handle_event(&FlowEvent::ProcessStopped {
+            pid,
+            stop_ts: stopped_at,
+        });
+    };
+    // An editor had the PID, then a browser, whose own answer is recorded
+    // first and has its image remembered.
+    ran(EDITOR, "editor.exe", now_ms - 20_000, now_ms - 15_000);
+    ran(BROWSER, "browser.exe", now_ms - 10_000, now_ms - 5_000);
+    let elsewhere = IpAddr::V4(Ipv4Addr::new(198, 51, 100, 7));
+    processor.record_stub_hint(
+        pid,
+        "browser.example",
+        &[elsewhere],
+        300_000,
+        now_ms - 9_000,
+    );
+    assert_eq!(
+        processor.hint_image(pid, now_ms - 9_000).executable,
+        executable_key(BROWSER)
+    );
+
+    // An answer the editor was given arrives late.
+    processor.record_stub_hint(
+        pid,
+        "editor.example",
+        &[key.remote_addr],
+        300_000,
+        now_ms - 18_000,
+    );
+    assert_eq!(
+        processor.hint_image(pid, now_ms - 18_000).executable,
+        0,
+        "the browser had not started when that answer was given"
+    );
+    assert_eq!(
+        processor.hint_image(pid, now_ms - 9_000).executable,
+        executable_key(BROWSER),
+        "and the browser is still the process remembered"
+    );
+
+    // Another browser process connects to the address the editor asked for.
+    let mut log = closed_log(&key, 4321, BROWSER, "");
+    processor.enrich_connection_log(
+        &key,
+        4321,
+        BROWSER,
+        "browser.exe",
+        NameRequest::adding(Opening::at(now_ms - 8_000)),
+        &mut log,
+    );
+    assert_eq!(
+        log.dst_domain, "editor.example (inferred)",
+        "no browser process asked for the name"
+    );
+}
+
+/// The closed half of judging evidence by when it arrived. A closed
+/// connection whose name is complete takes only a confirmation from evidence
+/// that arrives now. Evidence that arrived while the name was provisional
+/// replaces it, however late the flush that asks about it.
+#[test]
+fn evidence_that_arrived_in_time_corrects_a_closed_row_however_late_the_flush() {
+    // The row's name after evidence that arrived `arrived_after_opening_ms`
+    // after the connection opened, or only now when `None`.
+    let name_after = |arrived_after_opening_ms: Option<u64>| {
+        let dir = tempdir().expect("tempdir");
+        let keystore = UnixSecureFileKeyProvider::new(dir.path().join("key"));
+        let store = Arc::new(
+            Store::open_with_keystore(dir.path().join("db.sqlite"), &keystore).expect("open"),
+        );
+        let processor = test_processor(Arc::clone(&store), TrafficStreamingHub::with_capacity(4));
+        let key = sample_key();
+        // Opened a minute ago: nothing from before then is still on its way.
+        let opening = Opening::at(netmetrics_core::unix_now_ms() - 60_000);
+        let log = closed_log(&key, 1234, "app.exe", "guess.example (inferred)");
+        store
+            .insert_connection_logs(std::slice::from_ref(&log))
+            .expect("write the closed row");
+        processor.await_final_name(
+            1234,
+            key.remote_addr,
+            "app.exe",
+            opening,
+            Some(Naming {
+                complete_at_ms: opening.at_ms + domain_names::HINTS_ARRIVE_WITHIN_MS,
+                lasting: false,
+            }),
+            &log,
+        );
+        settle_closed(&processor);
+
+        // Two names its process held when it opened, one asked for just
+        // before: a likely guess, and not a confirmation.
+        let hint = |query: &str, answered_at_ms| {
+            processor.record_stub_hint(1234, query, &[key.remote_addr], 300_000, answered_at_ms);
+        };
+        hint("earlier.example", opening.at_ms - 60_000);
+        hint("just-asked.example", opening.at_ms - 100);
+        if let Some(after_ms) = arrived_after_opening_ms {
+            processor.note_named_at([key.remote_addr], opening.at_ms + after_ms);
+        }
+        settle_closed(&processor);
+        store
+            .query_connection_logs(&antiwire_store::ConnectionLogQuery::default())
+            .expect("query logs")
+            .logs
+            .remove(0)
+            .dst_domain
+    };
+
+    assert_eq!(
+        name_after(None),
+        "guess.example (inferred)",
+        "arriving now, long after the opening, only a confirmation would do"
+    );
+    assert_eq!(name_after(Some(3_000)), "just-asked.example (inferred)");
+}

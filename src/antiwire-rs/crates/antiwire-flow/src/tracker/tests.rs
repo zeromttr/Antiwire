@@ -1646,6 +1646,76 @@ fn a_hint_from_before_the_opening_that_arrives_after_the_close_corrects_the_row(
     );
 }
 
+/// A flow opened ten seconds ago whose only name, `opened-with.example`, is
+/// confirmed and past correcting, and a hint for `just-asked.example` stamped
+/// before the opening. Recording that hint now dates it far too late; the
+/// caller says when it really arrived. Returns the flow and when it opened.
+fn settled_flow_and_a_hint_from_before_it_opened(
+    pid: u32,
+) -> (
+    tempfile::TempDir,
+    Arc<Store>,
+    Arc<FlowProcessor>,
+    FlowTracker<StoreFlowAdapter>,
+    FlowKey,
+    u64,
+) {
+    let (dir, store, processor, tracker, first) = enriched_flow_setup(pid);
+    let opened_at = netmetrics_core::unix_now_ms() - 10_000;
+    let mut address = first;
+    address.remote_addr = IpAddr::V4(Ipv4Addr::new(198, 51, 100, 90));
+    hint_at(
+        &processor,
+        &address,
+        pid,
+        "opened-with.example",
+        opened_at - 60_000,
+    );
+    let key = flow_opened_ago(&tracker, first, pid, opened_at);
+    assert_eq!(domain_of(&store, &key), "opened-with.example");
+    hint_at(&processor, &key, pid, "just-asked.example", opened_at - 100);
+    (dir, store, processor, tracker, key, opened_at)
+}
+
+/// The regression this guards: evidence was dated when a flush noticed it,
+/// not when it arrived. A hint that arrived just inside the time a name can
+/// be corrected in, with the next flush just outside it, found the name
+/// already final.
+#[test]
+fn evidence_that_arrived_in_time_corrects_a_name_however_late_the_flush() {
+    let (_dir, store, processor, tracker, key, opened_at) =
+        settled_flow_and_a_hint_from_before_it_opened(71_093);
+    // The hint arrived three seconds after the opening, and no flush has
+    // run since.
+    processor.note_named_at([key.remote_addr], opened_at + 3_000);
+
+    tracker.flush_active_flows().expect("flush");
+    assert_eq!(domain_of(&store, &key), "just-asked.example (inferred)");
+}
+
+/// The same for a flow that closes before the next flush: nothing has told
+/// it of the evidence yet, and no later flush will find it to tell.
+#[test]
+fn evidence_that_arrived_in_time_corrects_a_flow_that_closes_before_the_flush() {
+    let pid = 71_094;
+    let (_dir, store, processor, tracker, key, opened_at) =
+        settled_flow_and_a_hint_from_before_it_opened(pid);
+    processor.note_named_at([key.remote_addr], opened_at + 3_000);
+
+    tracker.handle_event(&FlowEvent::Closed(
+        key,
+        FlowMeta {
+            pid,
+            process: None,
+            open_ts: opened_at,
+            cookie: None,
+            if_index: None,
+        },
+    ));
+    tracker.flush().expect("flush the closed flow");
+    assert_eq!(domain_of(&store, &key), "just-asked.example (inferred)");
+}
+
 /// A confirmed name that every hint from the opening has had time to
 /// contradict is final: what arrives later is not even looked at.
 #[test]
@@ -4287,10 +4357,29 @@ fn a_rejected_reattribution_does_not_block_byte_persistence() {
         "the rejected re-attribution must still be reported"
     );
 
-    let writes = writes.lock().expect("lock");
-    assert_eq!(writes.len(), 1, "byte persistence must proceed regardless");
-    assert_eq!(writes[0].bytes_sent, 100);
-    assert_eq!(writes[0].bytes_received, 200);
+    {
+        let writes = writes.lock().expect("lock");
+        assert_eq!(writes.len(), 1, "byte persistence must proceed regardless");
+        assert_eq!(writes[0].bytes_sent, 100);
+        assert_eq!(writes[0].bytes_received, 200);
+    }
+
+    // The byte write advanced the row and left its owner alone, so the
+    // correction is still owed and the next flush tries it again.
+    assert_eq!(
+        tracker
+            .active
+            .lock()
+            .get(&key)
+            .expect("flow")
+            .persisted_app_id,
+        1,
+        "a byte write must not record a rejected correction as made"
+    );
+    assert!(
+        tracker.flush_active_flows().is_err(),
+        "the rejected re-attribution must be retried"
+    );
 }
 
 /// Closing a flow that was just flushed must not re-queue the same bytes,
@@ -4829,6 +4918,117 @@ fn a_row_the_store_keeps_rejecting_is_dropped_once_failures_persist() {
     assert!(tracker.pending.lock().is_empty());
 }
 
+/// The regression this guards: two rejected rows side by side read as an
+/// outage. Both went back to the front of the queue on every flush, nothing
+/// behind them was ever written, and once the queue filled new records were
+/// shed.
+#[test]
+fn rows_the_store_keeps_rejecting_side_by_side_are_dropped_together() {
+    let writes = Arc::new(StdMutex::new(Vec::<i64>::new()));
+    let sink = Arc::clone(&writes);
+    let tracker = FlowTracker::new(move |logs: &[NewConnectionLog]| {
+        if logs.iter().any(|log| log.conn_id >= 666) {
+            return Err(store_error("constraint failed"));
+        }
+        sink.lock()
+            .expect("lock")
+            .extend(logs.iter().map(|log| log.conn_id));
+        Ok(())
+    });
+    for conn_id in [1, 666, 667, 668, 2, 3] {
+        tracker.push_pending_log(queued_log(conn_id));
+    }
+
+    for _ in 0..FLOW_FLUSH_FAILURES_BEFORE_DEGRADED - 1 {
+        let result = tracker.flush();
+        assert!(
+            result.is_err(),
+            "the whole chunk fails until isolation starts"
+        );
+        tracker.note_flush_outcome("retry", result);
+    }
+    assert!(writes.lock().expect("lock").is_empty());
+
+    let result = tracker.flush();
+    assert!(
+        result.is_ok(),
+        "isolation drops the rejected rows: {result:?}"
+    );
+    assert_eq!(*writes.lock().expect("lock"), vec![1, 2, 3]);
+    assert!(tracker.pending.lock().is_empty());
+}
+
+/// Rows rejected with none accepted after them may be an outage that began
+/// part way through, so they are kept, in order, for the next flush.
+#[test]
+fn rows_rejected_with_none_accepted_after_them_stay_queued() {
+    let writes = Arc::new(StdMutex::new(Vec::<i64>::new()));
+    let sink = Arc::clone(&writes);
+    let tracker = FlowTracker::new(move |logs: &[NewConnectionLog]| {
+        if logs.iter().any(|log| log.conn_id >= 666) {
+            return Err(store_error("constraint failed"));
+        }
+        sink.lock()
+            .expect("lock")
+            .extend(logs.iter().map(|log| log.conn_id));
+        Ok(())
+    });
+    for conn_id in [1, 666, 2, 667, 668] {
+        tracker.push_pending_log(queued_log(conn_id));
+    }
+    for _ in 0..FLOW_FLUSH_FAILURES_BEFORE_DEGRADED {
+        let result = tracker.flush();
+        assert!(result.is_err());
+        tracker.note_flush_outcome("retry", result);
+    }
+    assert_eq!(*writes.lock().expect("lock"), vec![1, 2]);
+    let pending: Vec<i64> = tracker
+        .pending
+        .lock()
+        .iter()
+        .map(|log| log.conn_id)
+        .collect();
+    assert_eq!(pending, vec![667, 668]);
+}
+
+/// A store that takes its time to say no, as a busy database does, is not
+/// asked about every queued row in turn: that would hold up every other
+/// write for as long.
+#[test]
+fn slow_rejections_end_an_isolating_flush_early() {
+    let single_row_writes = Arc::new(AtomicUsize::new(0));
+    let attempts = Arc::clone(&single_row_writes);
+    let tracker = FlowTracker::new(move |logs: &[NewConnectionLog]| {
+        if logs.len() == 1 {
+            attempts.fetch_add(1, Ordering::Relaxed);
+            std::thread::sleep(antiwire_tuning::FLOW_ISOLATION_BUDGET);
+        }
+        Err(store_error("database is locked"))
+    });
+    for conn_id in 1..=4 {
+        tracker.push_pending_log(queued_log(conn_id));
+    }
+    for _ in 0..FLOW_FLUSH_FAILURES_BEFORE_DEGRADED - 1 {
+        let result = tracker.flush();
+        tracker.note_flush_outcome("retry", result);
+    }
+    assert_eq!(single_row_writes.load(Ordering::Relaxed), 0);
+
+    assert!(tracker.flush().is_err());
+    assert_eq!(
+        single_row_writes.load(Ordering::Relaxed),
+        1,
+        "one slow rejection uses up the time a flush has for them"
+    );
+    let pending: Vec<i64> = tracker
+        .pending
+        .lock()
+        .iter()
+        .map(|log| log.conn_id)
+        .collect();
+    assert_eq!(pending, vec![1, 2, 3, 4]);
+}
+
 /// When every row is rejected, isolation keeps them all: that is an outage.
 #[test]
 fn isolation_keeps_every_row_when_the_store_rejects_them_all() {
@@ -4868,6 +5068,21 @@ impl crate::store::FlowStore for PoisonedAttributionStore {
     }
 }
 
+/// A queued move of connection `conn_id` to application `to_app_id`.
+fn queued_attribution(conn_id: i64, to_app_id: i32) -> ConnectionLogAttribution {
+    ConnectionLogAttribution {
+        from_app_id: 1,
+        to_app_id,
+        protocol: "TCP".to_owned(),
+        src_ip: "10.0.0.2".to_owned(),
+        dst_ip: "203.0.113.9".to_owned(),
+        dst_port: 443,
+        conn_id,
+        conn_pid: 7,
+        conn_start: OffsetDateTime::now_utc(),
+    }
+}
+
 /// One re-attribution the store always rejects must not hold back the queue.
 #[test]
 fn a_reattribution_the_store_keeps_rejecting_is_dropped_once_failures_persist() {
@@ -4876,17 +5091,7 @@ fn a_reattribution_the_store_keeps_rejecting_is_dropped_once_failures_persist() 
         applied: Arc::clone(&applied),
     });
     for conn_id in [666, 1, 2] {
-        tracker.queue_attribution(ConnectionLogAttribution {
-            from_app_id: 1,
-            to_app_id: 2,
-            protocol: "TCP".to_owned(),
-            src_ip: "10.0.0.2".to_owned(),
-            dst_ip: "203.0.113.9".to_owned(),
-            dst_port: 443,
-            conn_id,
-            conn_pid: 7,
-            conn_start: OffsetDateTime::now_utc(),
-        });
+        tracker.queue_attribution(queued_attribution(conn_id, 2));
     }
 
     for _ in 0..FLOW_FLUSH_FAILURES_BEFORE_DEGRADED - 1 {
@@ -4906,4 +5111,47 @@ fn a_reattribution_the_store_keeps_rejecting_is_dropped_once_failures_persist() 
     );
     assert_eq!(*applied.lock().expect("lock"), vec![1, 2]);
     assert!(tracker.pending_attributions.lock().is_empty());
+}
+
+/// The regression this guards: as with connection logs, two rejected entries
+/// side by side stopped the pass, so neither was ever dropped and nothing
+/// behind them was applied.
+#[test]
+fn reattributions_the_store_keeps_rejecting_side_by_side_are_dropped_together() {
+    let applied = Arc::new(StdMutex::new(Vec::new()));
+    let tracker = FlowTracker::new(PoisonedAttributionStore {
+        applied: Arc::clone(&applied),
+    });
+    // Two moves of the rejected connection, then two the store takes, then
+    // one more it rejects with nothing after it.
+    for (conn_id, to_app_id) in [(666, 2), (666, 3), (1, 2), (2, 2), (666, 4)] {
+        tracker.queue_attribution(queued_attribution(conn_id, to_app_id));
+    }
+
+    for _ in 0..FLOW_FLUSH_FAILURES_BEFORE_DEGRADED - 1 {
+        let result = tracker.flush();
+        assert!(
+            result.is_err(),
+            "the head entry blocks until isolation starts"
+        );
+        tracker.note_flush_outcome("retry", result);
+    }
+    assert!(applied.lock().expect("lock").is_empty());
+
+    assert!(
+        tracker.flush().is_err(),
+        "the entry rejected last is still owed"
+    );
+    assert_eq!(*applied.lock().expect("lock"), vec![1, 2]);
+    let pending: Vec<i32> = tracker
+        .pending_attributions
+        .lock()
+        .iter()
+        .map(|attribution| attribution.to_app_id)
+        .collect();
+    assert_eq!(
+        pending,
+        vec![4],
+        "an entry rejected with none accepted after it may be an outage"
+    );
 }

@@ -7,7 +7,10 @@ use super::{ActiveFlow, AttributionVersion};
 use crate::store::FlowStore;
 use crate::Result;
 use antiwire_store::{ConnectionLogAttribution, NewConnectionLog};
-use antiwire_tuning::{FLOW_FLUSH_FAILURES_BEFORE_DEGRADED, UNKNOWN_SOCKET_ATTRIBUTION_DELAY};
+use antiwire_tuning::{
+    FLOW_FLUSH_FAILURES_BEFORE_DEGRADED, FLOW_ISOLATION_BUDGET, FLOW_ISOLATION_MAX_REJECTIONS,
+    UNKNOWN_SOCKET_ATTRIBUTION_DELAY,
+};
 use netmetrics_core::{FlowKey, Protocol};
 use std::sync::atomic::{AtomicU32, Ordering};
 use std::time::Instant;
@@ -73,35 +76,49 @@ impl<S: FlowStore> FlowTracker<S> {
 
     /// Writes `rows` one transaction each, in order.
     ///
-    /// A rejected row is dropped once the row after it is accepted, since the
-    /// store is evidently writable. Two rejections in a row read as an outage
-    /// rather than bad rows, so the rest is handed back unwritten.
+    /// A rejected row is dropped once a row after it is accepted: the store
+    /// is evidently writable, so the fault is the row's. Any number of rows
+    /// side by side can be dropped that way. Rows rejected with none accepted
+    /// after them are handed back unwritten with the rows not tried, because
+    /// that is what an outage looks like too, and so are rejections that use
+    /// up the pass's time (see [`isolation_spent`]).
     fn insert_rows_isolating(
         &self,
-        mut rows: Vec<NewConnectionLog>,
+        rows: Vec<NewConnectionLog>,
     ) -> std::result::Result<(), (Vec<NewConnectionLog>, crate::FlowError)> {
-        let mut rejected: Option<(usize, crate::FlowError)> = None;
-        for index in 0..rows.len() {
-            match self.store.insert_batch(std::slice::from_ref(&rows[index])) {
+        let started = Instant::now();
+        let mut rows = rows.into_iter();
+        // The rows rejected since the last one accepted, and the first of
+        // their errors.
+        let mut rejected: Vec<NewConnectionLog> = Vec::new();
+        let mut error: Option<crate::FlowError> = None;
+        for row in rows.by_ref() {
+            match self.store.insert_batch(std::slice::from_ref(&row)) {
                 Ok(()) => {
-                    if let Some((bad, error)) = rejected.take() {
-                        tracing::warn!(
-                            error = %error,
-                            conn_id = rows[bad].conn_id,
-                            "dropping a connection log the store keeps rejecting"
-                        );
+                    if let Some(error) = error.take() {
+                        for bad in rejected.drain(..) {
+                            tracing::warn!(
+                                error = %error,
+                                conn_id = bad.conn_id,
+                                "dropping a connection log the store keeps rejecting"
+                            );
+                        }
                     }
                 }
-                Err(error) => {
-                    if let Some((bad, _)) = rejected {
-                        return Err((rows.split_off(bad), error));
+                Err(rejection) => {
+                    rejected.push(row);
+                    error.get_or_insert(rejection);
+                    if isolation_spent(started, rejected.len()) {
+                        break;
                     }
-                    rejected = Some((index, error));
                 }
             }
         }
-        match rejected {
-            Some((bad, error)) => Err((rows.split_off(bad), error)),
+        match error {
+            Some(error) => {
+                rejected.extend(rows);
+                Err((rejected, error))
+            }
             None => Ok(()),
         }
     }
@@ -279,10 +296,9 @@ impl<S: FlowStore> FlowTracker<S> {
             let named = processor.take_newly_named();
             processor.settle_closed_names(&named);
             if !named.is_empty() {
-                let now_ms = netmetrics_core::unix_now_ms();
                 for (key, flow) in self.active.lock().iter_mut() {
-                    if named.names(key.remote_addr) {
-                        flow.name_lookup.note_evidence(now_ms);
+                    if let Some(arrived_ms) = named.arrived_at(key.remote_addr) {
+                        flow.name_lookup.note_evidence(arrived_ms);
                     }
                 }
             }
@@ -399,8 +415,13 @@ impl<S: FlowStore> FlowTracker<S> {
                         }
                         flow.persisted_sent = sent;
                         flow.persisted_received = received;
-                        flow.db_row_created = true;
-                        flow.persisted_app_id = app_id;
+                        // Only the write that creates a row gives it an
+                        // owner. A later one leaves the owner alone, so a
+                        // correction the store has not taken is still owed.
+                        if !flow.db_row_created {
+                            flow.db_row_created = true;
+                            flow.persisted_app_id = app_id;
+                        }
                         flow.persisted_domain = domain;
                     }
                 }
@@ -426,7 +447,13 @@ impl<S: FlowStore> FlowTracker<S> {
 
         if let Some(processor) = &self.processor {
             // The last log for the row: look once more unless the name is final.
-            let request = flow.name_lookup.closing_request(
+            // Evidence that arrived since the last flush has been noticed by
+            // nothing yet, and no later flush will find this flow to tell.
+            let mut name_lookup = flow.name_lookup.clone();
+            if let Some(arrived_ms) = processor.evidence_not_yet_taken(key.remote_addr) {
+                name_lookup.note_evidence(arrived_ms);
+            }
+            let request = name_lookup.closing_request(
                 flow.pid,
                 flow.app_id,
                 opening(flow),
@@ -489,40 +516,55 @@ impl<S: FlowStore> FlowTracker<S> {
     /// Anything queued during the pass waits for the next flush.
     ///
     /// Once failures have lasted long enough to report an outage, a rejected entry
-    /// is skipped and the next one tried, as connection logs are: if that one is
-    /// accepted, the rejected entry is dropped instead of blocking the queue.
+    /// is skipped and the next one tried, as connection logs are: once one is
+    /// accepted, the entries rejected before it are dropped instead of blocking
+    /// the queue. Entries rejected with none accepted after them stay queued.
     fn flush_attributions(&self) -> Result<bool> {
         let isolate = self.queue_flush_failures.load(Ordering::Relaxed) + 1
             >= FLOW_FLUSH_FAILURES_BEFORE_DEGRADED;
+        let started = Instant::now();
         let mut flushed = false;
-        let mut rejected: Option<(ConnectionLogAttribution, crate::FlowError)> = None;
+        // The entries rejected since the last one accepted, which are the
+        // front of the queue, and the first of their errors.
+        let mut rejected: Vec<ConnectionLogAttribution> = Vec::new();
+        let mut error: Option<crate::FlowError> = None;
         let limit = self.pending_attributions.lock().len();
         for _ in 0..limit {
-            let index = usize::from(rejected.is_some());
-            let Some(attribution) = self.pending_attributions.lock().get(index).cloned() else {
+            let next = self
+                .pending_attributions
+                .lock()
+                .get(rejected.len())
+                .cloned();
+            let Some(attribution) = next else {
                 break;
             };
             match self.store.reattribute(&attribution) {
                 Ok(()) => {
                     flushed = true;
                     self.remove_pending_attribution(&attribution);
-                    if let Some((bad, error)) = rejected.take() {
-                        tracing::warn!(
-                            error = %error,
-                            conn_id = bad.conn_id,
-                            "dropping a re-attribution the store keeps rejecting"
-                        );
-                        self.remove_pending_attribution(&bad);
+                    if let Some(error) = error.take() {
+                        for bad in rejected.drain(..) {
+                            tracing::warn!(
+                                error = %error,
+                                conn_id = bad.conn_id,
+                                "dropping a re-attribution the store keeps rejecting"
+                            );
+                            self.remove_pending_attribution(&bad);
+                        }
                     }
                 }
-                Err(error) if isolate && rejected.is_none() => {
-                    rejected = Some((attribution, error));
+                Err(rejection) if isolate => {
+                    rejected.push(attribution);
+                    error.get_or_insert(rejection);
+                    if isolation_spent(started, rejected.len()) {
+                        break;
+                    }
                 }
-                Err(error) => return Err(error),
+                Err(rejection) => return Err(rejection),
             }
         }
-        match rejected {
-            Some((_, error)) => Err(error),
+        match error {
+            Some(error) => Err(error),
             None => Ok(flushed),
         }
     }
@@ -627,6 +669,14 @@ fn attribution_update(flow: &ActiveFlow) -> Option<ConnectionLogAttribution> {
             conn_pid: pid_to_i32(flow.open_pid),
             conn_start: flow.opened_at,
         })
+}
+
+/// Whether a pass writing a failing queue an entry at a time, begun at
+/// `started`, has seen enough of the store saying no: `rejections` in a row,
+/// or rejections slow enough to use up the pass's time. Either reads as an
+/// outage, which the next flush tries again.
+fn isolation_spent(started: Instant, rejections: usize) -> bool {
+    rejections >= FLOW_ISOLATION_MAX_REJECTIONS || started.elapsed() >= FLOW_ISOLATION_BUDGET
 }
 
 /// Maps a tracker session id onto the store's `conn_id` column.
