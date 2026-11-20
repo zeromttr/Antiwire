@@ -321,6 +321,20 @@ pub struct DaemonSetting {
     /// Lets iCloud Private Relay stay on. See [`Self::uses_packet_rules`].
     #[serde(default)]
     pub private_relay_compatibility: bool,
+    /// Lets the daemon use `WinDivert` on Windows. See [`Self::dns_bypass`].
+    ///
+    /// Off unless the user turns it on: `WinDivert` is a third-party kernel driver, and
+    /// anti-cheat software can treat it as an integrity violation. While it is off the
+    /// driver is neither downloaded nor loaded.
+    #[serde(default)]
+    pub windivert_enabled: bool,
+    /// On Windows without `WinDivert`, blocks DNS sent past the resolver. See
+    /// [`Self::dns_bypass`].
+    ///
+    /// Off unless the user turns it on: an application that only asks a DNS server of its
+    /// own choosing can then resolve nothing, and so reach nothing.
+    #[serde(default)]
+    pub dns_bypass_blocking_enabled: bool,
     #[serde(default)]
     pub network_mapping_auto_enabled: bool,
     #[serde(default = "default_mapping_interval")]
@@ -469,6 +483,39 @@ impl DaemonSetting {
     pub fn uses_packet_rules(&self) -> bool {
         !self.private_relay_compatibility
     }
+
+    /// What these settings ask to become of DNS sent past the resolver, straight to a
+    /// server of the application's own choosing.
+    ///
+    /// Catching it takes a packet rule, so it needs [`Self::uses_packet_rules`]. Windows
+    /// can send it to the resolver only through `WinDivert`, a kernel driver. Without
+    /// `windivert_enabled` the most it can do is refuse it, which breaks an application
+    /// that has no other way to resolve, so it does that only with
+    /// `dns_bypass_blocking_enabled`. Whatever this says, the resolver answers every lookup
+    /// made through the system's DNS settings.
+    #[must_use]
+    pub fn dns_bypass(&self) -> DnsBypass {
+        if !self.uses_packet_rules() {
+            DnsBypass::Open
+        } else if !cfg!(windows) || self.windivert_enabled {
+            DnsBypass::Redirected
+        } else if self.dns_bypass_blocking_enabled {
+            DnsBypass::Refused
+        } else {
+            DnsBypass::Open
+        }
+    }
+}
+
+/// What becomes of DNS sent past the resolver. See [`DaemonSetting::dns_bypass`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum DnsBypass {
+    /// Nothing: it reaches the server it was sent to, unfiltered. The user's choice.
+    Open,
+    /// It is sent to the resolver, which answers it like any other lookup.
+    Redirected,
+    /// It is refused, so the application fails to resolve that way.
+    Refused,
 }
 
 impl Default for DaemonSetting {
@@ -548,6 +595,8 @@ impl Default for DaemonSetting {
             dns_new_domain_max_age_days: default_new_domain_max_age_days(),
             update_channel: default_update_channel(),
             private_relay_compatibility: false,
+            windivert_enabled: false,
+            dns_bypass_blocking_enabled: false,
             network_mapping_auto_enabled: false,
             network_mapping_interval_minutes: default_mapping_interval(),
             network_mapping_baseline_established: false,

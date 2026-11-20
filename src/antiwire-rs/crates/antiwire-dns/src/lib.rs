@@ -16,6 +16,7 @@ mod network_watch;
 mod new_domain;
 mod owner_worker;
 mod policy_adapter;
+mod port53_divert;
 mod port_mapper;
 mod provider_block;
 mod query_engine;
@@ -61,6 +62,25 @@ pub use settings::{check_upstream_settings, is_known_dns_protocol};
 /// Removes a port-53 divert left behind by a process that did not shut down.
 pub fn clear_port53_divert() {
     netmetrics::dns_divert::clear_leftover();
+}
+
+/// Allows or forbids `WinDivert` for this process, as `settings` say. It is forbidden
+/// until this allows it, and Windows is the only place it does anything.
+///
+/// Both users of the driver follow it: the flow collector's connect-time owners, at once,
+/// and the port 53 divert, when the resolver next starts: with the driver it sends DNS
+/// that bypasses the resolver back to it, and without it Windows can only refuse that DNS,
+/// which it does when the settings ask. So call this before either starts, and before
+/// [`apply_dns_settings_change`] when the setting changes.
+pub fn apply_windivert_setting(settings: &antiwire_store::DaemonSetting) {
+    netmetrics::windivert::set_enabled(settings.windivert_enabled);
+}
+
+/// Whether this build can use `WinDivert`, so whether the setting that allows it is worth
+/// offering: only the Windows build for `x86_64` can.
+#[must_use]
+pub const fn windivert_supported() -> bool {
+    netmetrics::windivert::is_supported()
 }
 
 pub use upstream::{doh_block_targets, DOH_PORT};

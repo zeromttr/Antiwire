@@ -180,6 +180,12 @@ async fn apply(
         }
     }
 
+    // Before the resolver restarts: it installs the port 53 divert only once this allows
+    // the driver, and the flow collector follows it on its own.
+    if previous.windivert_enabled != updated.windivert_enabled {
+        antiwire_dns::apply_windivert_setting(&updated);
+    }
+
     let doh_changed = doh_blocking_changed(&previous, &updated);
     if doh_changed && doh_block_wanted(&updated) {
         // Spare both resolvers until the switch below completes, so neither

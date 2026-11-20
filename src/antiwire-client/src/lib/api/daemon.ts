@@ -291,6 +291,12 @@ export interface SettingsDto {
   persistRulesOffline: boolean;
   /** Experimental, offered on macOS only: the daemon loads no packet filter rules. */
   privateRelayCompatibility: boolean;
+  /** Offered only where `windivertSupported`: the daemon may download and load the WinDivert driver. */
+  windivertEnabled: boolean;
+  /** Read-only: the daemon can use WinDivert, which only its Windows x64 build can. */
+  windivertSupported: boolean;
+  /** Offered on Windows only: block DNS that apps send past the resolver. WinDivert redirects it instead. */
+  dnsBypassBlockingEnabled: boolean;
   geoIpEnabled: boolean;
   logDaemonConnections: boolean;
   powerUserSettingsEnabled: boolean;

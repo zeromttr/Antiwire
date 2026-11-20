@@ -24,7 +24,13 @@ pub use query::{DeletionFence, Resident, ResidentDecision, SeenSubdomain};
 /// `(version, include_str!(..))` pair here. Never edit, reorder or remove an
 /// entry, the baseline included: databases stamp the version after each step
 /// applies, so a rewrite silently diverges from the layouts already on disk.
-const MIGRATIONS: &[(i64, &str)] = &[(1, include_str!("../migrations/001_initial.sql"))];
+const MIGRATIONS: &[(i64, &str)] = &[
+    (1, include_str!("../migrations/001_initial.sql")),
+    (
+        2,
+        include_str!("../migrations/002_windivert_and_dns_bypass_blocking.sql"),
+    ),
+];
 
 /// Version a fresh database ends up at once every migration has applied.
 pub(crate) fn latest_migration_version() -> i64 {

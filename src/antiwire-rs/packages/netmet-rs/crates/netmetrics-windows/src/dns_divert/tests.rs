@@ -536,6 +536,7 @@ fn live_bypassed_udp_query_reaches_stub_and_reply_keeps_original_resolver() {
         .lock()
         .unwrap_or_else(PoisonError::into_inner);
 
+    let _windivert = crate::windivert_opt_in::testing::allowed();
     let stub = UdpSocket::bind("127.0.0.1:53").expect("bind test DNS stub");
     stub.set_read_timeout(Some(Duration::from_secs(5)))
         .expect("set stub timeout");
@@ -611,6 +612,7 @@ fn live_bypassed_tcp_query_reaches_stub_and_reply_keeps_original_resolver() {
         .lock()
         .unwrap_or_else(PoisonError::into_inner);
 
+    let _windivert = crate::windivert_opt_in::testing::allowed();
     let stub = TcpListener::bind("127.0.0.1:53").expect("bind test DNS stub");
     stub.set_nonblocking(true).expect("set accept timeout");
     let _divert = install(Box::new(|_| {})).expect("install DNS divert");

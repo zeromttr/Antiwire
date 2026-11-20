@@ -10,6 +10,8 @@
 //! sends. A supervisor thread closes the handle as soon as the reader stops,
 //! then reopens it with backoff.
 
+pub(super) use crate::dns_bypass::DNS_PORT;
+use crate::dns_bypass::ENCRYPTED_DNS_PORT;
 use crate::windivert_handle::{Divert, DivertAddress};
 use nat::NatTable;
 use netmetrics_core::{DivertEvent, DivertReport, LocalEndpoint, Protocol};
@@ -28,8 +30,6 @@ mod tests;
 const LAYER_NETWORK: u32 = 0;
 pub(super) const OUTBOUND_BIT: u32 = 1 << 17;
 pub(super) const LOOPBACK_BIT: u32 = 1 << 18;
-pub(super) const DNS_PORT: u16 = 53;
-const ENCRYPTED_DNS_PORT: u16 = 853;
 /// How long a packet waits for the FLOW listener to name its socket's owner
 /// before the socket table is read instead.
 pub(super) const FLOW_OWNER_WAIT: Duration = Duration::from_millis(10);
@@ -135,7 +135,8 @@ impl Supervisor {
 ///
 /// # Errors
 ///
-/// Returns an error when the official package cannot be loaded or `WinDivertOpen` fails.
+/// Returns an error when `WinDivert` is turned off ([`crate::set_windivert_enabled`]),
+/// the official package cannot be loaded, or `WinDivertOpen` fails.
 pub fn install(report: DivertReport) -> Result<ActiveDivert, String> {
     let mut active = active_nat().lock().unwrap_or_else(PoisonError::into_inner);
     if active.is_some() {

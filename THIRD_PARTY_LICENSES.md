@@ -31,7 +31,7 @@ These are not compiled into Antiwire. They are downloaded at runtime or installe
 
 | Component | Used for | How it is obtained | License |
 | --- | --- | --- | --- |
-| [WinDivert](https://reqrypt.org/windivert.html) 2.2.2 | Windows flow ownership and DNS diversion | Official signed package downloaded from reqrypt.org and loaded dynamically; not statically linked | LGPL-3.0 |
+| [WinDivert](https://reqrypt.org/windivert.html) 2.2.2 | Windows flow ownership and DNS diversion, when the user turns it on | Official signed package downloaded from reqrypt.org and loaded dynamically, only once the user turns WinDivert on; not statically linked | LGPL-3.0 |
 | [Npcap](https://npcap.com/) | Windows packet capture | Installed by the user | [Npcap License](https://github.com/nmap/npcap/blob/master/LICENSE) |
 | [libpcap](https://www.tcpdump.org/) | Linux and macOS packet capture | System library | BSD-3-Clause |
 | WebView2 Loader | Windows desktop UI | Microsoft redistributable shipped by the installer | [Microsoft WebView2 terms](https://developer.microsoft.com/microsoft-edge/webview2/) |

@@ -288,6 +288,7 @@ fn live_loopback_flows_record_their_owner_before_the_server_reads() {
         })
         .collect();
 
+    let _windivert = crate::windivert_opt_in::testing::allowed();
     let cache = Arc::new(Mutex::new(FlowOwnerCache::default()));
     let (tx, _rx) = std::sync::mpsc::sync_channel(1_024);
     let sink = EventSink::new(tx, Arc::new(std::sync::atomic::AtomicU64::new(0)));
@@ -369,6 +370,7 @@ fn live_loopback_flows_record_their_owner_before_the_server_reads() {
 #[test]
 #[ignore = "downloads WinDivert from reqrypt.org and opens a kernel driver; requires elevation"]
 fn official_package_records_this_process_on_connect() {
+    let _windivert = crate::windivert_opt_in::testing::allowed();
     let cache = Arc::new(Mutex::new(FlowOwnerCache::default()));
     let (tx, _rx) = std::sync::mpsc::sync_channel(8);
     let sink = EventSink::new(tx, Arc::new(std::sync::atomic::AtomicU64::new(0)));
