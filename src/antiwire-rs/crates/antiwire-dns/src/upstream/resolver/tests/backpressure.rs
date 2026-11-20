@@ -320,3 +320,203 @@ async fn saturated_tier_does_not_failure_hold_names() {
         MAX_IN_FLIGHT_PER_TIER + 4
     );
 }
+
+/// A primary that takes connections and never answers, as a blocked port 853
+/// does, with a fallback that answers, behind one admission limit.
+fn blocked_primary_with_fallback(
+    primary: &HeldTcp,
+    fallback: &SwitchableUdp,
+) -> Arc<UpstreamAdmission> {
+    let upstream = tiers_of(&[
+        (DnsProtocol::Tcp, &[primary.addr]),
+        (DnsProtocol::Udp, &[fallback.addr]),
+    ]);
+    Arc::new(UpstreamAdmission::new(Arc::new(upstream)))
+}
+
+/// Sends `count` queries at once with the whole client deadline, and returns
+/// their results once every caller has its answer.
+async fn burst(
+    admission: &Arc<UpstreamAdmission>,
+    label: &str,
+    count: usize,
+) -> Vec<std::result::Result<UpstreamAnswer, NetError>> {
+    let mut requests = JoinSet::new();
+    for id in 0..count {
+        let admission = Arc::clone(admission);
+        let name = format!("{label}{id}.example.");
+        requests.spawn(async move {
+            admission
+                .exchange(
+                    &query(u16::try_from(id).expect("id"), &name),
+                    AdmissionClass::Foreground,
+                    Some(antiwire_tuning::DNS_QUERY_DEADLINE),
+                )
+                .await
+        });
+    }
+    let mut results = Vec::with_capacity(count);
+    while let Some(result) = requests.join_next().await {
+        results.push(result.expect("exchange task"));
+    }
+    results
+}
+
+fn foreground_capacity() -> usize {
+    usize::try_from(antiwire_tuning::DNS_MAX_CONCURRENT_UPSTREAM).expect("capacity")
+}
+
+/// The regression this guards: with port 853 blocked, each query's attempt on
+/// the primary waited two seconds behind the one opening its connection. It
+/// held the query's admission all that time, though the fallback had answered
+/// long before, so a few hundred misses used up the limit and the rest were
+/// refused with a working fallback.
+#[tokio::test]
+async fn an_attempt_behind_a_connecting_tier_gives_up_its_admission_once_answered() {
+    let primary = HeldTcp::start().await;
+    primary.answering.send(false).expect("hold replies");
+    let fallback = SwitchableUdp::start(true).await;
+    let admission = blocked_primary_with_fallback(&primary, &fallback);
+
+    let waiting = 64;
+    for result in burst(&admission, "blocked", waiting + 1).await {
+        result.expect("the fallback answers");
+    }
+
+    // One attempt was sent to the primary and is still waiting on it. The
+    // others never reached it, and their queries are answered.
+    let released = wait_until(Duration::from_secs(1), || {
+        admission.foreground_available() >= foreground_capacity() - 1
+    })
+    .await;
+    assert!(
+        released,
+        "{} admissions still held by queries that were answered",
+        foreground_capacity() - admission.foreground_available()
+    );
+}
+
+/// The regression this guards: while a blocked primary was still on its first
+/// connection, every query gave it the hedge delay, though its attempt only
+/// queued behind that connection and was never sent.
+#[tokio::test]
+async fn a_query_behind_a_connecting_tier_is_not_delayed_for_it() {
+    let primary = HeldTcp::start().await;
+    primary.answering.send(false).expect("hold replies");
+    let fallback = SwitchableUdp::start(true).await;
+    let admission = blocked_primary_with_fallback(&primary, &fallback);
+
+    // The first query's attempt opens the connection and stays on it.
+    burst(&admission, "first", 1).await;
+    assert_eq!(primary.connections.load(Ordering::SeqCst), 1);
+
+    // The fastest of a few, so a busy runner cannot fail this by stalling one.
+    let mut fastest = Duration::MAX;
+    for id in 0..5 {
+        let started = Instant::now();
+        burst(&admission, &format!("later{id}-"), 1)
+            .await
+            .pop()
+            .expect("one result")
+            .expect("the fallback answers");
+        fastest = fastest.min(started.elapsed());
+    }
+    assert!(
+        fastest < antiwire_tuning::DOH_HEDGE_DELAY,
+        "the fastest later query took {fastest:?}"
+    );
+}
+
+/// The regression this guards: with a working primary gone quiet, attempts
+/// queued for one of its slots held their queries' admission until the slot
+/// wait ran out, long after the fallback had answered.
+#[tokio::test]
+async fn an_attempt_queued_for_a_slot_gives_up_its_admission_once_answered() {
+    let primary = HeldTcp::start().await;
+    let fallback = SwitchableUdp::start(true).await;
+    let admission = blocked_primary_with_fallback(&primary, &fallback);
+    burst(&admission, "warm", 1)
+        .await
+        .pop()
+        .expect("one result")
+        .expect("warm the connection");
+    primary.answering.send(false).expect("hold replies");
+
+    let queued = 64;
+    for result in burst(&admission, "quiet", MAX_IN_FLIGHT_PER_TIER + queued).await {
+        result.expect("the fallback answers");
+    }
+
+    // The attempts that were sent are still upstream work. The queued ones
+    // are not.
+    let released = wait_until(Duration::from_millis(600), || {
+        admission.foreground_available() >= foreground_capacity() - MAX_IN_FLIGHT_PER_TIER
+    })
+    .await;
+    assert!(
+        released,
+        "{} admissions still held, {} of them by attempts that were sent",
+        foreground_capacity() - admission.foreground_available(),
+        MAX_IN_FLIGHT_PER_TIER
+    );
+    assert_eq!(
+        primary.received.load(Ordering::SeqCst) - 1,
+        MAX_IN_FLIGHT_PER_TIER,
+        "a queued attempt whose query is answered is not sent"
+    );
+}
+
+/// The regression this guards: attempts queued for a slot were sent as the
+/// slots freed, though the failures that freed them had just taken the tier
+/// down. A down tier is asked by its one recovery attempt and nothing else.
+#[tokio::test]
+async fn an_attempt_queued_while_its_tier_goes_down_is_not_sent() {
+    let server = HeldTcp::start().await;
+    let upstream = Arc::new(
+        build_upstream_dns(DnsProtocol::Tcp, &[server.addr.to_string()]).expect("upstream"),
+    );
+    let admission = Arc::new(UpstreamAdmission::new(Arc::clone(&upstream)));
+    burst(&admission, "warm", 1)
+        .await
+        .pop()
+        .expect("one result")
+        .expect("warm the connection");
+    server.answering.send(false).expect("hold replies");
+
+    // The first burst fills the tier's slots and fails at the transport's
+    // timeout. The second arrives late enough to still be queued then.
+    let first = {
+        let admission = Arc::clone(&admission);
+        tokio::spawn(async move { burst(&admission, "sent", MAX_IN_FLIGHT_PER_TIER).await })
+    };
+    tokio::time::sleep(DNS_TRANSPORT_TIMEOUT * 3 / 4).await;
+    let second = {
+        let admission = Arc::clone(&admission);
+        tokio::spawn(async move { burst(&admission, "queued", MAX_IN_FLIGHT_PER_TIER).await })
+    };
+    tokio::time::sleep(DNS_TRANSPORT_TIMEOUT / 2).await;
+    let sent_by_the_first = server.received.load(Ordering::SeqCst);
+
+    first.await.expect("first burst");
+    let refused = second
+        .await
+        .expect("second burst")
+        .into_iter()
+        .filter(|result| {
+            result
+                .as_ref()
+                .is_err_and(crate::upstream::query_never_sent)
+        })
+        .count();
+    assert!(
+        upstream.endpoints_degraded(),
+        "the first burst took it down"
+    );
+    // A slot can free before the failure that takes the tier down is counted,
+    // so a few of the second burst may be sent first.
+    let sent_after = server.received.load(Ordering::SeqCst) - sent_by_the_first;
+    assert!(
+        sent_after < MAX_IN_FLIGHT_PER_TIER / 2 && refused > MAX_IN_FLIGHT_PER_TIER / 2,
+        "{sent_after} queries sent after the first burst, {refused} refused unsent"
+    );
+}

@@ -98,11 +98,10 @@ impl DnsInterceptor {
         if let Some(stub) = self.stub.as_ref() {
             let stub = Arc::clone(stub);
             let store = Arc::clone(store);
-            tokio::task::spawn_blocking(move || stub.update_ai_config(&store, runtime))
-                .await
-                .map_err(|error| {
-                    DnsError::Runtime(format!("AI settings publish task failed: {error}"))
-                })?;
+            blocking("AI settings publish", move || {
+                stub.update_ai_config(&store, runtime);
+            })
+            .await?;
         }
         Ok(())
     }
@@ -111,7 +110,7 @@ impl DnsInterceptor {
         self.listener.as_ref().is_some_and(DnsListener::is_running)
     }
 
-    pub(crate) async fn start(&mut self, store: &Store) -> Result<()> {
+    pub(crate) async fn start(&mut self) -> Result<()> {
         self.redirect.stop_restoring().await;
         if self.is_running() {
             return Ok(());
@@ -120,12 +119,12 @@ impl DnsInterceptor {
             // The previous stack died. Its redirect stays in place, so adapters
             // keep pointing at loopback for the stack started below, which
             // recovers the persisted snapshot rather than capturing loopback.
-            self.disable_dns_divert();
+            self.disable_dns_divert().await;
             self.shutdown_stack().await;
         }
 
-        let settings = store.get_settings()?;
-        match self.build_engine(&settings) {
+        let settings = self.settings().await?;
+        match self.build_engine(&settings).await {
             Ok(stub) => self.serve(stub, settings.uses_packet_rules()).await,
             Err(error) => {
                 self.recover_after_failed_start().await;
@@ -148,38 +147,55 @@ impl DnsInterceptor {
     /// never lets queries reach the network unfiltered, and adapter DNS is not
     /// rewritten twice. The new engine is built before the old stack stops: a
     /// configuration it rejects leaves the running resolver serving.
-    pub(crate) async fn restart(&mut self, store: &Store) -> Result<()> {
+    pub(crate) async fn restart(&mut self) -> Result<()> {
         self.redirect.stop_restoring().await;
         if !self.is_running() {
-            return self.start(store).await;
+            return self.start().await;
         }
-        let settings = store.get_settings()?;
-        let stub = self.build_engine(&settings)?;
-        self.disable_dns_divert();
+        let settings = self.settings().await?;
+        let stub = self.build_engine(&settings).await?;
+        self.disable_dns_divert().await;
         self.shutdown_stack().await;
         self.serve(stub, settings.uses_packet_rules()).await
     }
 
-    /// Builds the query engine for `settings`.
-    fn build_engine(&self, settings: &DaemonSetting) -> Result<Arc<QueryEngine<EnginePolicy>>> {
+    /// The saved settings, read on a blocking thread: SQLite is synchronous.
+    async fn settings(&self) -> Result<DaemonSetting> {
+        let store = Arc::clone(&self.dependencies.store);
+        Ok(blocking("settings read", move || store.get_settings()).await??)
+    }
+
+    /// Builds the query engine for `settings`, on a blocking thread: the
+    /// engine loads the OS trust store, and reads the store to build the AI
+    /// client. A restart builds it while the resolver it replaces still serves.
+    async fn build_engine(
+        &self,
+        settings: &DaemonSetting,
+    ) -> Result<Arc<QueryEngine<EnginePolicy>>> {
         let config = dns_config_from_settings(settings);
-        let stub = QueryEngine::try_new(
-            EnginePolicy::from_engine_lock(&self.dependencies.engine),
-            &config,
-            EngineServices {
-                store: Some(Arc::clone(&self.dependencies.store)),
-                block_sink: self.dependencies.block_sink.clone(),
-                registration_dates: self.dependencies.registration_dates.clone(),
-            },
-        )
-        .inspect_err(|error| {
-            error!(
-                %error,
-                protocol = %settings.dns_protocol,
-                provider = %settings.doh_provider,
-                "dns interceptor: upstream resolver build failed"
-            );
-        })?;
+        let dependencies = self.dependencies.clone();
+        let protocol = settings.dns_protocol.clone();
+        let provider = settings.doh_provider.clone();
+        let stub = blocking("dns engine build", move || {
+            QueryEngine::try_new(
+                EnginePolicy::from_engine_lock(&dependencies.engine),
+                &config,
+                EngineServices {
+                    store: Some(Arc::clone(&dependencies.store)),
+                    block_sink: dependencies.block_sink.clone(),
+                    registration_dates: dependencies.registration_dates.clone(),
+                },
+            )
+            .inspect_err(|error| {
+                error!(
+                    %error,
+                    %protocol,
+                    %provider,
+                    "dns interceptor: upstream resolver build failed"
+                );
+            })
+        })
+        .await??;
         self.report_skipped_upstreams(stub.upstream_config_warnings());
         let stub = Arc::new(stub);
         if let Some(sink) = &self.hint_sink {
@@ -223,7 +239,14 @@ impl DnsInterceptor {
         };
 
         self.dns_divert = if divert {
-            match netmetrics::dns_divert::start(self.divert_report()) {
+            // Installing it runs WinDivert, `nft` or `pfctl`.
+            let report = self.divert_report();
+            match blocking("port 53 divert start", move || {
+                netmetrics::dns_divert::start(report)
+            })
+            .await
+            .unwrap_or_else(|error| Err(error.to_string()))
+            {
                 Ok(divert) => {
                     info!("outbound port 53 that bypasses the stub is diverted to it");
                     Some(divert)
@@ -294,16 +317,21 @@ impl DnsInterceptor {
         }))
     }
 
-    fn disable_dns_divert(&mut self) {
-        self.dns_divert.take();
-        netmetrics::dns_divert::clear_leftover();
+    /// Releases the port 53 divert, and whatever an earlier run left of one,
+    /// on a blocking thread: see [`release_divert`].
+    async fn disable_dns_divert(&mut self) {
+        let divert = self.dns_divert.take();
+        if let Err(error) = blocking("port 53 divert release", move || release_divert(divert)).await
+        {
+            warn!(%error, "port 53 divert release did not finish");
+        }
     }
 
     pub(crate) async fn stop(&mut self) -> Result<()> {
         self.redirect.stop_restoring().await;
         // Release the port 53 divert before anything else. A later restore or
         // listener shutdown can fail; the divert must not stay installed.
-        self.disable_dns_divert();
+        self.disable_dns_divert().await;
         // Join any adapter extension before restoring its snapshot. No new
         // transition may redirect adapters while shutdown is restoring them,
         // even when the restore fails and the listener must keep serving.
@@ -489,42 +517,64 @@ impl DivertLoss {
     }
 }
 
-/// Releases `value` without running its destructor on a runtime worker.
+/// Runs `work` on a blocking thread and waits for it.
+async fn blocking<T: Send + 'static>(
+    what: &str,
+    work: impl FnOnce() -> T + Send + 'static,
+) -> Result<T> {
+    tokio::task::spawn_blocking(work)
+        .await
+        .map_err(|error| DnsError::Runtime(format!("{what} task failed: {error}")))
+}
+
+/// Runs `work` without blocking a runtime worker, and without waiting for it.
 ///
-/// For a destructor that only frees memory this would be pointless; it exists
-/// for the ones that block. Off a runtime there is nothing to protect, so the
-/// drop happens in place.
-fn release_off_runtime<T: Send + 'static>(value: T) {
+/// It exists for work that blocks, such as a destructor that joins a thread.
+/// Off a runtime there is nothing to protect, so the work runs in place.
+fn off_runtime(work: impl FnOnce() + Send + 'static) {
     match tokio::runtime::Handle::try_current() {
         Ok(handle) => {
             // Detached: `Drop` cannot await, and the join has no result anyone
             // is waiting on.
-            handle.spawn_blocking(move || drop(value));
+            handle.spawn_blocking(work);
         }
-        Err(_) => drop(value),
+        Err(_) => work(),
     }
+}
+
+/// Removes `divert`, then anything an earlier run left of one. On Windows
+/// that joins the divert's packet thread; on Linux and macOS it runs `nft`
+/// or `pfctl`.
+fn release_divert(divert: Option<netmetrics::dns_divert::DnsDivert>) {
+    drop(divert);
+    netmetrics::dns_divert::clear_leftover();
 }
 
 impl Drop for DnsInterceptor {
     fn drop(&mut self) {
-        self.disable_dns_divert();
+        // `NetworkWatcher::drop` cancels the watcher and aborts its task.
+        self.network_watcher = None;
+
+        // This destructor runs on paths that never reach `stop`: a cancelled
+        // gRPC handler dropping the interceptor mid-`stop`, or a shutdown that
+        // overran its deadline. Both run on a runtime worker, and what is left
+        // here blocks: releasing the divert, and dropping the last
+        // `QueryEngine` reference, which joins the block-signal worker thread
+        // while it may be mid-event. So it all runs on a blocking thread, the
+        // listener after the divert: until the divert is gone, DNS it catches
+        // is still answered. `DnsListener::drop` cancels the hickory server
+        // and aborts its task.
+        //
         // `self.redirect` restores whatever is still redirected as it drops,
         // after this, off the runtime: see `DnsRedirect`.
-
-        // `DnsListener::drop` cancels the hickory server and aborts its task,
-        // and `NetworkWatcher::drop` does the same for the watcher.
-        self.network_watcher = None;
-        self.listener = None;
-
-        // Dropping the last `QueryEngine` reference joins the block-signal
-        // worker thread, which may be mid-event. `stop` already moves that join
-        // off the runtime, but this destructor also runs on paths that never
-        // reach `stop`: a cancelled gRPC handler dropping the interceptor
-        // mid-`stop`, or a shutdown that overran its deadline. Both cancel on a
-        // runtime worker, so the join must not happen inline.
-        if let Some(stub) = self.stub.take() {
-            release_off_runtime(stub);
-        }
+        let divert = self.dns_divert.take();
+        let listener = self.listener.take();
+        let stub = self.stub.take();
+        off_runtime(move || {
+            release_divert(divert);
+            drop(listener);
+            drop(stub);
+        });
     }
 }
 
@@ -541,7 +591,7 @@ mod tests {
 
     use antiwire_dns_redirect::{AppliedRedirect, RedirectBackend};
 
-    use super::{release_off_runtime, DnsEnforcement, DnsInterceptor, RedirectOutcome};
+    use super::{off_runtime, DnsEnforcement, DnsInterceptor, RedirectOutcome};
     use crate::lifecycle::DnsDependencies;
     use crate::listener::DnsListener;
     use crate::policy_adapter::EnginePolicy;
@@ -594,11 +644,12 @@ mod tests {
     /// Pinned to a single-threaded runtime, where "another thread" and "not the
     /// runtime" are the same statement.
     #[tokio::test(flavor = "current_thread")]
-    async fn a_released_value_drops_off_the_runtime_thread() {
+    async fn work_sent_off_the_runtime_runs_on_another_thread() {
         let runtime_thread = std::thread::current().id();
         let (tx, rx) = mpsc::channel();
 
-        release_off_runtime(WhereDropped { tx });
+        let value = WhereDropped { tx };
+        off_runtime(move || drop(value));
 
         let dropped_on = rx
             .recv_timeout(Duration::from_secs(10))
@@ -607,11 +658,12 @@ mod tests {
     }
 
     #[test]
-    fn released_outside_a_runtime_it_drops_in_place() {
+    fn work_sent_off_the_runtime_from_outside_one_runs_in_place() {
         let this_thread = std::thread::current().id();
         let (tx, rx) = mpsc::channel();
 
-        release_off_runtime(WhereDropped { tx });
+        let value = WhereDropped { tx };
+        off_runtime(move || drop(value));
 
         let dropped_on = rx.try_recv().expect("the destructor already ran");
         assert_eq!(dropped_on, this_thread);
@@ -631,7 +683,7 @@ mod tests {
         let mut interceptor = interceptor(&store);
         interceptor.redirect.set_backend(restoring(|_| false));
 
-        assert!(interceptor.start(store.as_ref()).await.is_err());
+        assert!(interceptor.start().await.is_err());
         assert_eq!(
             interceptor.redirect.snapshot().as_deref(),
             Some(saved_dns),
@@ -786,7 +838,7 @@ mod tests {
             .redirect
             .set_backend(restoring(|_| panic!("a restart must not restore")));
 
-        assert!(interceptor.restart(store.as_ref()).await.is_err());
+        assert!(interceptor.restart().await.is_err());
         assert!(interceptor.is_running());
         assert!(interceptor.redirect.is_applied());
 
@@ -960,7 +1012,7 @@ mod tests {
         };
 
         assert!(matches!(
-            interceptor.restart(&store).await,
+            interceptor.restart().await,
             Err(crate::DnsError::Bind(_))
         ));
         assert!(
@@ -1167,5 +1219,61 @@ mod tests {
         let alert = subscription.recv().await.expect("alert");
         assert_eq!(alert.kind, AlertKind::DnsUpstreamSkipped);
         assert!(alert.message.contains("bad.example"));
+    }
+
+    /// The regression this guards: a restart read the settings and built the
+    /// new engine, which loads the OS trust store, on the runtime worker it
+    /// ran on. Everything else there waited several milliseconds, while the
+    /// resolver being replaced was still answering queries.
+    #[tokio::test(flavor = "current_thread")]
+    async fn a_restart_leaves_its_runtime_free_for_other_work() {
+        use std::sync::atomic::{AtomicBool, Ordering};
+
+        let (_dir, store) = crate::test_support::temp_store();
+        // No port 53 divert, even when the tests run elevated.
+        let mut settings = store.get_settings().expect("settings");
+        settings.private_relay_compatibility = true;
+        store.update_settings(&settings).expect("settings");
+        let mut interceptor = interceptor(&store);
+        interceptor.bind_listener =
+            |stub| DnsListener::start_on(stub, "127.0.0.1:0".parse().expect("addr"));
+        interceptor.start().await.expect("start");
+
+        // A task that yields in a loop is polled again as soon as nothing else
+        // runs, so the longest gap between its polls is the longest the
+        // runtime was held.
+        let longest = Arc::new(parking_lot::Mutex::new(Duration::ZERO));
+        let stop = Arc::new(AtomicBool::new(false));
+        let ticker = {
+            let longest = Arc::clone(&longest);
+            let stop = Arc::clone(&stop);
+            tokio::spawn(async move {
+                let mut last = std::time::Instant::now();
+                while !stop.load(Ordering::Relaxed) {
+                    tokio::task::yield_now().await;
+                    let now = std::time::Instant::now();
+                    let mut longest = longest.lock();
+                    *longest = (*longest).max(now - last);
+                    last = now;
+                }
+            })
+        };
+        tokio::task::yield_now().await;
+        let mut held = Vec::new();
+        for _ in 0..5 {
+            *longest.lock() = Duration::ZERO;
+            interceptor.restart().await.expect("restart");
+            held.push(*longest.lock());
+        }
+        stop.store(true, Ordering::Relaxed);
+        ticker.await.expect("ticker");
+        interceptor.stop().await.expect("stop");
+
+        // The shortest of them, so one descheduled thread cannot fail this.
+        let shortest = held.iter().min().copied().expect("restarts");
+        assert!(
+            shortest < Duration::from_millis(2),
+            "every restart held the runtime for {shortest:?} or more: {held:?}"
+        );
     }
 }

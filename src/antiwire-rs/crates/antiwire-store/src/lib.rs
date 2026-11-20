@@ -28,5 +28,6 @@ pub use models::{
     NewConnectionLog, ACTIVITY_BUCKET_SECONDS, MIN_AI_CONFIDENCE,
 };
 pub use store::{
-    normalize_domain_key, DeletionFence, Resident, ResidentDecision, SeenSubdomain, Store,
+    normalize_domain_key, DeletionFence, OutcomeRevision, Resident, ResidentDecision,
+    SeenSubdomain, Store,
 };

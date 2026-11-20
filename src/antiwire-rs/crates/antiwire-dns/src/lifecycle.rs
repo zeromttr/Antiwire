@@ -173,7 +173,7 @@ pub async fn apply_dns_settings_change(
     if updated.dns_resolver_enabled {
         let dns = slot
             .get_or_insert_with(|| DnsInterceptor::new(dependencies.clone(), arm_boot_recovery));
-        dns.restart(store.as_ref()).await?;
+        dns.restart().await?;
     } else if let Some(dns) = slot.as_mut() {
         dns.stop().await?;
     }
@@ -266,7 +266,7 @@ pub async fn bootstrap_dns_interceptor(
     let dns = slot.get_or_insert_with(|| DnsInterceptor::new(dependencies, arm_boot_recovery));
 
     if settings.dns_resolver_enabled {
-        if let Err(error) = dns.start(store.as_ref()).await {
+        if let Err(error) = dns.start().await {
             warn!(error = %error, "dns interceptor start failed; retrying in the background");
             report_start_failure(alerts.as_ref(), &error);
             // Its first attempt waits for this lock, so holding it here is fine.
@@ -341,7 +341,7 @@ fn retry_failed_start(
                 Ok(_) => {}
                 Err(error) => warn!(%error, "could not read settings before retrying the resolver"),
             }
-            match dns.start(store.as_ref()).await {
+            match dns.start().await {
                 Ok(()) => {
                     info!("dns interceptor started after an earlier failure");
                     return;

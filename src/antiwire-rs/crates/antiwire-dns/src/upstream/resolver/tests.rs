@@ -35,14 +35,23 @@ fn query(id: u16, name: &str) -> Message {
 
 /// Builds a handle whose tiers are the given UDP servers, in order.
 fn tiered(groups: &[&[SocketAddr]]) -> UpstreamDns {
+    let groups: Vec<_> = groups
+        .iter()
+        .map(|servers| (DnsProtocol::Udp, *servers))
+        .collect();
+    tiers_of(&groups)
+}
+
+/// Builds a handle whose tiers are the given servers, each tier over its own
+/// transport, in order.
+fn tiers_of(groups: &[(DnsProtocol, &[SocketAddr])]) -> UpstreamDns {
     let groups: Vec<Vec<_>> = groups
         .iter()
-        .map(|servers| {
+        .map(|(protocol, servers)| {
             servers
                 .iter()
                 .flat_map(|server| {
-                    parse_upstream_endpoints(&server.to_string(), DnsProtocol::Udp)
-                        .expect("udp endpoint")
+                    parse_upstream_endpoints(&server.to_string(), *protocol).expect("endpoint")
                 })
                 .collect()
         })

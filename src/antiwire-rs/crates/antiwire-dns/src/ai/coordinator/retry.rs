@@ -5,6 +5,7 @@ use std::sync::Arc;
 use std::time::Instant;
 
 use antiwire_store::{DeletionFence, DomainDecision as StoredDecision};
+use tokio::sync::OwnedSemaphorePermit;
 
 use super::jobs::{Admission, PersistError};
 use super::AiCoordinator;
@@ -12,19 +13,30 @@ use super::AiCoordinator;
 impl AiCoordinator {
     /// Bounded background retry with backoff for failed classifications.
     pub(super) fn schedule_retry(self: &Arc<Self>, canonical: &str) {
+        self.retry_in(canonical, None);
+    }
+
+    /// Schedules the next retry of `canonical` in `slot`, or in a retry slot
+    /// of its own when `slot` is `None`.
+    ///
+    /// The attempt count lives only as long as the domain's retries: a domain
+    /// they end for, here or in [`Self::retry_now`], is forgotten, or every
+    /// domain shed under load would stay in memory.
+    fn retry_in(self: &Arc<Self>, canonical: &str, slot: Option<OwnedSemaphorePermit>) {
+        // Shutting down clears every count.
         if self.shutdown.is_cancelled() || self.tasks.is_closed() {
             return;
         }
-        let config = self.config.read();
-        if !config.policy.enabled || config.classifier.is_none() {
+        if !self.can_classify() {
+            self.retries.remove(canonical);
             return;
         }
-        drop(config);
         if self.retry_tasks.insert(canonical.to_owned(), ()).is_some() {
             return;
         }
-        let Ok(slot) = self.retry_slots.clone().try_acquire_owned() else {
+        let Some(slot) = slot.or_else(|| self.retry_slots.clone().try_acquire_owned().ok()) else {
             self.retry_tasks.remove(canonical);
+            self.retries.remove(canonical);
             return;
         };
         let attempts = self
@@ -44,24 +56,34 @@ impl AiCoordinator {
             let delay = antiwire_tuning::DNS_AI_RETRY_BACKOFF.delay(attempts);
             tokio::select! {
                 () = this.shutdown.cancelled() => {},
-                () = tokio::time::sleep(delay) => {
-                    this.retry_tasks.remove(&domain);
-                    let config = this.config.read();
-                    let can_retry = config.policy.enabled && config.classifier.is_some();
-                    drop(config);
-                    if can_retry {
-                        if let Err(error) = this.start_or_join(&domain) {
-                            if error.is_retryable() {
-                                this.schedule_retry(&domain);
-                            }
-                        }
-                    } else {
-                        this.retries.remove(&domain);
-                    }
-                }
+                () = tokio::time::sleep(delay) => this.retry_now(&domain, slot),
             }
-            drop(slot);
         });
+    }
+
+    /// Classifies `domain` again, its backoff over. A classification that
+    /// starts settles the attempt count when it ends. One that cannot start
+    /// yet is retried in the same `slot`: the slot is free to take, and asking
+    /// for another while holding it fails whenever the others are taken.
+    fn retry_now(self: &Arc<Self>, domain: &str, slot: OwnedSemaphorePermit) {
+        self.retry_tasks.remove(domain);
+        if !self.can_classify() {
+            self.retries.remove(domain);
+            return;
+        }
+        match self.start_or_join(domain) {
+            Ok(_) => {}
+            Err(error) if error.is_retryable() => self.retry_in(domain, Some(slot)),
+            Err(_) => {
+                self.retries.remove(domain);
+            }
+        }
+    }
+
+    /// Whether a classification could run now: AI is on, with a client.
+    fn can_classify(&self) -> bool {
+        let config = self.config.read();
+        config.policy.enabled && config.classifier.is_some()
     }
 
     /// Persistence-only retry: saves an already-classified result without a

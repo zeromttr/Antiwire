@@ -7,6 +7,7 @@
 mod attribution;
 mod listener;
 mod upstream;
+mod verdicts;
 
 use std::sync::Arc;
 use std::time::{Duration, Instant};
@@ -27,8 +28,10 @@ use crate::settings::DnsConfig;
 ///
 /// Groups: `hot` (handler cache hit and socket snapshot), `attribution`
 /// (owner lookups on the reply path), `listener`
-/// (loopback socket loops), `upstream` (mock-upstream failover), and the
-/// opt-in `upstream-live` (real providers; needs network access).
+/// (loopback socket loops), `upstream` (mock-upstream failover), `failover`
+/// (a blocked primary tier with a healthy fallback), `verdicts` (saved AI
+/// verdicts rewritten by a settings change), and the opt-in `upstream-live`
+/// (real providers; needs network access).
 pub fn run() {
     let groups: Vec<String> = std::env::args()
         .skip(1)
@@ -54,6 +57,12 @@ pub fn run() {
     }
     if wanted("upstream") {
         upstream::run();
+    }
+    if wanted("failover") {
+        upstream::run_failover();
+    }
+    if wanted("verdicts") {
+        verdicts::run();
     }
     if wanted("upstream-live") {
         upstream::run_live();

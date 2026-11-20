@@ -650,3 +650,99 @@ async fn post_response_work_starts_nothing_without_a_classifier() {
     );
     coordinator.shutdown().await;
 }
+
+/// Lets paused time run until `condition` holds, for at most `limit`.
+async fn settle(limit: Duration, condition: impl Fn() -> bool) -> bool {
+    let started = tokio::time::Instant::now();
+    while !condition() {
+        if started.elapsed() >= limit {
+            return false;
+        }
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+    true
+}
+
+/// The regression this guards: a retry that found the AI queue full asked for
+/// a second retry slot while it still held its own. With every other slot
+/// taken it got none, so the domain's retries ended there, and its attempt
+/// count stayed behind for as long as the daemon ran: one entry for each
+/// domain that went this way, and nothing left to remove it.
+#[tokio::test(start_paused = true)]
+async fn a_retry_that_cannot_start_goes_on_in_its_own_slot() {
+    let policy = test_policy(AiDecisionMode::Proactive, true);
+    let coordinator = AiCoordinator::new(
+        test_store(),
+        Some(MockClassifier::failing("unused")),
+        &policy,
+        None,
+    );
+    let queue_size = antiwire_tuning::DNS_AI_MAX_QUEUED;
+    let _queue_full = Arc::clone(&coordinator.queued)
+        .try_acquire_many_owned(u32::try_from(queue_size).expect("queue size"))
+        .expect("the whole AI queue");
+    let _other_retries = Arc::clone(&coordinator.retry_slots)
+        .try_acquire_many_owned(u32::try_from(queue_size - 1).expect("queue size"))
+        .expect("every retry slot but one");
+
+    let domains = 50;
+    for id in 0..domains {
+        let domain = format!("overloaded{id}.example");
+        coordinator.schedule_retry(&domain);
+        assert!(coordinator.retry_tasks.contains_key(&domain));
+        let last_attempt = antiwire_tuning::DNS_AI_RETRY_MAX_ATTEMPTS;
+        let retried = settle(Duration::from_secs(120), || {
+            coordinator
+                .retries
+                .get(&domain)
+                .is_some_and(|attempts| *attempts == last_attempt)
+        })
+        .await;
+        assert!(retried, "{domain} is retried {last_attempt} times");
+        let ended = settle(Duration::from_secs(120), || {
+            !coordinator.retry_tasks.contains_key(&domain)
+                && coordinator.retry_slots.available_permits() == 1
+        })
+        .await;
+        assert!(ended, "the retries of {domain} end");
+    }
+    assert!(
+        coordinator.retries.is_empty(),
+        "{} of {domains} domains keep an attempt count with no retry left",
+        coordinator.retries.len()
+    );
+    coordinator.shutdown().await;
+}
+
+/// The regression this guards: a failed classification that a retry had
+/// started, shed because no retry slot was free, kept its attempt count.
+#[tokio::test]
+async fn a_retry_shed_for_want_of_a_slot_forgets_its_count() {
+    let policy = test_policy(AiDecisionMode::Proactive, true);
+    let coordinator = AiCoordinator::new(
+        test_store(),
+        Some(MockClassifier::failing("unused")),
+        &policy,
+        None,
+    );
+    let _every_retry = Arc::clone(&coordinator.retry_slots)
+        .try_acquire_many_owned(
+            u32::try_from(antiwire_tuning::DNS_AI_MAX_QUEUED).expect("queue size"),
+        )
+        .expect("every retry slot");
+
+    let domains = 50;
+    for id in 0..domains {
+        let domain = format!("shed{id}.example");
+        // A classification its first retry started has just failed.
+        coordinator.retries.insert(domain.clone(), 1);
+        coordinator.schedule_retry(&domain);
+    }
+    assert!(coordinator.retry_tasks.is_empty());
+    assert!(
+        coordinator.retries.is_empty(),
+        "{} of {domains} shed domains keep an attempt count",
+        coordinator.retries.len()
+    );
+    coordinator.shutdown().await;
+}

@@ -4,7 +4,7 @@
 //! persistence, and concurrent-request coordination: lowercase ASCII without
 //! a trailing dot.
 
-use antiwire_store::{DaemonSetting, DomainDecision as StoredDecision};
+use antiwire_store::{DaemonSetting, DomainDecision as StoredDecision, OutcomeRevision};
 use time::OffsetDateTime;
 
 /// Canonical AI domain key: lowercase ASCII without a trailing dot.
@@ -344,6 +344,9 @@ impl AiEvaluation {
 /// Returns how many rows changed. Scores, `first_seen`, and `updated_at` stay
 /// as classified. A disabled policy clears block verdicts; turning AI back on
 /// restores them from the same scores.
+///
+/// Each page's changes are written in one transaction. A transaction per row
+/// made a toggle of AI over twenty thousand saved domains take seconds.
 pub(crate) fn recompute_saved_verdicts(
     store: &antiwire_store::Store,
     policy: &AiPolicySnapshot,
@@ -358,25 +361,26 @@ pub(crate) fn recompute_saved_verdicts(
         let Some(last) = page.last().map(|row| row.domain.clone()) else {
             break;
         };
-        for decision in &page {
-            let evaluation = persisted_evaluation(&CategoryScores::from_stored(decision), policy);
-            if decision.verdict == evaluation.verdict_str()
-                && decision.top_category == evaluation.top_category
-                && (decision.top_score - evaluation.top_score).abs() <= f64::EPSILON
-            {
-                continue;
-            }
-            if store
-                .revise_domain_decision_outcome(
-                    &decision.domain,
-                    evaluation.verdict_str(),
-                    evaluation.top_category,
-                    evaluation.top_score,
-                )
-                .map_err(|error| error.to_string())?
-            {
-                changed += 1;
-            }
+        let revisions: Vec<OutcomeRevision<'_>> = page
+            .iter()
+            .filter_map(|decision| {
+                let evaluation =
+                    persisted_evaluation(&CategoryScores::from_stored(decision), policy);
+                let unchanged = decision.verdict == evaluation.verdict_str()
+                    && decision.top_category == evaluation.top_category
+                    && (decision.top_score - evaluation.top_score).abs() <= f64::EPSILON;
+                (!unchanged).then_some(OutcomeRevision {
+                    domain: &decision.domain,
+                    verdict: evaluation.verdict_str(),
+                    top_category: evaluation.top_category,
+                    top_score: evaluation.top_score,
+                })
+            })
+            .collect();
+        if !revisions.is_empty() {
+            changed += store
+                .revise_domain_decision_outcomes(&revisions)
+                .map_err(|error| error.to_string())?;
         }
         if page.len() < PAGE {
             break;
