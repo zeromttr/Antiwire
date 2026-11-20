@@ -21,7 +21,7 @@ use crate::{DnsError, Result};
 use antiwire_dns_redirect::{DnsRedirect, RedirectOutcome};
 
 /// Manages the loopback DNS listener and persisted redirect state.
-pub struct DnsInterceptor {
+pub(crate) struct DnsInterceptor {
     dependencies: DnsDependencies,
     hint_sink: Option<Arc<dyn DnsHintSink>>,
     stub: Option<Arc<QueryEngine<EnginePolicy>>>,

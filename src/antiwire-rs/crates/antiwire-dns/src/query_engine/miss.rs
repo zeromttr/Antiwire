@@ -55,7 +55,7 @@ where
         {
             return prepare_uncached_message(block, post_ai);
         }
-        let post_ai = self.post_work_for_domain_key(&prepared.cache_key.domain, false);
+        let post_ai = self.post_work_for_domain_key(&prepared.cache_key.domain);
         let domain = prepared.cache_key.domain.clone();
         match self
             .resolve_miss_entry(request, context, prepared, enqueued_at)

@@ -92,30 +92,9 @@ fn dns_dedup_window() -> Duration {
 #[derive(Debug, Clone)]
 struct PendingBlock {
     domain: String,
-    ownership: PendingOwnership,
+    ownership: Ownership,
     blocklist_names: Vec<String>,
     timestamp: OffsetDateTime,
-}
-
-#[derive(Debug, Clone, Copy)]
-enum PendingOwnership {
-    Caller(u32),
-    Socket(Ownership),
-}
-
-impl PendingOwnership {
-    /// The process the query's socket belonged to, when one was resolved.
-    ///
-    /// This is the requesting application for a direct query and the system
-    /// resolver (e.g. Dnscache) for a mediated one. Once caller evidence is
-    /// exhausted it is the sender of record, so a block is never labelled
-    /// "unknown" when the platform told us who owned the socket.
-    fn socket_owner_pid(self) -> u32 {
-        match self {
-            Self::Caller(pid) | Self::Socket(Ownership::Resolved(pid)) => pid,
-            Self::Socket(Ownership::Ambiguous | Ownership::NotFound) => 0,
-        }
-    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
@@ -359,23 +338,14 @@ fn finish_worker(worker: JoinHandle<()>) {
 }
 
 impl DnsBlockSink for DnsBlockRecorder {
-    fn record_blocked_query(&self, domain: &str, pid: u32, blocklist_names: &[String]) {
-        self.enqueue(domain, PendingOwnership::Caller(pid), blocklist_names, None);
-    }
-
-    fn record_blocked_query_with_ownership(
+    fn record_blocked_query(
         &self,
         domain: &str,
         ownership: Ownership,
         blocklist_names: &[String],
-        timestamp: Option<time::OffsetDateTime>,
+        timestamp: OffsetDateTime,
     ) {
-        self.enqueue(
-            domain,
-            PendingOwnership::Socket(ownership),
-            blocklist_names,
-            timestamp,
-        );
+        self.enqueue(domain, ownership, blocklist_names, timestamp);
     }
 
     fn update_runtime_settings(&self, log_daemon_connections: bool, notify_threat_detected: bool) {
@@ -387,9 +357,9 @@ impl DnsBlockRecorder {
     fn enqueue(
         &self,
         domain: &str,
-        ownership: PendingOwnership,
+        ownership: Ownership,
         blocklist_names: &[String],
-        timestamp: Option<OffsetDateTime>,
+        timestamp: OffsetDateTime,
     ) {
         // A blocked name may be attacker-crafted, and it is written to `SQLite`,
         // SIEM, notifications, and tracing: sanitize once at the boundary.
@@ -398,12 +368,11 @@ impl DnsBlockRecorder {
             return;
         }
         let blocklist_names = sanitize_labels(blocklist_names);
-        let ts = timestamp.unwrap_or_else(OffsetDateTime::now_utc);
         let block = PendingBlock {
             domain,
             ownership,
             blocklist_names,
-            timestamp: ts,
+            timestamp,
         };
         let send_result = {
             let tx = self.tx.lock();

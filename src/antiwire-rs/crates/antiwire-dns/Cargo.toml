@@ -40,7 +40,7 @@ socket2 = { workspace = true }
 sysinfo = { workspace = true }
 thiserror = { workspace = true }
 tokio = { workspace = true }
-tokio-util = { workspace = true, features = ["codec", "rt"] }
+tokio-util = { workspace = true, features = ["codec"] }
 tracing = { workspace = true }
 time = { workspace = true }
 url = { workspace = true }

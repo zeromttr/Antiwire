@@ -1,7 +1,7 @@
 use super::*;
 use crate::ai::classifier::test_helpers::{assessment_for, MockClassifier};
 use crate::ai::decision::{AiCategorySetting, AiDecisionMode};
-use std::sync::atomic::AtomicUsize;
+use std::sync::atomic::{AtomicUsize, Ordering};
 
 struct ControlledClassifier {
     calls: AtomicUsize,
@@ -37,25 +37,24 @@ impl crate::ai::classifier::Classifier for ControlledClassifier {
 }
 
 fn test_policy(mode: AiDecisionMode, block_malicious: bool) -> AiPolicySnapshot {
-    let mk = |id: &'static str, order: usize, block: bool| AiCategorySetting {
+    let mk = |id: &'static str, block: bool| AiCategorySetting {
         id,
         enabled: true,
         threshold_percent: 80,
         block,
-        order,
     };
     AiPolicySnapshot {
         enabled: true,
         mode,
         categories: [
-            mk("advertising", 0, false),
-            mk("tracking", 1, false),
-            mk("telemetry", 2, false),
-            mk("analytics", 3, false),
-            mk("malicious", 4, block_malicious),
-            mk("security_fraud", 5, false),
-            mk("cryptomining", 6, false),
-            mk("tunnel", 7, false),
+            mk("advertising", false),
+            mk("tracking", false),
+            mk("telemetry", false),
+            mk("analytics", false),
+            mk("malicious", block_malicious),
+            mk("security_fraud", false),
+            mk("cryptomining", false),
+            mk("tunnel", false),
         ],
         generation: 1,
     }
@@ -343,8 +342,6 @@ async fn retroactive_saved_decision_skips_background_job() {
         .expect("saved decision");
     coordinator.submit_post_response(&PostResponseWork {
         domain: "RETRO-SAVED.example.".to_owned(),
-        was_block: false,
-        eligible: true,
     });
     assert!(coordinator.inflight.is_empty());
     assert_eq!(classifier.call_count(), 0);
@@ -629,8 +626,6 @@ async fn post_response_work_starts_nothing_without_a_classifier() {
     );
     coordinator.submit_post_response(&PostResponseWork {
         domain: "answered.example".to_owned(),
-        was_block: false,
-        eligible: true,
     });
     assert!(coordinator.inflight.is_empty());
 
@@ -641,8 +636,6 @@ async fn post_response_work_starts_nothing_without_a_classifier() {
     );
     coordinator.submit_post_response(&PostResponseWork {
         domain: "answered.example".to_owned(),
-        was_block: false,
-        eligible: true,
     });
     assert!(
         coordinator.inflight.contains_key("answered.example"),

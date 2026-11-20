@@ -100,25 +100,22 @@ where
     pub(super) fn post_work_for_domain_key(
         &self,
         domain_key: &DomainKey,
-        was_block: bool,
     ) -> Option<PostResponseWork> {
         self.ai_for(domain_key)?;
         Some(PostResponseWork {
             domain: domain_key.as_str().to_owned(),
-            was_block,
-            eligible: true,
         })
     }
 
     /// An upstream/cache response is learnable only if DNS actually answered
     /// the question. Error RCODEs may still be sent to the client, but never
-    /// create AI work. Policy blocks use the separate `was_block` path.
+    /// create AI work. Policy blocks attach their work directly.
     pub(super) fn post_work_for_answer(
         &self,
         domain_key: &DomainKey,
         answer: &CachedAnswer,
     ) -> Option<PostResponseWork> {
-        self.post_work_for_domain_key(domain_key, false)
+        self.post_work_for_domain_key(domain_key)
             .filter(|_| answer_is_ai_eligible(answer))
     }
 }
@@ -148,10 +145,8 @@ pub(super) fn ai_domain_eligible(domain: &DomainKey) -> bool {
 }
 
 pub(super) fn answer_is_ai_eligible(answer: &CachedAnswer) -> bool {
-    answer.parsed_message.as_ref().is_some_and(|message| {
-        matches!(
-            message.metadata.response_code,
-            ResponseCode::NoError | ResponseCode::NXDomain
-        )
-    })
+    matches!(
+        answer.parsed_message.metadata.response_code,
+        ResponseCode::NoError | ResponseCode::NXDomain
+    )
 }

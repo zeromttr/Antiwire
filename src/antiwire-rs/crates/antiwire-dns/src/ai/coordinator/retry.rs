@@ -91,7 +91,7 @@ impl AiCoordinator {
     pub(super) fn schedule_persist_retry(
         self: &Arc<Self>,
         stored: StoredDecision,
-        provider_epoch: u64,
+        generation: u64,
         fence: DeletionFence,
     ) {
         let domain = stored.domain.clone();
@@ -121,7 +121,7 @@ impl AiCoordinator {
                 let mut admission = Admission::new(queued, None);
                 let deadline = Instant::now() + this.background_timeout;
                 match this
-                    .persist_stored_until(&stored, provider_epoch, deadline, &mut admission, fence)
+                    .persist_stored_until(&stored, generation, deadline, &mut admission, fence)
                     .await
                 {
                     Ok(()) | Err(PersistError::StaleProvider | PersistError::Superseded) => break,

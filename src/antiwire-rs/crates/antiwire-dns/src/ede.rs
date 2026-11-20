@@ -7,16 +7,16 @@
 use hickory_proto::rr::rdata::opt::EdnsOption;
 
 /// RFC 8914 Option Code for Extended DNS Error.
-pub const EDNS_OPTION_CODE_EDE: u16 = 15;
+pub(crate) const EDNS_OPTION_CODE_EDE: u16 = 15;
 
 /// EDE 3: Stale Answer (served from cache past its TTL, RFC 8767).
-pub const EDE_STALE_ANSWER: u16 = 3;
+pub(crate) const EDE_STALE_ANSWER: u16 = 3;
 /// EDE 13: Cached Error (a SERVFAIL answered from a cached failure, RFC 9520).
-pub const EDE_CACHED_ERROR: u16 = 13;
+pub(crate) const EDE_CACHED_ERROR: u16 = 13;
 /// EDE 15: Blocked (The request was blocked by administrator or firewall policy).
-pub const EDE_BLOCKED: u16 = 15;
+pub(crate) const EDE_BLOCKED: u16 = 15;
 /// EDE 17: Filtered (The request was filtered by content/security filter, e.g. rebinding).
-pub const EDE_FILTERED: u16 = 17;
+pub(crate) const EDE_FILTERED: u16 = 17;
 
 /// Builds an RFC 8914 Extended DNS Error [`EdnsOption`].
 #[must_use]

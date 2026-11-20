@@ -105,9 +105,8 @@ async fn foreground_retry_after_network_reset_uses_the_new_pool() {
     let CacheProbe::Fresh(entry) = engine.response_cache().probe(&key) else {
         panic!("the retried answer must be cached under the new generation");
     };
-    let cached = entry.parsed_message.as_deref().expect("parsed entry");
     assert_eq!(
-        answer_ip(cached),
+        answer_ip(&entry.parsed_message),
         Some(NEW_MARKER),
         "the cache must hold the new pool's answer"
     );
@@ -203,10 +202,8 @@ async fn prefetch_after_network_reset_uses_the_new_pool() {
     tokio::time::timeout(Duration::from_secs(5), async {
         loop {
             if let CacheProbe::Fresh(entry) = engine.response_cache().probe(&key) {
-                if let Some(cached) = entry.parsed_message.as_deref() {
-                    if answer_ip(cached) == Some(NEW_MARKER) {
-                        return;
-                    }
+                if answer_ip(&entry.parsed_message) == Some(NEW_MARKER) {
+                    return;
                 }
             }
             tokio::task::yield_now().await;

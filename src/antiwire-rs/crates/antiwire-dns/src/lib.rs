@@ -46,15 +46,15 @@ pub use ai_support::{advanced_decision, apply_verdict_change, refreshed_decision
 pub use block::forget_cached_answers;
 pub use block::DnsBlockSink;
 pub use block::DnsHintSink;
-pub use error::{DnsError, Result};
-pub use interceptor::DnsInterceptor;
+pub use error::DnsError;
+pub(crate) use error::Result;
 pub use lifecycle::{
     apply_dns_settings_change, attach_dns_hint_sink, bootstrap_dns_interceptor,
     shutdown_dns_interceptor, DnsDependencies, DnsInterceptorSlot,
 };
 pub use new_domain::{is_supported_new_domain_max_age, RegistrationDates, NEW_DOMAIN_MAX_AGE_DAYS};
 pub use records::{
-    find_domain, lookup_records, reverse_name, RecordAnswer, RecordLookup, RecordPurpose, RecordSet,
+    find_domain, lookup_records, RecordAnswer, RecordLookup, RecordPurpose, RecordSet,
 };
 pub use settings::{check_upstream_settings, is_known_dns_protocol};
 

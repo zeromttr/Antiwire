@@ -20,7 +20,7 @@ pub fn canonical_ai_key(domain: &str) -> Option<String> {
 /// after the answer (`retroactive`). A saved score still blocks the next
 /// query in both modes when its category action is block.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
-pub enum AiDecisionMode {
+pub(crate) enum AiDecisionMode {
     Proactive,
     #[default]
     Retroactive,
@@ -28,7 +28,7 @@ pub enum AiDecisionMode {
 
 impl AiDecisionMode {
     #[must_use]
-    pub fn from_settings(mode: &str) -> Self {
+    pub(crate) fn from_settings(mode: &str) -> Self {
         if mode.trim().eq_ignore_ascii_case("proactive") {
             Self::Proactive
         } else {
@@ -37,14 +37,14 @@ impl AiDecisionMode {
     }
 
     #[must_use]
-    pub const fn enforces(self) -> bool {
+    pub(crate) const fn enforces(self) -> bool {
         matches!(self, Self::Proactive)
     }
 }
 
 /// Per-category policy: enablement, percentage threshold, block vs record.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct AiCategorySetting {
+pub(crate) struct AiCategorySetting {
     /// Category id (`advertising`, `tracking`, ... `tunnel`).
     pub id: &'static str,
     /// Whether the category participates at all.
@@ -53,13 +53,11 @@ pub struct AiCategorySetting {
     pub threshold_percent: i32,
     /// True when a qualifying score blocks. Record-only categories stay false.
     pub block: bool,
-    /// Position in `DomainUse::ALL` order; used for deterministic tie-breaks.
-    pub order: usize,
 }
 
 /// Snapshot of the AI policy governing one evaluation.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct AiPolicySnapshot {
+pub(crate) struct AiPolicySnapshot {
     pub enabled: bool,
     pub mode: AiDecisionMode,
     /// Eight categories in deterministic (`DomainUse::ALL`) order.
@@ -71,66 +69,57 @@ pub struct AiPolicySnapshot {
 impl AiPolicySnapshot {
     /// Builds the snapshot from daemon settings and a generation counter.
     #[must_use]
-    pub fn from_settings(settings: &DaemonSetting, generation: u64) -> Self {
-        let category = |order, id, enabled, confidence, action: &str| AiCategorySetting {
+    pub(crate) fn from_settings(settings: &DaemonSetting, generation: u64) -> Self {
+        let category = |id, enabled, confidence, action: &str| AiCategorySetting {
             id,
             enabled,
             threshold_percent: antiwire_store::clamp_ai_confidence(confidence),
             block: action == "block",
-            order,
         };
         let categories = [
             category(
-                0,
                 "advertising",
                 settings.ai_advertising_enabled,
                 settings.ai_confidence_advertising,
                 &settings.ai_advertising_action,
             ),
             category(
-                1,
                 "tracking",
                 settings.ai_tracking_enabled,
                 settings.ai_confidence_tracking,
                 &settings.ai_tracking_action,
             ),
             category(
-                2,
                 "telemetry",
                 settings.ai_telemetry_enabled,
                 settings.ai_confidence_telemetry,
                 &settings.ai_telemetry_action,
             ),
             category(
-                3,
                 "analytics",
                 settings.ai_analytics_enabled,
                 settings.ai_confidence_analytics,
                 &settings.ai_analytics_action,
             ),
             category(
-                4,
                 "malicious",
                 settings.ai_malicious_enabled,
                 settings.ai_confidence_malicious,
                 &settings.ai_malicious_action,
             ),
             category(
-                5,
                 "fraud",
                 settings.ai_fraud_enabled,
                 settings.ai_confidence_fraud,
                 &settings.ai_fraud_action,
             ),
             category(
-                6,
                 "cryptomining",
                 settings.ai_cryptomining_enabled,
                 settings.ai_confidence_cryptomining,
                 &settings.ai_cryptomining_action,
             ),
             category(
-                7,
                 "tunnel",
                 settings.ai_tunnel_enabled,
                 settings.ai_confidence_tunnel,
@@ -148,20 +137,20 @@ impl AiPolicySnapshot {
 
 /// Eight raw category scores (0.0-1.0 probabilities).
 #[derive(Debug, Clone, Copy, PartialEq)]
-pub struct CategoryScores {
+pub(crate) struct CategoryScores {
     pub scores: [f64; 8],
 }
 
 impl CategoryScores {
     #[cfg(test)]
     #[must_use]
-    pub const fn new(scores: [f64; 8]) -> Self {
+    pub(crate) const fn new(scores: [f64; 8]) -> Self {
         Self { scores }
     }
 
     /// Scores from a stored decision row.
     #[must_use]
-    pub fn from_stored(decision: &StoredDecision) -> Self {
+    pub(crate) fn from_stored(decision: &StoredDecision) -> Self {
         Self {
             scores: [
                 decision.rating_advertising,
@@ -178,7 +167,7 @@ impl CategoryScores {
 
     /// Scores from a live classification.
     #[must_use]
-    pub fn from_assessment(assessment: &antiwire_ai::DomainAssessment) -> Self {
+    pub(crate) fn from_assessment(assessment: &antiwire_ai::DomainAssessment) -> Self {
         Self {
             scores: [
                 assessment.advertising,
@@ -195,14 +184,14 @@ impl CategoryScores {
 
     /// Highest score across all categories (for observability on allows).
     #[must_use]
-    pub fn max_score(&self) -> f64 {
+    pub(crate) fn max_score(&self) -> f64 {
         self.scores.iter().copied().fold(0.0_f64, f64::max)
     }
 }
 
 /// Outcome of evaluating scores against current settings.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum AiOutcome {
+pub(crate) enum AiOutcome {
     /// A qualifying category is set to block.
     Block,
     /// Qualifying categories exist but none is set to block.
@@ -213,13 +202,11 @@ pub enum AiOutcome {
 
 /// Deterministic evaluation of scores against the current policy.
 #[derive(Debug, Clone, PartialEq)]
-pub struct AiEvaluation {
+pub(crate) struct AiEvaluation {
     pub outcome: AiOutcome,
     /// Category responsible for the outcome; empty when none qualified.
     pub top_category: &'static str,
     pub top_score: f64,
-    /// Whether any enabled category met its threshold.
-    pub qualified: bool,
 }
 
 impl AiEvaluation {
@@ -234,7 +221,7 @@ impl AiEvaluation {
     /// - The reported category is deterministic: highest qualifying score,
     ///   ties broken by category order.
     #[must_use]
-    pub fn evaluate(scores: &CategoryScores, policy: &AiPolicySnapshot) -> Self {
+    pub(crate) fn evaluate(scores: &CategoryScores, policy: &AiPolicySnapshot) -> Self {
         let mut best_qualifying: Option<(usize, f64)> = None;
         let mut best_block: Option<(usize, f64)> = None;
         let mut max_score: f64 = 0.0;
@@ -267,7 +254,6 @@ impl AiEvaluation {
                 outcome: AiOutcome::Allow,
                 top_category: "",
                 top_score: max_score,
-                qualified: false,
             },
             Some((index, score)) => {
                 if let Some((block_index, block_score)) = best_block {
@@ -275,14 +261,12 @@ impl AiEvaluation {
                         outcome: AiOutcome::Block,
                         top_category: policy.categories[block_index].id,
                         top_score: block_score,
-                        qualified: true,
                     };
                 }
                 Self {
                     outcome: AiOutcome::Record,
                     top_category: policy.categories[index].id,
                     top_score: score,
-                    qualified: true,
                 }
             }
         }
@@ -290,13 +274,13 @@ impl AiEvaluation {
 
     /// Whether this evaluation requires blocking the current request.
     #[must_use]
-    pub const fn should_block(&self) -> bool {
+    pub(crate) const fn should_block(&self) -> bool {
         matches!(self.outcome, AiOutcome::Block)
     }
 
     /// Verdict string for persistence (`block`, `record`, or an empty string).
     #[must_use]
-    pub const fn verdict_str(&self) -> &'static str {
+    pub(crate) const fn verdict_str(&self) -> &'static str {
         match self.outcome {
             AiOutcome::Block => "block",
             AiOutcome::Record => "record",
@@ -306,7 +290,7 @@ impl AiEvaluation {
 
     /// Builds the store row for a successful classification.
     #[must_use]
-    pub fn to_stored(
+    pub(crate) fn to_stored(
         &self,
         domain: &str,
         model: &str,
@@ -400,7 +384,6 @@ fn persisted_evaluation(scores: &CategoryScores, policy: &AiPolicySnapshot) -> A
             outcome: AiOutcome::Allow,
             top_category: "",
             top_score: scores.max_score(),
-            qualified: false,
         };
     }
     AiEvaluation::evaluate(scores, policy)
@@ -449,25 +432,24 @@ mod tests {
     use super::*;
 
     fn policy_with(mode: AiDecisionMode, block_malicious: bool) -> AiPolicySnapshot {
-        let mk = |id: &'static str, order: usize, block: bool| AiCategorySetting {
+        let mk = |id: &'static str, block: bool| AiCategorySetting {
             id,
             enabled: true,
             threshold_percent: 80,
             block,
-            order,
         };
         AiPolicySnapshot {
             enabled: true,
             mode,
             categories: [
-                mk("advertising", 0, false),
-                mk("tracking", 1, false),
-                mk("telemetry", 2, false),
-                mk("analytics", 3, false),
-                mk("malicious", 4, block_malicious),
-                mk("security_fraud", 5, false),
-                mk("cryptomining", 6, false),
-                mk("tunnel", 7, false),
+                mk("advertising", false),
+                mk("tracking", false),
+                mk("telemetry", false),
+                mk("analytics", false),
+                mk("malicious", block_malicious),
+                mk("security_fraud", false),
+                mk("cryptomining", false),
+                mk("tunnel", false),
             ],
             generation: 1,
         }
@@ -499,7 +481,6 @@ mod tests {
             .iter()
             .all(|category| category.threshold_percent == 60));
         let evaluation = AiEvaluation::evaluate(&CategoryScores::new([0.0; 8]), &policy);
-        assert!(!evaluation.qualified);
         assert_eq!(evaluation.outcome, AiOutcome::Allow);
     }
 
@@ -631,7 +612,6 @@ mod tests {
         let scores = CategoryScores::new([0.1; 8]);
         let eval = AiEvaluation::evaluate(&scores, &policy);
         assert_eq!(eval.outcome, AiOutcome::Allow);
-        assert!(!eval.qualified);
         assert_eq!(eval.verdict_str(), "");
     }
 

@@ -36,7 +36,14 @@ impl DnsHintSink for NoopSink {
 }
 
 impl DnsBlockSink for NoopSink {
-    fn record_blocked_query(&self, _: &str, _: u32, _: &[String]) {}
+    fn record_blocked_query(
+        &self,
+        _: &str,
+        _: netmetrics::Ownership,
+        _: &[String],
+        _: time::OffsetDateTime,
+    ) {
+    }
 }
 
 struct BlockAll;

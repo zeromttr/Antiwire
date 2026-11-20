@@ -7,7 +7,6 @@ use hickory_proto::op::{Edns, Message, Metadata};
 use hickory_proto::rr::Record;
 
 use crate::ai::PostResponseWork;
-use crate::messages::build_servfail_response;
 use crate::response_cache::{AgedSections, CachedAnswer, ResponseCache};
 
 /// Parsed response a reply is encoded from.
@@ -95,15 +94,11 @@ impl PreparedResponse {
 /// Only the header is copied (it is `Copy`); records are cloned solely when
 /// [`ResponseCache::age_sections`] must count their TTLs down.
 pub(super) fn prepare_cached_message(
-    mut cached: CachedAnswer,
+    cached: CachedAnswer,
     request: &Message,
     post_ai: Option<PostResponseWork>,
 ) -> PreparedResponse {
-    let Some(shared) = cached.parsed_message.take() else {
-        // Locally generated SERVFAIL is excluded from AI learning.
-        return prepare_uncached_message(build_servfail_response(request), None);
-    };
-    let mut metadata = shared.metadata;
+    let mut metadata = cached.parsed_message.metadata;
     metadata.id = request.metadata.id;
     metadata.recursion_desired = request.metadata.recursion_desired;
     // RFC 6840 §5.8: AD goes only to a client that asked, by AD or DO.
@@ -113,9 +108,12 @@ pub(super) fn prepare_cached_message(
             .as_ref()
             .is_some_and(|edns| edns.flags().dnssec_ok);
     let stale = Instant::now() >= cached.fresh_until;
-    let body = match ResponseCache::age_sections(&cached, &shared) {
-        Some(sections) => ResponseBody::Aged { shared, sections },
-        None => ResponseBody::Shared(shared),
+    let body = match ResponseCache::age_sections(&cached) {
+        Some(sections) => ResponseBody::Aged {
+            shared: cached.parsed_message,
+            sections,
+        },
+        None => ResponseBody::Shared(cached.parsed_message),
     };
     PreparedResponse {
         metadata,

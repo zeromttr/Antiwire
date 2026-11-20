@@ -39,6 +39,13 @@ fn sample_response() -> Message {
     response
 }
 
+/// An entry for [`sample_response`], its answer good for `ttl` seconds.
+fn entry_with_ttl(ttl: u32) -> CachedAnswer {
+    let mut response = sample_response();
+    response.answers[0].ttl = ttl;
+    ResponseCache::entry_from_message(&response, false).expect("entry")
+}
+
 /// Test-local mirror of the query engine's generation-retry loop, built on
 /// [`ResponseCache::resolve_once`]. Production owns this loop (and its
 /// per-attempt upstream re-acquisition) in the query engine.
@@ -139,16 +146,26 @@ async fn oversized_answers_are_served_but_not_retained() {
     let cache = ResponseCache::new();
     let key = CacheKey::from_query("huge.test", RecordType::A, 1);
     let generation = cache.current_generation();
-    let oversized = vec![0u8; DNS_RESPONSE_CACHE_MAX_ENTRY_BYTES as usize + 1];
+    // 70 TXT records of 250 bytes encode to more than the 16 KiB limit.
+    let mut oversized = sample_response();
+    for _ in 0..70 {
+        oversized.add_answer(Record::from_rdata(
+            Name::from_ascii("example.test.").expect("name"),
+            300,
+            RData::TXT(rdata::TXT::new(vec!["x".repeat(250)])),
+        ));
+    }
+    let encoded_len = encode_message(&oversized).expect("encode").len();
+    assert!(encoded_len > DNS_RESPONSE_CACHE_MAX_ENTRY_BYTES as usize);
 
     let entry = resolve_with_retry(&cache, &key, generation, || async {
-        Ok(ResponseCache::entry_from_wire(&oversized, 300, false))
+        ResponseCache::entry_from_message(&oversized, false)
     })
     .await
     .expect("oversized answer is still returned to the client");
 
     assert!(!entry.cacheable);
-    assert_eq!(entry.encoded_len, oversized.len());
+    assert_eq!(entry.encoded_len, encoded_len);
     assert!(
         matches!(cache.probe(&key), CacheProbe::Miss),
         "oversized answer must not be retained"
@@ -407,7 +424,9 @@ async fn a_new_generation_never_adopts_a_stale_inflight_answer() {
     // re-fetch, not inherit the answer resolved over the old network.
     let cache = ResponseCache::new();
     let key = CacheKey::from_query("stale-cell.test", RecordType::A, 1);
-    let stale = ResponseCache::entry_from_wire(&[0xAA; 12], 300, false);
+    let stale = ResponseCache::entry_from_message(&sample_response(), false).expect("entry");
+    let mut answer = sample_response();
+    answer.answers[0].data = RData::A(rdata::A(std::net::Ipv4Addr::new(5, 6, 7, 8)));
 
     let retired = Arc::new(InflightState::first_waiter(cache.current_generation()));
     assert!(retired.result.set(SharedOutcome::Ready(Ok(stale))).is_ok());
@@ -417,16 +436,17 @@ async fn a_new_generation_never_adopts_a_stale_inflight_answer() {
     let fetched = Arc::new(AtomicU64::new(0));
     let entry = resolve_with_retry(&cache, &key, cache.current_generation(), || {
         let fetched = Arc::clone(&fetched);
+        let answer = &answer;
         async move {
             fetched.fetch_add(1, Ordering::SeqCst);
-            Ok(ResponseCache::entry_from_wire(&[0xBB; 13], 300, false))
+            ResponseCache::entry_from_message(answer, false)
         }
     })
     .await
     .expect("new generation resolves");
 
     assert_eq!(fetched.load(Ordering::SeqCst), 1, "stale cell was adopted");
-    assert_eq!(entry.encoded_len, 13);
+    assert_eq!(entry.parsed_message.answers[0].data, answer.answers[0].data);
     assert!(cache.inflight.is_empty());
 }
 
@@ -590,7 +610,7 @@ fn a_negative_answer_is_held_and_handed_out_for_no_longer_than_the_negative_limi
     );
 
     let entry = ResponseCache::entry_from_message(&upstream, true).expect("entry");
-    let handed_out = entry.parsed_message.as_deref().expect("message");
+    let handed_out = &entry.parsed_message;
     assert!(handed_out
         .authorities
         .iter()
@@ -635,8 +655,7 @@ fn fresh_response_drops_expired_auxiliary_records() {
 }
 
 fn age(entry: &CachedAnswer) -> Option<Arc<AgedSections>> {
-    let message = entry.parsed_message.as_deref().expect("parsed message");
-    ResponseCache::age_sections(entry, message)
+    ResponseCache::age_sections(entry)
 }
 
 /// A CNAME answer's hint is worked out once per elapsed second and shared by
@@ -666,16 +685,14 @@ fn an_answer_hint_is_kept_with_the_sections_it_was_read_from() {
     ));
     let message = Arc::new(response);
     let mut entry = ResponseCache::entry_from_message(&message, false).expect("entry");
-    let parsed = entry.parsed_message.clone().expect("parsed message");
-
-    let first = ResponseCache::answer_hint(&entry, &parsed).expect("hint");
+    let first = ResponseCache::answer_hint(&entry).expect("hint");
     assert_eq!(
         first.addresses.len(),
         2,
         "unaged, both addresses: {first:?}"
     );
     assert_eq!(first.ttl_ms, 5_000);
-    let again = ResponseCache::answer_hint(&entry, &parsed).expect("hint");
+    let again = ResponseCache::answer_hint(&entry).expect("hint");
     assert!(
         Arc::ptr_eq(&first.addresses, &again.addresses),
         "worked out once"
@@ -684,14 +701,14 @@ fn an_answer_hint_is_kept_with_the_sections_it_was_read_from() {
     entry.cached_at = Instant::now()
         .checked_sub(Duration::from_secs(10))
         .expect("instant supports subtraction");
-    let aged = ResponseCache::answer_hint(&entry, &parsed).expect("hint");
+    let aged = ResponseCache::answer_hint(&entry).expect("hint");
     assert_eq!(
         *aged.addresses,
         [std::net::IpAddr::V4(std::net::Ipv4Addr::new(10, 0, 0, 1))],
         "the expired additional is no longer sent, so it is no longer hinted"
     );
     assert_eq!(aged.ttl_ms, 290_000);
-    let again = ResponseCache::answer_hint(&entry, &parsed).expect("hint");
+    let again = ResponseCache::answer_hint(&entry).expect("hint");
     assert!(
         Arc::ptr_eq(&aged.addresses, &again.addresses),
         "worked out once"
@@ -717,7 +734,7 @@ fn record_ttls_are_capped_at_the_cache_lifetime() {
         })
         .expect("entry"),
     ] {
-        let stored = entry.parsed_message.as_deref().expect("parsed message");
+        let stored = &entry.parsed_message;
         assert_eq!(stored.answers[0].ttl, max, "served within the first second");
         assert_eq!(stored.additionals[0].ttl, max);
 
@@ -788,41 +805,6 @@ fn ttl_snapshot_distinguishes_fresh_and_stale_buckets() {
     assert!(
         !Arc::ptr_eq(&fresh, &stale),
         "fresh and stale serves in the same elapsed second must not share a snapshot"
-    );
-}
-
-#[test]
-#[ignore = "allocation and timing diagnostic; run with --ignored --nocapture on an optimized build"]
-fn ttl_snapshot_reuse_allocation_diagnostic() {
-    let mut entry = ResponseCache::entry_from_message(&sample_response(), false).expect("entry");
-    entry.cached_at = Instant::now()
-        .checked_sub(Duration::from_secs(2))
-        .expect("instant supports subtraction");
-    let warmup = age(&entry).expect("warmup");
-    let iterations = 20_000_u32;
-
-    let started = Instant::now();
-    for _ in 0..iterations {
-        std::hint::black_box(age(&entry));
-    }
-    let reused = started.elapsed();
-
-    let started = Instant::now();
-    for _ in 0..iterations {
-        std::hint::black_box(Arc::new(AgedSections {
-            answers: warmup.answers.clone(),
-            authorities: warmup.authorities.clone(),
-            additionals: warmup.additionals.clone(),
-            hint: std::sync::OnceLock::new(),
-        }));
-    }
-    let recopy = started.elapsed();
-
-    eprintln!(
-        "ttl snapshot diagnostic: {iterations} reused hits {reused:?}; recopying sections {recopy:?}"
-    );
-    eprintln!(
-        "this is a timing diagnostic, not an allocation proof; do not treat it as a measured gain"
     );
 }
 
@@ -921,7 +903,7 @@ fn short_ttl_entries_never_schedule_a_prefetch_while_fresh() {
     // insertion instant ΓÇö that made every fresh hit spawn a background
     // refresh, so a popular low-TTL domain re-queried upstream continuously.
     let ttl = u32::try_from(DNS_MIN_UPSTREAM_TTL_SECONDS).expect("positive floor");
-    let entry = ResponseCache::entry_from_wire(b"\0\0\0\0\0\0\0\0\0\0\0\0", ttl, false);
+    let entry = entry_with_ttl(ttl);
 
     assert!(
         entry.prefetch_at >= entry.fresh_until,
@@ -932,7 +914,7 @@ fn short_ttl_entries_never_schedule_a_prefetch_while_fresh() {
 
 #[test]
 fn long_ttl_entries_still_prefetch_shortly_before_expiry() {
-    let entry = ResponseCache::entry_from_wire(b"\0\0\0\0\0\0\0\0\0\0\0\0", 600, false);
+    let entry = entry_with_ttl(600);
 
     assert!(entry.prefetch_at < entry.fresh_until, "lead time exists");
     assert!(!entry.should_prefetch(), "not yet due at insertion");

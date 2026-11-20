@@ -163,7 +163,7 @@ type Received = Arc<std::sync::Mutex<Vec<Message>>>;
 /// The mock upstream's reply to `request`.
 fn mock_response(config: &MockUpstreamConfig, request: &Message) -> Message {
     let mut response = match config.negative {
-        _ if config.servfail => build_servfail_response(request),
+        _ if config.servfail => crate::messages::build_servfail_response(request),
         _ if config.alias_to.is_some() => {
             build_alias_response(request, config.ttl, config.alias_to.unwrap_or_default())
         }
@@ -452,16 +452,6 @@ pub fn encode_query(name: &str, qtype: RecordType, id: u16) -> Vec<u8> {
 }
 
 /// SERVFAIL echoing the question.
-fn build_servfail_response(request: &Message) -> Message {
-    let mut response = Message::response(request.metadata.id, OpCode::Query);
-    response.metadata.response_code = ResponseCode::ServFail;
-    response.metadata.recursion_available = true;
-    if let Some(question) = request.queries.first() {
-        response.add_query(question.clone());
-    }
-    response
-}
-
 /// NXDOMAIN or NODATA with an authority SOA, the shape a real zone returns.
 fn build_negative_response(request: &Message, negative: NegativeAnswer) -> Message {
     let question = request

@@ -735,8 +735,6 @@ mod tests {
             response,
             Some(PostResponseWork {
                 domain: name.trim_end_matches('.').to_owned(),
-                was_block: false,
-                eligible: true,
             }),
         )
     }

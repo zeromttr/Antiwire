@@ -23,12 +23,8 @@ use super::key::CacheKey;
 /// Cached DNS answer with freshness metadata.
 #[derive(Debug, Clone)]
 pub(crate) struct CachedAnswer {
-    /// Pre-parsed response the cache-hit path encodes from.
-    ///
-    /// Entries admitted from raw bytes parse once at insertion. Invalid raw
-    /// bytes can still be used by cache bookkeeping tests, but cannot be
-    /// served through the parsed response path.
-    pub(crate) parsed_message: Option<Arc<Message>>,
+    /// Parsed response the cache-hit path encodes from.
+    pub(crate) parsed_message: Arc<Message>,
     /// Encoded response size used for admission, cache weighting, and response
     /// buffer sizing without retaining a second copy of the DNS payload.
     pub(crate) encoded_len: usize,
@@ -115,12 +111,8 @@ pub(super) fn cache_entry_weight(key: &CacheKey, value: &CachedAnswer) -> u32 {
     // than the packet. Three times the encoded size plus owned key/fixed
     // storage is intentionally conservative without requiring a hot-path tree
     // walk for exact heap accounting.
-    let parsed_estimate = if value.parsed_message.is_some() {
-        // One extra encoded-size budget covers the bounded aged-section snapshot.
-        value.encoded_len.saturating_mul(4)
-    } else {
-        value.encoded_len
-    };
+    // One extra encoded-size budget covers the bounded aged-section snapshot.
+    let parsed_estimate = value.encoded_len.saturating_mul(4);
     let structural = std::mem::size_of::<CacheKey>()
         .saturating_add(std::mem::size_of::<CachedAnswer>())
         .saturating_add(crate::domain_key::heap_bytes(&key.domain));
@@ -141,7 +133,7 @@ impl super::ResponseCache {
             encoded_len,
             Self::message_ttl_seconds(&message),
             negative,
-            Some(Arc::new(message)),
+            Arc::new(message),
         ))
     }
 
@@ -164,26 +156,15 @@ impl super::ResponseCache {
             encoded_len,
             ttl_seconds,
             negative,
-            Some(Arc::new(message)),
+            Arc::new(message),
         ))
-    }
-
-    /// Builds a cached entry from encoded wire bytes.
-    ///
-    /// An answer above the per-entry size limit is returned marked
-    /// [`CachedAnswer::cacheable`] `= false` rather than as an error: it is a
-    /// valid response and must reach the client, it simply is not retained.
-    #[cfg(test)]
-    pub(crate) fn entry_from_wire(wire: &[u8], ttl_seconds: u32, negative: bool) -> CachedAnswer {
-        let parsed_message = Message::from_vec(wire).ok().map(Arc::new);
-        Self::entry(wire.len(), ttl_seconds, negative, parsed_message)
     }
 
     fn entry(
         encoded_len: usize,
         ttl_seconds: u32,
         negative: bool,
-        parsed_message: Option<Arc<Message>>,
+        parsed_message: Arc<Message>,
     ) -> CachedAnswer {
         let cacheable = encoded_len <= DNS_RESPONSE_CACHE_MAX_ENTRY_BYTES as usize;
 

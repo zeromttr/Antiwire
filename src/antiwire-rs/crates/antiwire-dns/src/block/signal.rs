@@ -310,11 +310,11 @@ fn block_signal_worker(
                 .unwrap_or_else(|| deferred_query_owner(&context, Purpose::BlockedQuery)),
             BlockOwner::Deferred(context) => deferred_query_owner(&context, Purpose::BlockedQuery),
         };
-        sink.record_blocked_query_with_ownership(
+        sink.record_blocked_query(
             &event.domain,
             ownership,
             &event.blocklist_names,
-            Some(event.timestamp),
+            event.timestamp,
         );
     }
 }
@@ -329,14 +329,12 @@ mod tests {
     }
 
     impl DnsBlockSink for OwnershipSink {
-        fn record_blocked_query(&self, _domain: &str, _pid: u32, _blocklist_names: &[String]) {}
-
-        fn record_blocked_query_with_ownership(
+        fn record_blocked_query(
             &self,
             _domain: &str,
             ownership: crate::port_mapper::Ownership,
             _blocklist_names: &[String],
-            _timestamp: Option<time::OffsetDateTime>,
+            _timestamp: time::OffsetDateTime,
         ) {
             *self.ownership.lock() = Some(ownership);
         }
@@ -403,24 +401,14 @@ mod tests {
         );
     }
 
-    #[test]
-    fn sink_contract_preserves_ambiguous_socket_ownership() {
-        let sink = OwnershipSink::default();
-        sink.record_blocked_query_with_ownership(
-            "shared.example",
-            crate::port_mapper::Ownership::Ambiguous,
-            &[],
-            None,
-        );
-
-        assert_eq!(
-            *sink.ownership.lock(),
-            Some(crate::port_mapper::Ownership::Ambiguous)
-        );
-    }
-
     impl DnsBlockSink for CountingSink {
-        fn record_blocked_query(&self, _domain: &str, _pid: u32, _blocklist_names: &[String]) {
+        fn record_blocked_query(
+            &self,
+            _domain: &str,
+            _ownership: netmetrics::Ownership,
+            _blocklist_names: &[String],
+            _timestamp: time::OffsetDateTime,
+        ) {
             self.recorded.fetch_add(1, Ordering::Relaxed);
         }
     }

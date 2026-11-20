@@ -368,7 +368,7 @@ where
         source: Option<DomainBlockSource>,
     ) -> Option<PostResponseWork> {
         (source == Some(DomainBlockSource::Blocklist))
-            .then(|| self.post_work_for_domain_key(&prepared.cache_key.domain, true))
+            .then(|| self.post_work_for_domain_key(&prepared.cache_key.domain))
             .flatten()
     }
 

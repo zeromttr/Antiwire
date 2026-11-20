@@ -412,14 +412,12 @@ struct OwnerCount {
 }
 
 impl DnsBlockSink for OwnerCount {
-    fn record_blocked_query(&self, _: &str, _: u32, _: &[String]) {}
-
-    fn record_blocked_query_with_ownership(
+    fn record_blocked_query(
         &self,
         _: &str,
         ownership: Ownership,
         _: &[String],
-        _: Option<time::OffsetDateTime>,
+        _: time::OffsetDateTime,
     ) {
         let counter = if ownership.resolved_pid() == Some(std::process::id()) {
             &self.named

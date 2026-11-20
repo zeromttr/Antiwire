@@ -647,25 +647,24 @@ mod ai_gate {
     use crate::ai::{AiCoordinator, AiPolicySnapshot};
 
     fn proactive_block_policy() -> AiPolicySnapshot {
-        let mk = |id: &'static str, order: usize, block: bool| AiCategorySetting {
+        let mk = |id: &'static str, block: bool| AiCategorySetting {
             id,
             enabled: true,
             threshold_percent: 80,
             block,
-            order,
         };
         AiPolicySnapshot {
             enabled: true,
             mode: AiDecisionMode::Proactive,
             categories: [
-                mk("advertising", 0, false),
-                mk("tracking", 1, false),
-                mk("telemetry", 2, false),
-                mk("analytics", 3, false),
-                mk("malicious", 4, true),
-                mk("security_fraud", 5, false),
-                mk("cryptomining", 6, false),
-                mk("tunnel", 7, false),
+                mk("advertising", false),
+                mk("tracking", false),
+                mk("telemetry", false),
+                mk("analytics", false),
+                mk("malicious", true),
+                mk("security_fraud", false),
+                mk("cryptomining", false),
+                mk("tunnel", false),
             ],
             generation: 1,
         }
@@ -767,7 +766,13 @@ mod ai_gate {
     }
 
     impl DnsBlockSink for RecordingSink {
-        fn record_blocked_query(&self, _domain: &str, _pid: u32, blocklist_names: &[String]) {
+        fn record_blocked_query(
+            &self,
+            _domain: &str,
+            _ownership: netmetrics::Ownership,
+            blocklist_names: &[String],
+            _timestamp: time::OffsetDateTime,
+        ) {
             *self.names.lock().expect("names") = blocklist_names.to_vec();
         }
     }
@@ -1021,25 +1026,24 @@ mod ai_gate {
     #[tokio::test]
     async fn retroactive_post_response_saves_without_delaying_answer() {
         use crate::ai::decision::AiDecisionMode as Mode;
-        let mk = |id: &'static str, order: usize| AiCategorySetting {
+        let mk = |id: &'static str| AiCategorySetting {
             id,
             enabled: true,
             threshold_percent: 80,
             block: false,
-            order,
         };
         let policy = AiPolicySnapshot {
             enabled: true,
             mode: Mode::Retroactive,
             categories: [
-                mk("advertising", 0),
-                mk("tracking", 1),
-                mk("telemetry", 2),
-                mk("analytics", 3),
-                mk("malicious", 4),
-                mk("security_fraud", 5),
-                mk("cryptomining", 6),
-                mk("tunnel", 7),
+                mk("advertising"),
+                mk("tracking"),
+                mk("telemetry"),
+                mk("analytics"),
+                mk("malicious"),
+                mk("security_fraud"),
+                mk("cryptomining"),
+                mk("tunnel"),
             ],
             generation: 1,
         };
@@ -1050,8 +1054,6 @@ mod ai_gate {
         // Simulate handler ordering: response already sent, then submit.
         ai.submit_post_response(&crate::ai::PostResponseWork {
             domain: "retro.example".to_owned(),
-            was_block: false,
-            eligible: true,
         });
         let saved = tokio::time::timeout(Duration::from_secs(5), async {
             loop {
@@ -1184,7 +1186,7 @@ mod ai_gate {
                 .1
         };
         let blocklist = post_work(DomainBlockSource::Blocklist).expect("blocklist classification");
-        assert!(blocklist.was_block);
+        assert_eq!(blocklist.domain, "gated.example");
         assert!(post_work(DomainBlockSource::DnsRule).is_none());
 
         *decision.write() = None;
@@ -1288,7 +1290,13 @@ mod new_domain_gate {
     }
 
     impl DnsBlockSink for RecordingSink {
-        fn record_blocked_query(&self, _domain: &str, _pid: u32, blocklist_names: &[String]) {
+        fn record_blocked_query(
+            &self,
+            _domain: &str,
+            _ownership: netmetrics::Ownership,
+            blocklist_names: &[String],
+            _timestamp: time::OffsetDateTime,
+        ) {
             *self.names.lock().expect("names") = blocklist_names.to_vec();
         }
     }

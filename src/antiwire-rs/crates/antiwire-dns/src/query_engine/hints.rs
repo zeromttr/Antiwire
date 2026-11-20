@@ -44,14 +44,10 @@ where
             return;
         };
         let context = client.context;
-        let Some(message) = answer.parsed_message.as_deref() else {
-            return;
-        };
-        if self.provider_filter.read().is_block(message) {
+        if self.provider_filter.read().is_block(&answer.parsed_message) {
             return;
         }
-        let Some(AnswerHint { addresses, ttl_ms }) = ResponseCache::answer_hint(answer, message)
-        else {
+        let Some(AnswerHint { addresses, ttl_ms }) = ResponseCache::answer_hint(answer) else {
             return;
         };
         // The client has the address from this moment and can connect at
