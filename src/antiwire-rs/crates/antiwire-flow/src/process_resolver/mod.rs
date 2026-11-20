@@ -162,6 +162,11 @@ impl ProcessIdentities {
     /// not: it may have exited before `at_ms` and another taken its PID, and
     /// its stop event, when it arrives, will say.
     ///
+    /// A process that exited can be vouched for by name alone. Its lifecycle
+    /// events then named it without a path, as the kernel's exit record does
+    /// for a process already gone from `/proc`, and the answer carries the
+    /// `Path unavailable` placeholder, never a path nobody reported.
+    ///
     /// This counts nothing towards [`Self::resolution_stats`], which describe
     /// attributing connections, and discards no cached identity.
     pub(crate) fn identity_at(&self, pid: u32, at_ms: u64) -> Option<ResolvedIdentity> {
@@ -188,11 +193,17 @@ impl ProcessIdentities {
         let bracketed = tracked.stopped
             && tracked.stop_ts != 0
             && tracked.stop_ts.saturating_add(START_TS_TOLERANCE_MS) >= at_ms
-            && started_by_then(identity.start_ts)
-            && has_path_separators(&identity.path)
-            && !is_synthetic_path(&identity.path);
-        bracketed.then(|| ResolvedIdentity {
-            path: sanitize::trimmed(&identity.path, sanitize::MAX_PATH_CHARS),
+            && started_by_then(identity.start_ts);
+        if !bracketed {
+            return None;
+        }
+        let path = if has_path_separators(&identity.path) && !is_synthetic_path(&identity.path) {
+            sanitize::trimmed(&identity.path, sanitize::MAX_PATH_CHARS)
+        } else {
+            placeholder_path().to_owned()
+        };
+        Some(ResolvedIdentity {
+            path,
             name: sanitize::trimmed(&identity.name, sanitize::MAX_NAME_CHARS),
             start_ts: identity.start_ts,
         })
@@ -542,7 +553,11 @@ fn fallback_from_basename(
     meta_path: Option<&str>,
     meta_name: Option<&str>,
 ) -> Option<(String, String)> {
-    let basename = meta_path.filter(|value| is_basename_only(value))?;
+    // An unknown placeholder says an earlier lookup failed. Handed back here
+    // as the path, it is not a file name, and would name an application
+    // "Unknown" where the process is simply unknown.
+    let basename =
+        meta_path.filter(|value| is_basename_only(value) && !is_unknown_placeholder(value))?;
     let name = meta_name
         .filter(|value| !value.is_empty())
         .map_or_else(|| normalize_process_name(basename), normalize_process_name);
@@ -662,6 +677,41 @@ mod tests {
             0,
             "these are not connection attributions"
         );
+    }
+
+    /// A process that exited before it could be asked is reported by name
+    /// alone. Its lifetime is as well established as any other's.
+    #[test]
+    fn a_past_moment_is_answered_by_name_when_no_path_was_reported() {
+        for executable in ["", "curl.exe"] {
+            let processes = ProcessIdentities::new();
+            let pid = 918_003;
+            processes.process_started(pid, executable, "curl.exe", 10_000);
+            processes.process_stopped_at(pid, 12_000);
+            let identity = processes.identity_at(pid, 11_000).expect("bracketed");
+            assert_eq!(
+                (
+                    identity.path.as_str(),
+                    identity.name.as_str(),
+                    identity.start_ts
+                ),
+                (placeholder_path(), "curl.exe", 10_000)
+            );
+            assert_eq!(processes.identity_at(pid, 14_000), None, "after it exited");
+        }
+    }
+
+    /// A stop can be delivered before the start it belongs to.
+    #[test]
+    fn a_past_moment_is_bracketed_by_a_stop_that_arrived_before_its_start() {
+        let processes = ProcessIdentities::new();
+        let pid = 918_004;
+        processes.process_stopped_at(pid, 12_000);
+        assert_eq!(processes.identity_at(pid, 11_000), None, "nobody is named");
+        processes.process_started(pid, CURL_PATH, "curl.exe", 10_000);
+        let identity = processes.identity_at(pid, 11_000).expect("bracketed");
+        assert_eq!(identity.path, CURL_PATH);
+        assert_eq!(processes.identity_at(pid, 14_000), None, "after it exited");
     }
 
     #[test]

@@ -364,6 +364,31 @@ fn block_without_any_owner_stays_unknown_no_owner() {
     assert_eq!(path, "Unknown (No Owner)");
 }
 
+/// The regression this guards: the socket's owner was found and had exited
+/// before it could be named. The unknown placeholder that said so was handed
+/// back to the resolver as a file name, and the row was filed under an
+/// application called "Unknown" with no path, not under the exited process.
+#[test]
+fn block_whose_owner_has_exited_unnamed_says_so() {
+    let dir = tempdir().expect("tempdir");
+    let keystore = UnixSecureFileKeyProvider::new(dir.path().join("key"));
+    let store =
+        Arc::new(Store::open_with_keystore(dir.path().join("db.sqlite"), &keystore).expect("open"));
+    let correlator = Arc::new(DnsQueryCorrelator::default());
+    let (recorder, _app_resolver) = block_recorder_fixture(&store, &correlator);
+
+    recorder.record_blocked_query_with_ownership(
+        "github.com",
+        Ownership::Resolved(5_300_031),
+        &[],
+        Some(OffsetDateTime::now_utc()),
+    );
+
+    let (name, path) = wait_for_persisted_app(&store);
+    assert_eq!(name, crate::process_resolver::UNKNOWN_APP_NAME);
+    assert_eq!(path, "Unknown (Exited)");
+}
+
 fn block_key(domain: &str) -> DnsBlockKey {
     DnsBlockKey {
         pid: 42,

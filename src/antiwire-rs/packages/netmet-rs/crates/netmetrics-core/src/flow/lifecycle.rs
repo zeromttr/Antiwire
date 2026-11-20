@@ -211,6 +211,18 @@ impl FlowTable {
         self.entries.get(key).is_some_and(|entry| entry.finishing)
     }
 
+    /// Whether the flow tracked for `key` opened after `timestamp`.
+    ///
+    /// Something reported for that moment happened to an earlier socket on the same
+    /// addresses, not to this flow's: a close delivered after a new socket took them over.
+    #[must_use]
+    pub fn opened_after(&self, key: &FlowKey, timestamp: u64) -> bool {
+        let key = self.resolve_existing_key(*key);
+        self.entries
+            .get(&key)
+            .is_some_and(|entry| entry.meta.open_ts > timestamp)
+    }
+
     /// Removes and returns a terminal record for a flow.
     pub fn close(&mut self, key: &FlowKey, timestamp: u64) -> Option<FlowRecord> {
         let key = self.resolve_existing_key(*key);
