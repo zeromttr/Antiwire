@@ -16,7 +16,7 @@ use crate::special_use::answers_with_loopback;
 /// What makes an upstream answer resolve a public name into the local network.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) enum RebindingTarget {
-    /// A loopback, private, or link-local address.
+    /// An address in the local network (see [`is_rebinding_target`]).
     Address(IpAddr),
     /// An alias or service target that this resolver answers itself with a
     /// loopback address. The client's follow-up query for it never reaches an
@@ -33,7 +33,7 @@ impl fmt::Display for RebindingTarget {
     }
 }
 
-/// Returns true when answer or additional records carry loopback, private, or link-local addresses.
+/// Returns true when answer or additional records carry a rebinding target.
 #[cfg(test)]
 #[must_use]
 pub(crate) fn contains_rebinding_address(response: &[u8]) -> bool {
@@ -71,6 +71,8 @@ fn rdata_find_rebinding_target(rdata: &RData) -> Option<RebindingTarget> {
         RData::A(addr) => address_target(IpAddr::V4(**addr)),
         RData::AAAA(addr) => address_target(IpAddr::V6(**addr)),
         RData::CNAME(cname) => loopback_name_target(&cname.0),
+        // The client resolves the target for the address it connects to.
+        RData::SRV(srv) => loopback_name_target(&srv.target),
         RData::SVCB(svcb) => svcb_find_rebinding_target(svcb),
         RData::HTTPS(https) => svcb_find_rebinding_target(&https.0),
         RData::Unknown {
@@ -117,8 +119,10 @@ fn svcb_find_rebinding_target(svcb: &SVCB) -> Option<RebindingTarget> {
 }
 
 /// IPv4 networks a public name must not resolve into: "this network",
-/// RFC 1918, CGNAT, loopback, and link-local.
-const REBINDING_V4: [Ipv4Net; 7] = [
+/// RFC 1918, CGNAT, loopback, link-local, multicast (RFC 5771), and the
+/// limited broadcast address. A datagram to either of the last two reaches
+/// every listener on the link, or for wider multicast scopes, the site.
+const REBINDING_V4: [Ipv4Net; 9] = [
     Ipv4Net::new_assert(Ipv4Addr::UNSPECIFIED, 8),
     Ipv4Net::new_assert(Ipv4Addr::new(10, 0, 0, 0), 8),
     Ipv4Net::new_assert(Ipv4Addr::new(100, 64, 0, 0), 10),
@@ -126,42 +130,72 @@ const REBINDING_V4: [Ipv4Net; 7] = [
     Ipv4Net::new_assert(Ipv4Addr::new(169, 254, 0, 0), 16),
     Ipv4Net::new_assert(Ipv4Addr::new(172, 16, 0, 0), 12),
     Ipv4Net::new_assert(Ipv4Addr::new(192, 168, 0, 0), 16),
+    Ipv4Net::new_assert(Ipv4Addr::new(224, 0, 0, 0), 4),
+    Ipv4Net::new_assert(Ipv4Addr::BROADCAST, 32),
 ];
 
 /// IPv6 networks a public name must not resolve into: unspecified,
-/// loopback, link-local, legacy site-local, and unique local.
-const REBINDING_V6: [Ipv6Net; 5] = [
+/// loopback, link-local, legacy site-local, unique local, and multicast
+/// (RFC 4291).
+const REBINDING_V6: [Ipv6Net; 6] = [
     Ipv6Net::new_assert(Ipv6Addr::UNSPECIFIED, 128),
     Ipv6Net::new_assert(Ipv6Addr::LOCALHOST, 128),
     Ipv6Net::new_assert(Ipv6Addr::new(0xfe80, 0, 0, 0, 0, 0, 0, 0), 10),
     Ipv6Net::new_assert(Ipv6Addr::new(0xfec0, 0, 0, 0, 0, 0, 0, 0), 10),
     Ipv6Net::new_assert(Ipv6Addr::new(0xfc00, 0, 0, 0, 0, 0, 0, 0), 7),
+    Ipv6Net::new_assert(Ipv6Addr::new(0xff00, 0, 0, 0, 0, 0, 0, 0), 8),
 ];
 
 /// IPv6 prefixes that carry an IPv4 address in their low 32 bits, which is
-/// judged as that address: IPv4-mapped, IPv4-compatible (deprecated), the
-/// NAT64 well-known prefix (RFC 6052), and the local-use NAT64 prefix
-/// (RFC 8215) in its usual /96 layout.
-const EMBEDDED_V4: [Ipv6Net; 4] = [
+/// judged as that address: IPv4-mapped, IPv4-compatible (deprecated),
+/// IPv4-translated (RFC 2765, `::ffff:0:a.b.c.d`), the NAT64 well-known
+/// prefix (RFC 6052), and the local-use NAT64 prefix (RFC 8215) in its usual
+/// /96 layout.
+const EMBEDDED_V4: [Ipv6Net; 5] = [
     Ipv6Net::new_assert(Ipv6Addr::new(0, 0, 0, 0, 0, 0xffff, 0, 0), 96),
     Ipv6Net::new_assert(Ipv6Addr::UNSPECIFIED, 96),
+    Ipv6Net::new_assert(Ipv6Addr::new(0, 0, 0, 0, 0xffff, 0, 0, 0), 96),
     Ipv6Net::new_assert(Ipv6Addr::new(0x64, 0xff9b, 0, 0, 0, 0, 0, 0), 96),
     Ipv6Net::new_assert(Ipv6Addr::new(0x64, 0xff9b, 1, 0, 0, 0, 0, 0), 48),
 ];
 
-/// Returns true for loopback, unspecified, link-local, RFC1918, CGNAT, and ULA targets.
+/// 6to4 (RFC 3056 §2): `2002:V4ADDR::/48`, the site's IPv4 address in bits
+/// 16 to 47. A host with a 6to4 interface sends to it over that address.
+const SIX_TO_FOUR: Ipv6Net = Ipv6Net::new_assert(Ipv6Addr::new(0x2002, 0, 0, 0, 0, 0, 0, 0), 16);
+
+/// Teredo (RFC 4380 §4): the server's IPv4 address in bits 32 to 63, and the
+/// client's, every bit inverted, in bits 96 to 127. A Teredo client reaches
+/// the peer over those addresses.
+const TEREDO: Ipv6Net = Ipv6Net::new_assert(Ipv6Addr::new(0x2001, 0, 0, 0, 0, 0, 0, 0), 32);
+
+/// Returns true for an address in the local network: loopback, unspecified,
+/// link-local, RFC 1918, CGNAT, unique local, multicast, or limited
+/// broadcast, or an IPv6 address that stands for such an IPv4 address.
 #[must_use]
 pub(crate) fn is_rebinding_target(ip: IpAddr) -> bool {
     match ip {
         IpAddr::V4(addr) => is_rebinding_ipv4(addr),
         IpAddr::V6(addr) => {
-            REBINDING_V6.iter().any(|net| net.contains(&addr))
-                || EMBEDDED_V4.iter().any(|net| net.contains(&addr)) && {
-                    let [.., a, b, c, d] = addr.octets();
-                    is_rebinding_ipv4(Ipv4Addr::new(a, b, c, d))
-                }
+            REBINDING_V6.iter().any(|net| net.contains(&addr)) || embeds_rebinding_ipv4(addr)
         }
     }
+}
+
+/// Whether `addr` carries an IPv4 address, by any of the layouts above, that
+/// is itself a rebinding target.
+fn embeds_rebinding_ipv4(addr: Ipv6Addr) -> bool {
+    let [_, _, a2, a3, a4, a5, a6, a7, _, _, _, _, a12, a13, a14, a15] = addr.octets();
+    if EMBEDDED_V4.iter().any(|net| net.contains(&addr)) {
+        return is_rebinding_ipv4(Ipv4Addr::new(a12, a13, a14, a15));
+    }
+    if SIX_TO_FOUR.contains(&addr) {
+        return is_rebinding_ipv4(Ipv4Addr::new(a2, a3, a4, a5));
+    }
+    if TEREDO.contains(&addr) {
+        return is_rebinding_ipv4(Ipv4Addr::new(a4, a5, a6, a7))
+            || is_rebinding_ipv4(Ipv4Addr::new(!a12, !a13, !a14, !a15));
+    }
+    false
 }
 
 fn is_rebinding_ipv4(addr: Ipv4Addr) -> bool {
@@ -238,6 +272,73 @@ mod tests {
         assert!(!is_rebinding_target(IpAddr::V6(compat(0x0808, 0x0808))));
         assert!(is_rebinding_target(IpAddr::V6(Ipv6Addr::UNSPECIFIED)));
         assert!(is_rebinding_target(IpAddr::V6(Ipv6Addr::LOCALHOST)));
+    }
+
+    fn is_target(addr: Ipv6Addr) -> bool {
+        is_rebinding_target(IpAddr::V6(addr))
+    }
+
+    /// The regression this guards: multicast and the limited broadcast address
+    /// passed, though a datagram sent to either reaches every listener on the
+    /// link, or, for wider multicast scopes, the site.
+    #[test]
+    fn multicast_and_limited_broadcast_are_rebinding_targets() {
+        for v4 in [
+            Ipv4Addr::BROADCAST,
+            Ipv4Addr::new(224, 0, 0, 251),
+            Ipv4Addr::new(239, 255, 255, 250),
+        ] {
+            assert!(is_rebinding_target(IpAddr::V4(v4)), "{v4}");
+        }
+        assert!(!is_rebinding_target(IpAddr::V4(Ipv4Addr::new(
+            223, 255, 255, 254
+        ))));
+        for v6 in [
+            Ipv6Addr::new(0xff02, 0, 0, 0, 0, 0, 0, 0xfb),
+            Ipv6Addr::new(0xff05, 0, 0, 0, 0, 0, 1, 3),
+        ] {
+            assert!(is_target(v6), "{v6}");
+        }
+    }
+
+    /// The regression this guards: an IPv6 address that stands for an IPv4
+    /// one by a layout other than the low 32 bits passed with a private IPv4
+    /// in it: IPv4-translated (RFC 2765, `::ffff:0:a.b.c.d`), 6to4 (RFC 3056,
+    /// the IPv4 in bits 16 to 47) and Teredo (RFC 4380, the server in bits 32
+    /// to 63 and the client, every bit inverted, in the low 32).
+    #[test]
+    fn rebinding_target_detects_translated_6to4_and_teredo_embedded_private_ipv4() {
+        let translated = |a, b| Ipv6Addr::new(0, 0, 0, 0, 0xffff, 0, a, b);
+        assert!(is_target(translated(0xc0a8, 0x0101)));
+        assert!(!is_target(translated(0x0808, 0x0808)));
+
+        let six_to_four = |a, b| Ipv6Addr::new(0x2002, a, b, 0, 0, 0, 0, 1);
+        assert!(is_target(six_to_four(0xc0a8, 0x0101)));
+        assert!(is_target(six_to_four(0x7f00, 0x0001)));
+        assert!(!is_target(six_to_four(0x0808, 0x0808)));
+
+        let teredo = |server: Ipv4Addr, client: Ipv4Addr| {
+            let [s0, s1, s2, s3] = server.octets();
+            let [c0, c1, c2, c3] = client.octets();
+            Ipv6Addr::new(
+                0x2001,
+                0,
+                u16::from_be_bytes([s0, s1]),
+                u16::from_be_bytes([s2, s3]),
+                0x8000,
+                0xf227,
+                u16::from_be_bytes([!c0, !c1]),
+                u16::from_be_bytes([!c2, !c3]),
+            )
+        };
+        let public_server = Ipv4Addr::new(198, 51, 100, 10);
+        let public_client = Ipv4Addr::new(203, 0, 113, 5);
+        assert!(is_target(teredo(
+            public_server,
+            Ipv4Addr::new(192, 168, 1, 1)
+        )));
+        assert!(is_target(teredo(Ipv4Addr::new(10, 0, 0, 1), public_client)));
+        assert!(!is_target(teredo(public_server, public_client)));
     }
 
     #[test]
@@ -370,6 +471,34 @@ mod tests {
                 "DNAME {target}"
             );
         }
+    }
+
+    fn srv(target: &str) -> RData {
+        RData::SRV(hickory_proto::rr::rdata::SRV::new(
+            10,
+            5,
+            5060,
+            name(target),
+        ))
+    }
+
+    /// The regression this guards: an SRV record pointing a public service at
+    /// `localhost` passed, and the client's query for the target was answered
+    /// here with a loopback address.
+    #[test]
+    fn a_service_record_targeting_a_name_answered_as_loopback_is_a_rebinding_target() {
+        assert_eq!(
+            find_rebinding_address(&wire_answer(srv("localhost."))),
+            Some(RebindingTarget::LoopbackName(name("localhost.")))
+        );
+        assert!(contains_rebinding_address(&wire_answer(srv(
+            "sip.localhost."
+        ))));
+        assert!(!contains_rebinding_address(&wire_answer(srv(
+            "sip.example.net."
+        ))));
+        // RFC 2782: a target of "." says the service is not offered there.
+        assert!(!contains_rebinding_address(&wire_answer(srv("."))));
     }
 
     /// The client resolves an SVCB/HTTPS target for addresses in `AliasMode` and
