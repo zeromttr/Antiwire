@@ -22,7 +22,7 @@ concurrency:
   cancel-in-progress: true
 
 env:
-  ANTIWIRE_VERSION: 0.1.0
+  ANTIWIRE_VERSION: 0.1.1
   RUST_BACKTRACE: "1"
 
 jobs:
