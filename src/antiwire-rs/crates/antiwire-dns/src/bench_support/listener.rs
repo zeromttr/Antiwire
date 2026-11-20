@@ -7,14 +7,16 @@
 //!
 //! Every hit scenario queries one cached name; the saturation scenarios add a
 //! flood of uncached names forwarded to an upstream that never answers, first
-//! while it is still trusted and then after it has been marked down.
+//! while it is still trusted and then after it has been marked down. One more
+//! adds blocked names asked from freshly bound sockets, whose owners can only
+//! be found by reading the socket table.
 
 use std::net::{SocketAddr, UdpSocket as StdUdpSocket};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
-use antiwire_policy::RuleEngine;
+use antiwire_policy::{DomainBlockSource, DomainDecision, PolicyEngine, RuleEngine, Verdict};
 use antiwire_tuning::DNS_QUERY_DEADLINE;
 use hickory_proto::op::{Message, MessageType, OpCode, Query};
 use hickory_proto::rr::{rdata, Name, RData, Record, RecordType};
@@ -23,8 +25,10 @@ use tokio::net::{TcpStream, UdpSocket};
 use tokio::runtime::Runtime;
 
 use super::edns_with;
+use crate::block::DnsBlockSink;
 use crate::listener::DnsListener;
 use crate::messages::encode_message;
+use crate::port_mapper::Ownership;
 use crate::query_engine::{EngineServices, QueryEngine};
 use crate::response_cache::{CacheKey, QueryFlags, ResponseCache};
 use crate::settings::DnsConfig;
@@ -95,6 +99,13 @@ pub(super) fn run() {
     );
     degraded.stop(&server);
     drop(silent);
+
+    // Last: on Windows the thousands of sockets this binds slow what runs
+    // next for a while; run before the floods, it raised the first flood's hit
+    // p50 by about half.
+    for _ in 0..ROUNDS {
+        hits_while_fresh_sockets_are_blocked(&server, &clients);
+    }
 }
 
 fn runtime(name: &str) -> Runtime {
@@ -114,15 +125,32 @@ struct BenchServer {
 
 impl BenchServer {
     fn start(runtime: &Runtime, upstream: String) -> Self {
+        Self::start_with(
+            runtime,
+            upstream,
+            RuleEngine::new(),
+            EngineServices::default(),
+        )
+    }
+
+    fn start_with<P>(
+        runtime: &Runtime,
+        upstream: String,
+        policy: P,
+        services: EngineServices,
+    ) -> Self
+    where
+        P: PolicyEngine + Send + Sync + Unpin + 'static,
+    {
         runtime.block_on(async {
             let stub = Arc::new(
                 QueryEngine::try_new(
-                    RuleEngine::new(),
+                    policy,
                     &DnsConfig {
                         upstreams: vec![upstream],
                         ..DnsConfig::default()
                     },
-                    EngineServices::default(),
+                    services,
                 )
                 .expect("dns stub"),
             );
@@ -158,7 +186,7 @@ fn hit_wire() -> Vec<u8> {
     encode_message(&hit_query()).expect("encode hit query")
 }
 
-fn seed_hit(stub: &QueryEngine<RuleEngine>) {
+fn seed_hit<P: PolicyEngine + Send + Sync>(stub: &QueryEngine<P>) {
     let query = hit_query();
     let mut response = Message::response(0, OpCode::Query);
     response.metadata.recursion_available = true;
@@ -356,6 +384,135 @@ async fn tcp_client(server: SocketAddr, window: usize, total: usize) -> Round {
         // Replies may come back out of order, so match on the echoed id.
         let id = usize::from(u16::from_be_bytes([buffer[0], buffer[1]]));
         round.latencies.push(sent_at[id].elapsed());
+    }
+    round
+}
+
+/// Names under this zone are blocked by [`BlockZone`].
+const BLOCKED_ZONE: &str = "blocked.listener.bench";
+
+/// Blocks [`BLOCKED_ZONE`] and nothing else.
+struct BlockZone;
+
+impl PolicyEngine for BlockZone {
+    fn evaluate_domain_with_source(&self, domain: &str) -> Option<DomainDecision> {
+        domain.ends_with(BLOCKED_ZONE).then_some(DomainDecision {
+            verdict: Verdict::Block,
+            source: Some(DomainBlockSource::DnsRule),
+        })
+    }
+}
+
+/// Counts blocked queries by whether they were put down to this process,
+/// which owns every socket the bench asks from.
+#[derive(Default)]
+struct OwnerCount {
+    named: AtomicU64,
+    unnamed: AtomicU64,
+}
+
+impl DnsBlockSink for OwnerCount {
+    fn record_blocked_query(
+        &self,
+        _: &str,
+        ownership: Ownership,
+        _: &[String],
+        _: time::OffsetDateTime,
+    ) {
+        let counter = if ownership.resolved_pid() == Some(std::process::id()) {
+            &self.named
+        } else {
+            &self.unnamed
+        };
+        counter.fetch_add(1, Ordering::Relaxed);
+    }
+}
+
+/// Cached hits from one sequential client while another asks for blocked
+/// names, each from a socket bound just before it, as a stub resolver binds
+/// one. Such a socket is in no socket-table snapshot yet, so the first block
+/// after the snapshot ages out needs a scan to name its sender, at most once
+/// per refresh interval. Prints the hits' latency, the blocked queries'
+/// latency, and how many blocks were put down to their sender.
+fn hits_while_fresh_sockets_are_blocked(server: &Runtime, clients: &Runtime) {
+    const HITS: usize = 40_000;
+    let owners = Arc::new(OwnerCount::default());
+    let bench = BenchServer::start_with(
+        server,
+        "127.0.0.1:1".to_owned(),
+        BlockZone,
+        EngineServices {
+            block_sink: Some(Arc::clone(&owners) as Arc<dyn DnsBlockSink>),
+            ..EngineServices::default()
+        },
+    );
+    let scans_before = crate::port_mapper::shared_table_scans();
+    let (mut hits, mut blocks) = clients.block_on(async {
+        let stop = Arc::new(AtomicBool::new(false));
+        let blocker = tokio::spawn(blocked_from_fresh_sockets(bench.udp, Arc::clone(&stop)));
+        let started = Instant::now();
+        let mut hits = udp_client(bench.udp, 1, HITS).await;
+        hits.elapsed = started.elapsed();
+        stop.store(true, Ordering::Relaxed);
+        (hits, blocker.await.expect("blocker task"))
+    });
+    let scans = crate::port_mapper::shared_table_scans() - scans_before;
+    // The block worker attributes after the reply; give it a moment.
+    std::thread::sleep(Duration::from_millis(500));
+    bench.stop(server);
+    hits.latencies.sort_unstable();
+    blocks.latencies.sort_unstable();
+    let micros = |round: &Round, permille| {
+        super::percentile(&round.latencies, permille)
+            .map_or(f64::NAN, |latency| latency.as_secs_f64() * 1e6)
+    };
+    let slow = hits
+        .latencies
+        .iter()
+        .filter(|latency| **latency > Duration::from_millis(1))
+        .count();
+    println!(
+        "listener_udp_hit_with_fresh_socket_blocks hits={} hit_us p50={:.1} p99={:.1} p99.9={:.1} max={:.1} hits_over_1ms={slow} blocks={} block_lost={} block_us p50={:.1} max={:.1} scans={scans} named={} unnamed={}",
+        hits.latencies.len(),
+        micros(&hits, 500),
+        micros(&hits, 990),
+        micros(&hits, 999),
+        micros(&hits, 1_000),
+        blocks.latencies.len(),
+        blocks.lost,
+        micros(&blocks, 500),
+        micros(&blocks, 1_000),
+        owners.named.load(Ordering::Relaxed),
+        owners.unnamed.load(Ordering::Relaxed),
+    );
+}
+
+/// Asks for a blocked name from a fresh socket every few milliseconds until
+/// `stop`, timing each reply.
+async fn blocked_from_fresh_sockets(server: SocketAddr, stop: Arc<AtomicBool>) -> Round {
+    static NEXT_NAME: AtomicU64 = AtomicU64::new(0);
+    let mut round = Round::default();
+    let mut buffer = [0u8; 1_500];
+    while !stop.load(Ordering::Relaxed) {
+        let n = NEXT_NAME.fetch_add(1, Ordering::Relaxed);
+        let mut query = Message::new(1, MessageType::Query, OpCode::Query);
+        query.add_query(Query::query(
+            Name::from_ascii(format!("q{n}.{BLOCKED_ZONE}.")).expect("blocked name"),
+            RecordType::A,
+        ));
+        let wire = encode_message(&query).expect("encode blocked query");
+        let socket = UdpSocket::bind("127.0.0.1:0").await.expect("fresh socket");
+        let sent = Instant::now();
+        socket
+            .send_to(&wire, server)
+            .await
+            .expect("send blocked query");
+        match tokio::time::timeout(UDP_LOSS_TIMEOUT, socket.recv_from(&mut buffer)).await {
+            Ok(Ok(_)) => round.latencies.push(sent.elapsed()),
+            _ => round.lost += 1,
+        }
+        drop(socket);
+        tokio::time::sleep(Duration::from_millis(2)).await;
     }
     round
 }

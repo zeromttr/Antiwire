@@ -4,21 +4,23 @@
 use std::time::{Duration, Instant};
 
 use antiwire_policy::PolicyEngine;
-use antiwire_tuning::{DNS_QUERY_DEADLINE, DNS_STALE_ANSWER_TIMER};
+use antiwire_tuning::{
+    DNS_QUERY_DEADLINE, DNS_STALE_ANSWER_TIMER, DNS_STALE_ANSWER_TIMER_WHILE_FAILING,
+};
 use hickory_proto::op::Message;
 use hickory_proto::rr::RecordType;
-use hickory_server::zone_handler::MessageRequest;
 use tracing::{debug, info, warn};
 
 use super::ai::answer_is_ai_eligible;
-use super::request::{PreparedQuery, RequestView};
+use super::request::PreparedQuery;
 use super::response::{prepare_cached_message, prepare_uncached_message, PreparedResponse};
 use super::QueryEngine;
 use crate::block::DnsQueryContext;
 use crate::messages::{build_nodata_response, build_servfail_response};
+use crate::port_mapper::QueryClient;
 use crate::rebinding::message_find_rebinding_address;
 use crate::response_cache::{
-    CacheKey, CachedAnswer, ResponseCache, SharedOutcome, FETCH_GENERATION_ATTEMPTS,
+    CacheKey, CacheProbe, CachedAnswer, ResponseCache, SharedOutcome, FETCH_GENERATION_ATTEMPTS,
 };
 use crate::upstream::{AdmissionClass, SharedUpstreamAdmission};
 use crate::{DnsError, Result};
@@ -40,45 +42,27 @@ where
     /// Completes a miss returned by [`Self::try_handle_parsed_sync`].
     pub(crate) async fn handle_parsed_miss(
         &self,
-        request: &MessageRequest,
-        context: Option<DnsQueryContext>,
-        prepared: PreparedQuery,
-        enqueued_at: Instant,
-    ) -> PreparedResponse {
-        let request = request.to_message();
-        self.resolve_miss_message(&request, context, prepared, enqueued_at)
-            .await
-    }
-
-    pub(super) async fn resolve_miss_message(
-        &self,
         request: &Message,
         context: Option<DnsQueryContext>,
         prepared: PreparedQuery,
         enqueued_at: Instant,
     ) -> PreparedResponse {
-        // Proactive AI precedes cache/prefetch/upstream: an AI block prevents
-        // any upstream request; fallback continues normal resolution.
+        // The gates precede cache/prefetch/upstream: a block prevents any
+        // upstream request, and a pass continues normal resolution.
         if let Some((block, post_ai)) = self
-            .ai_proactive_block(request, &prepared, context, enqueued_at)
+            .gates_block(request, &prepared, context, enqueued_at)
             .await
         {
             return prepare_uncached_message(block, post_ai);
         }
-        if let Some((block, post_ai)) = self
-            .new_domain_block(request, &prepared, context, enqueued_at)
-            .await
-        {
-            return prepare_uncached_message(block, post_ai);
-        }
-        let post_ai = self.post_work_for_domain_key(&prepared.cache_key.domain, false);
+        let post_ai = self.post_work_for_domain_key(&prepared.cache_key.domain);
         let domain = prepared.cache_key.domain.clone();
         match self
             .resolve_miss_entry(request, context, prepared, enqueued_at)
             .await
         {
             Some(entry) => {
-                self.note_client_hint(context, &domain, &entry);
+                self.note_client_hint(context.map(QueryClient::scanned_here), &domain, &entry);
                 let post_ai = post_ai.filter(|_| answer_is_ai_eligible(&entry));
                 prepare_cached_message(entry, request, post_ai)
             }
@@ -108,7 +92,10 @@ where
         let stale_timer = self
             .stale_fallback(&cache_key, cache_eligible)
             .is_some()
-            .then(|| DNS_STALE_ANSWER_TIMER.saturating_sub(enqueued_at.elapsed()))
+            .then(|| {
+                self.stale_answer_timer()
+                    .saturating_sub(enqueued_at.elapsed())
+            })
             .filter(|timer| *timer < remaining);
         tokio::select! {
             biased;
@@ -135,6 +122,17 @@ where
         }
     }
 
+    /// The RFC 8767 §5 client response timer for a query starting now: the
+    /// RFC's, or a shorter one while the upstream is failing (see
+    /// [`DNS_STALE_ANSWER_TIMER_WHILE_FAILING`]).
+    fn stale_answer_timer(&self) -> Duration {
+        if self.upstream().failing() {
+            DNS_STALE_ANSWER_TIMER_WHILE_FAILING
+        } else {
+            DNS_STALE_ANSWER_TIMER
+        }
+    }
+
     /// Completes a cache miss: probes again, admits the miss rate, then runs
     /// the generation-aware fetch loop.
     async fn handle_miss(
@@ -155,7 +153,7 @@ where
         // filled the cache since the sync probe, and resolve_or_fetch only
         // coalesces in-flight fetches.
         if cache_eligible {
-            if let Some(entry) = self.probe_cache(&cache_key) {
+            if let CacheProbe::Fresh(entry) = self.probe_cache(&cache_key) {
                 return Some(entry);
             }
             // The name failed while this query was queued; see `process_core`.
@@ -225,6 +223,7 @@ where
     ) -> Option<CachedAnswer> {
         let cache_key = miss.cache_key;
         let mut attempts_remaining = FETCH_GENERATION_ATTEMPTS;
+        let mut fetched_for_itself = false;
         while attempts_remaining > 0 {
             attempts_remaining -= 1;
             let (attempt_generation, attempt_upstream) = self.current_generation_and_upstream();
@@ -242,14 +241,21 @@ where
                 .await
             {
                 SharedOutcome::Ready(Ok(entry)) => return Some(entry),
-                // Genuine upstream errors are never retried; like any other
-                // failure they fall back to a stale answer when one exists.
-                SharedOutcome::Ready(Err(_)) => {
-                    return self.stale_fallback(cache_key, miss.cache_eligible);
-                }
                 // The answer was resolved over a retired network and discarded;
                 // loop around and retry with a freshly acquired pair.
                 SharedOutcome::GenerationRetired => {}
+                // A background refresh this miss joined gave up for reasons of
+                // its own. Fetch under the miss's own admission and deadline,
+                // once, without spending a generation attempt on it.
+                SharedOutcome::Withdrawn if !fetched_for_itself => {
+                    fetched_for_itself = true;
+                    attempts_remaining += 1;
+                }
+                // Genuine upstream errors are never retried; like any other
+                // failure they fall back to a stale answer when one exists.
+                SharedOutcome::Ready(Err(_)) | SharedOutcome::Withdrawn => {
+                    return self.stale_fallback(cache_key, miss.cache_eligible);
+                }
             }
         }
 
@@ -312,7 +318,7 @@ where
             miss.qtype,
             Some("dns_provider"),
             self.block_mode,
-            miss.context,
+            miss.context.map(QueryClient::scanned_here),
             || vec![crate::provider_block::DNS_PROVIDER_BLOCK_LABEL.to_owned()],
         );
     }
@@ -348,7 +354,7 @@ where
                 miss.qtype,
                 Some("dns_rebinding"),
                 self.block_mode,
-                miss.context,
+                miss.context.map(QueryClient::scanned_here),
                 Vec::new,
             );
             Withheld::Rebinding

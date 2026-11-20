@@ -19,7 +19,13 @@ struct RecordingBlockSink {
 }
 
 impl DnsBlockSink for RecordingBlockSink {
-    fn record_blocked_query(&self, domain: &str, _pid: u32, _blocklist_names: &[String]) {
+    fn record_blocked_query(
+        &self,
+        domain: &str,
+        _ownership: netmetrics::Ownership,
+        _blocklist_names: &[String],
+        _timestamp: time::OffsetDateTime,
+    ) {
         self.domains.lock().expect("lock").push(domain.to_owned());
     }
 }
@@ -213,7 +219,7 @@ async fn prefetch_rebinding_refresh_does_not_replace_a_fresh_positive_entry() {
     let CacheProbe::Fresh(entry) = stub.response_cache().probe(&cache_key) else {
         panic!("positive entry must remain fresh");
     };
-    let message = entry.parsed_message.as_deref().expect("parsed");
+    let message = &entry.parsed_message;
     assert_eq!(
         message.answers.len(),
         1,
@@ -282,7 +288,13 @@ struct AttributionSink {
 }
 
 impl DnsBlockSink for AttributionSink {
-    fn record_blocked_query(&self, domain: &str, _pid: u32, blocklist_names: &[String]) {
+    fn record_blocked_query(
+        &self,
+        domain: &str,
+        _ownership: netmetrics::Ownership,
+        blocklist_names: &[String],
+        _timestamp: time::OffsetDateTime,
+    ) {
         self.blocks
             .lock()
             .expect("lock")
@@ -322,7 +334,7 @@ async fn provider_blocking_engine() -> (
 fn cached_ede(entry: &crate::response_cache::CachedAnswer) -> Option<u16> {
     use hickory_proto::rr::rdata::opt::{EdnsCode, EdnsOption};
 
-    let edns = entry.parsed_message.as_deref()?.edns.as_ref()?;
+    let edns = entry.parsed_message.edns.as_ref()?;
     match edns.option(EdnsCode::from(crate::ede::EDNS_OPTION_CODE_EDE))? {
         EdnsOption::Unknown(_, data) => Some(u16::from_be_bytes([*data.first()?, *data.get(1)?])),
         _ => None,
@@ -445,8 +457,5 @@ async fn a_withheld_provider_block_is_refreshed_in_the_background() {
         "the refresh replaced the entry"
     );
     assert_eq!(cached_ede(&refreshed), Some(crate::ede::EDE_BLOCKED));
-    assert!(refreshed
-        .parsed_message
-        .as_deref()
-        .is_some_and(|message| message.answers.is_empty()));
+    assert_eq!(refreshed.parsed_message.answers, []);
 }

@@ -189,13 +189,23 @@ fn measure_app_path_lookup() {
         verdict: Verdict::Block,
         direction: RuleDirection::Outbound,
     });
-    let queries = vec![r"C:\Program Files\Antiwire\Browser.exe".to_owned()];
-    let before = ALLOCATION_COUNT.load(Ordering::Relaxed);
-    let (ns, hits) = measure_lookups(&queries, |app_path| {
-        engine.evaluate(app_path, "", "").is_some()
-    });
-    let allocations = ALLOCATION_COUNT.load(Ordering::Relaxed) - before;
-    println!("app_path ns_lookup={ns:.2} hits={hits} allocations={allocations}");
+    // An exact hit, and the usual case: a flow from another application, which
+    // the block rule sends through the version-family lookup.
+    for (case, path) in [
+        ("exact_hit", r"C:\Program Files\Antiwire\Browser.exe"),
+        (
+            "family_miss",
+            r"C:\Users\me\AppData\Local\Discord\app-1.0.9172\Discord.exe",
+        ),
+    ] {
+        let queries = vec![path.to_owned()];
+        let before = ALLOCATION_COUNT.load(Ordering::Relaxed);
+        let (ns, hits) = measure_lookups(&queries, |app_path| {
+            engine.evaluate(app_path, "", "").is_some()
+        });
+        let allocations = ALLOCATION_COUNT.load(Ordering::Relaxed) - before;
+        println!("app_path case={case} ns_lookup={ns:.2} hits={hits} allocations={allocations}");
+    }
 }
 
 fn measure_typed_ip_lookup() {

@@ -84,7 +84,7 @@ impl Port53Divert {
     ///
     /// An install that takes longer carries on and is kept once it succeeds. If it
     /// fails, `late_failure` hears why; it hears nothing of an install the wait saw the
-    /// end of, nor of one that [`remove`](Self::remove) overtook.
+    /// end of, nor of one that [`take`](Self::take) overtook.
     pub(crate) async fn install(
         &mut self,
         report: DivertReport,
@@ -129,15 +129,17 @@ impl Port53Divert {
         }
     }
 
-    /// Removes the divert. An install still under way removes its own when it ends.
-    pub(crate) fn remove(&mut self) {
-        let installed = {
-            let mut slot = self.slot.lock();
-            slot.removals += 1;
-            slot.installed.take()
-        };
-        // Outside the lock: removing it from the host can take a while.
-        drop(installed);
+    /// Takes the divert out of service, and returns it if it was installed. An install
+    /// still under way removes its own when it ends.
+    ///
+    /// What is returned stays on the host until it is dropped, which can take a while (on
+    /// Windows it joins the divert's packet thread, elsewhere it runs `nft` or `pfctl`), so
+    /// the caller drops it off the runtime.
+    #[must_use = "the divert stays on the host until it is dropped"]
+    pub(crate) fn take(&mut self) -> Option<InstalledDivert> {
+        let mut slot = self.slot.lock();
+        slot.removals += 1;
+        slot.installed.take()
     }
 
     #[cfg(test)]
@@ -234,7 +236,7 @@ mod tests {
         assert!(divert.is_installed());
         assert!(!removed.load(Ordering::SeqCst));
 
-        divert.remove();
+        drop(divert.take());
         assert!(removed.load(Ordering::SeqCst));
         assert!(!divert.is_installed());
     }
@@ -302,7 +304,7 @@ mod tests {
             divert.install(report(), BRIEF, never).await,
             DivertInstall::Pending
         );
-        divert.remove();
+        drop(divert.take());
         open.send(()).expect("open the gate");
 
         wait_until("the overtaken install left its divert in place", || {
@@ -325,7 +327,7 @@ mod tests {
             divert.install(report(), BRIEF, never).await,
             DivertInstall::Pending
         );
-        divert.remove();
+        drop(divert.take());
         assert_eq!(
             divert.install(report(), BRIEF, never).await,
             DivertInstall::Pending

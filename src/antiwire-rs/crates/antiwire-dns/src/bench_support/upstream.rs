@@ -6,10 +6,12 @@
 //! client sees them. Nothing here touches upstream internals, so the same
 //! scenarios measure any replacement of the failover engine.
 //!
-//! The mocks only speak plain UDP, which cannot express the port-853 primary
-//! with a `DoH` fallback. The opt-in `upstream-live` group covers that against
-//! real providers instead.
+//! The mocks only speak plain UDP, so a working port-853 primary with a `DoH`
+//! fallback is left to the opt-in `upstream-live` group and real providers. A
+//! blocked one needs no TLS server: a port that accepts and never answers
+//! stands in for it, with a mock as the fallback.
 
+use std::collections::HashMap;
 use std::net::SocketAddr;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::Arc;
@@ -17,10 +19,13 @@ use std::time::{Duration, Instant};
 
 use antiwire_policy::RuleEngine;
 use hickory_proto::op::{Message, MessageType, OpCode, Query, ResponseCode};
+use hickory_proto::rr::rdata::opt::EdnsOption;
 use hickory_proto::rr::{rdata, Name, RData, Record, RecordType};
 use tokio::net::UdpSocket;
 use tokio::runtime::Runtime;
 
+use super::edns_with;
+use crate::ede::{EDE_STALE_ANSWER, EDNS_OPTION_CODE_EDE};
 use crate::listener::DnsListener;
 use crate::messages::encode_message;
 use crate::query_engine::{EngineServices, QueryEngine};
@@ -62,6 +67,19 @@ pub(super) fn run() {
         })
         .await;
         outage_and_recovery(&server).await;
+    });
+}
+
+/// Runs the scenarios with a blocked primary tier and a healthy fallback.
+pub(super) fn run_failover() {
+    let server = runtime("dns-bench-server");
+    let clients = runtime("dns-bench-client");
+    clients.block_on(async {
+        println!("failover scenarios: blocked port-853 primary, mock UDP fallback, unique names");
+        // A trickle shows how long a blocked primary costs every miss its head
+        // start. A flood shows what its attempts cost the misses behind them.
+        blocked_primary(&server, "trickle", 10, Duration::from_secs(40)).await;
+        blocked_primary(&server, "flood", 200, Duration::from_secs(10)).await;
     });
 }
 
@@ -138,15 +156,21 @@ async fn serve_mock(socket: Arc<UdpSocket>, behavior: Arc<Behavior>) {
         let Ok((len, src)) = socket.recv_from(&mut buffer).await else {
             continue;
         };
+        let Ok(query) = Message::from_vec(&buffer[..len]) else {
+            continue;
+        };
+        // A reply is ignored, as a real server ignores one. If a query ever
+        // reached this mock from its own address, answering replies would
+        // have it answer its own answers for as long as it ran.
+        if query.metadata.message_type != MessageType::Query {
+            continue;
+        }
         let count = behavior.received.fetch_add(1, Ordering::Relaxed) + 1;
         if behavior.silent.load(Ordering::Relaxed)
             || scatter(count) < behavior.drop_percent.load(Ordering::Relaxed)
         {
             continue;
         }
-        let Ok(query) = Message::from_vec(&buffer[..len]) else {
-            continue;
-        };
         let delay = Duration::from_millis(behavior.delay_ms.load(Ordering::Relaxed));
         let socket = Arc::clone(&socket);
         tokio::spawn(async move {
@@ -258,23 +282,86 @@ impl Bench {
             if reply.metadata.id != id {
                 continue;
             }
-            let outcome = match reply.metadata.response_code {
-                ResponseCode::NoError if !reply.answers.is_empty() => {
-                    if reply.answers.iter().all(|record| record.ttl <= 1) {
-                        Outcome::Stale
-                    } else {
-                        Outcome::Answer
-                    }
-                }
-                ResponseCode::NoError | ResponseCode::NXDomain => Outcome::Answer,
-                ResponseCode::ServFail => Outcome::ServFail,
-                _ => Outcome::Other,
-            };
             return Sample {
                 latency: started.elapsed(),
-                outcome,
+                outcome: outcome_of(&reply),
             };
         }
+    }
+
+    /// Asks for a new name `rate` times a second for `duration` without
+    /// waiting for the answers, as the applications of a busy host do, and
+    /// returns each query's sample with how long after the start it was sent.
+    async fn ask_at_rate(
+        &mut self,
+        rate: u32,
+        duration: Duration,
+        zone: &str,
+    ) -> Vec<(Duration, Sample)> {
+        let started = Instant::now();
+        let gap = Duration::from_secs(1) / rate;
+        let mut pending: HashMap<u16, Instant> = HashMap::new();
+        let mut samples = Vec::new();
+        let mut next_send = Some(started);
+        let mut buffer = [0u8; 4096];
+        loop {
+            // A late timer sends every query that is due, so the rate holds
+            // on a coarse clock.
+            while let Some(due) = next_send.filter(|due| *due <= Instant::now()) {
+                let id = self.next_id;
+                self.next_id = self.next_id.wrapping_add(1).max(1);
+                let name = self.fresh_name(zone);
+                let wire = encode_message(&query_for(id, &name)).expect("encode query");
+                pending.insert(id, Instant::now());
+                self.client
+                    .send_to(&wire, self.server_addr)
+                    .await
+                    .expect("send query");
+                next_send = Some(due + gap).filter(|next| *next < started + duration);
+            }
+            let wake = match (next_send, pending.values().min()) {
+                (Some(due), _) => due,
+                (None, Some(oldest)) => *oldest + CLIENT_TIMEOUT,
+                (None, None) => break,
+            };
+            let wait = wake.saturating_duration_since(Instant::now());
+            match tokio::time::timeout(wait, self.client.recv_from(&mut buffer)).await {
+                Ok(Ok((len, _))) => {
+                    let Ok(reply) = Message::from_vec(&buffer[..len]) else {
+                        continue;
+                    };
+                    if let Some(sent) = pending.remove(&reply.metadata.id) {
+                        samples.push((
+                            sent.duration_since(started),
+                            Sample {
+                                latency: sent.elapsed(),
+                                outcome: outcome_of(&reply),
+                            },
+                        ));
+                    }
+                }
+                Ok(Err(_)) => {}
+                Err(_) => {
+                    // Whatever has waited its limit was never answered.
+                    let now = Instant::now();
+                    pending.retain(|_, sent| {
+                        let lost = now.duration_since(*sent) >= CLIENT_TIMEOUT;
+                        if lost {
+                            samples.push((
+                                sent.duration_since(started),
+                                Sample {
+                                    latency: CLIENT_TIMEOUT,
+                                    outcome: Outcome::NoReply,
+                                },
+                            ));
+                        }
+                        !lost
+                    });
+                }
+            }
+        }
+        samples.sort_unstable_by_key(|(sent, _)| *sent);
+        samples
     }
 
     async fn ask_many(&mut self, count: usize, zone: &str) -> Vec<Sample> {
@@ -312,6 +399,9 @@ impl Bench {
     }
 }
 
+/// A query as a stub resolver sends it, with an OPT record: the resolver
+/// says an answer is stale in the OPT record's EDE, so a query without one
+/// could not tell.
 fn query_for(id: u16, name: &str) -> Message {
     let mut query = Message::new(id, MessageType::Query, OpCode::Query);
     query.metadata.recursion_desired = true;
@@ -319,7 +409,37 @@ fn query_for(id: u16, name: &str) -> Message {
         Name::from_ascii(name).expect("query name"),
         RecordType::A,
     ));
+    query.edns = Some(edns_with(false, 1232));
     query
+}
+
+fn outcome_of(reply: &Message) -> Outcome {
+    match reply.metadata.response_code {
+        ResponseCode::NoError if !reply.answers.is_empty() => {
+            if says_stale(reply) {
+                Outcome::Stale
+            } else {
+                Outcome::Answer
+            }
+        }
+        ResponseCode::NoError | ResponseCode::NXDomain => Outcome::Answer,
+        ResponseCode::ServFail => Outcome::ServFail,
+        _ => Outcome::Other,
+    }
+}
+
+/// Whether `reply` carries RFC 8914 EDE 3, Stale Answer. Its TTLs cannot say:
+/// a stale record is served with the RFC 8767 stale TTL, not one second.
+fn says_stale(reply: &Message) -> bool {
+    reply.edns.as_ref().is_some_and(|edns| {
+        edns.options().as_ref().iter().any(|(_, option)| {
+            matches!(
+                option,
+                EdnsOption::Unknown(EDNS_OPTION_CODE_EDE, data)
+                    if data.get(..2) == Some(&EDE_STALE_ANSWER.to_be_bytes()[..])
+            )
+        })
+    })
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -432,6 +552,82 @@ async fn outage_and_recovery(server: &Runtime) {
     );
     let after = bench.ask_many(50, ZONE).await;
     report("after_recovery", &after, None);
+    bench.stop(server).await;
+}
+
+/// A TCP port that accepts every connection and never sends a byte, which is
+/// how a firewall that swallows port 853 looks to a TLS client: the handshake
+/// never completes.
+struct Blackhole {
+    addr: SocketAddr,
+    connects: Arc<AtomicU64>,
+    task: tokio::task::JoinHandle<()>,
+}
+
+impl Blackhole {
+    async fn start() -> Self {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("blackhole bind");
+        let addr = listener.local_addr().expect("blackhole address");
+        let connects = Arc::new(AtomicU64::new(0));
+        let counter = Arc::clone(&connects);
+        let task = tokio::spawn(async move {
+            let mut held = Vec::new();
+            while let Ok((stream, _)) = listener.accept().await {
+                counter.fetch_add(1, Ordering::Relaxed);
+                held.push(stream);
+            }
+        });
+        Self {
+            addr,
+            connects,
+            task,
+        }
+    }
+}
+
+impl Drop for Blackhole {
+    fn drop(&mut self) {
+        self.task.abort();
+    }
+}
+
+/// A port-853 primary that never completes a handshake, with a healthy
+/// fallback behind it, from a cold start: misses arrive `rate` a second.
+///
+/// The fallback answers every one of them, so what is measured is what the
+/// primary's attempts cost: the head start each miss gives it, and the
+/// upstream admission they hold while they wait.
+async fn blocked_primary(server: &Runtime, pace: &str, rate: u32, duration: Duration) {
+    let primary = Blackhole::start().await;
+    let fallback = MockUpstream::start().await;
+    let config = DnsConfig {
+        protocol: DnsProtocol::Udp,
+        upstreams: vec![format!("tls://{}", primary.addr), fallback.addr.to_string()],
+        ..DnsConfig::default()
+    };
+    let mut bench = Bench::start(server, config).await;
+
+    let sent = bench.ask_at_rate(rate, duration, ZONE).await;
+    let samples: Vec<Sample> = sent.iter().map(|(_, sample)| *sample).collect();
+    let label = format!("blocked_primary_{pace} rate={rate}/s");
+    report(&label, &samples, None);
+    // A miss the fallback answered at once took about one loopback round trip.
+    // One that waited for the primary first took the hedge delay as well.
+    let waited = |sample: &Sample| sample.latency >= antiwire_tuning::DOH_HEDGE_DELAY * 9 / 10;
+    let last_waited = sent
+        .iter()
+        .rev()
+        .find(|(_, sample)| waited(sample))
+        .map_or(0.0, |(at, _)| millis(*at));
+    println!(
+        "  {label} waited_on_primary={} last_of_them_sent_at_ms={last_waited:.0} \
+         primary_connects={} fallback_queries={}",
+        samples.iter().filter(|sample| waited(sample)).count(),
+        primary.connects.load(Ordering::Relaxed),
+        fallback.behavior.received.load(Ordering::Relaxed),
+    );
     bench.stop(server).await;
 }
 

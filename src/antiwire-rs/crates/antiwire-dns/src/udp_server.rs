@@ -3,51 +3,58 @@
 //! Each datagram goes to `resolve` — in production [`crate::service::Resolve`] —
 //! which answers policy blocks and cache hits without I/O. Those replies are
 //! sent from the receive task itself, since a task per hit would only be an
-//! allocation. Only a miss gets a task, running the `forward` service, and only
+//! allocation. Only a miss gets a task, running `forward`, and only
 //! while a worker slot is free. Admission never waits: when every slot is busy
 //! the miss is dropped for the sender to retransmit, so saturation never stalls
 //! socket reads, and local answers need no slot at all, so they keep flowing
 //! while upstream work is saturated.
+//!
+//! A local answer whose client must be looked up in the socket tables first is
+//! the exception: it waits on a task of its own while the lookup scans, so the
+//! scan stalls no other query (see [`send_after_lookups`]).
 
-use std::convert::Infallible;
+use std::future::Future;
 use std::io;
 use std::net::{IpAddr, SocketAddr};
 use std::ops::ControlFlow;
 use std::sync::Arc;
 use std::time::Instant;
 
-use hickory_server::net::udp::MAX_RECEIVE_BUFFER_SIZE;
-use hickory_server::net::xfer::Protocol;
 use tokio::net::UdpSocket;
 use tokio::sync::Semaphore;
 use tokio::task::JoinSet;
 use tokio::time::sleep;
 use tokio_util::sync::CancellationToken;
-use tower::{Service, ServiceExt};
 use tracing::{debug, warn};
 
-use antiwire_tuning::DNS_UDP_RECEIVE_ERROR_BACKOFF;
+use antiwire_tuning::{
+    DNS_MAX_UDP_DATAGRAM_SIZE, DNS_UDP_HELD_REPLIES, DNS_UDP_RECEIVE_ERROR_BACKOFF,
+};
 
+use crate::listener::Transport;
+use crate::port_mapper::HandedOffLookups;
 use crate::service::{Answer, Query, Reply};
 use crate::{DnsError, Result};
 
 /// Serves one UDP socket until `shutdown`, then drains admitted misses.
 ///
 /// `workers` bounds misses in flight and is shared by every UDP socket.
-pub(crate) async fn serve_udp<F, M, R>(
+pub(crate) async fn serve_udp<F, M, R, A>(
     socket: UdpSocket,
     resolve: F,
-    mut forward: M,
+    forward: M,
     workers: Arc<Semaphore>,
     shutdown: CancellationToken,
 ) -> Result<()>
 where
-    F: Fn(Query) -> Answer<R>,
-    M: Service<R, Response = Reply, Error = Infallible>,
-    M::Future: Send + 'static,
+    F: Fn(Query<'_>) -> Answer<R>,
+    M: Fn(R) -> A,
+    A: Future<Output = Reply> + Send + 'static,
 {
     let socket = Arc::new(socket);
-    let mut buffer = vec![0u8; MAX_RECEIVE_BUFFER_SIZE];
+    let held = Arc::new(Semaphore::new(DNS_UDP_HELD_REPLIES));
+    // Queries are read up to the largest datagram the resolver answers.
+    let mut buffer = vec![0u8; usize::try_from(DNS_MAX_UDP_DATAGRAM_SIZE).unwrap_or(4096)];
     let mut tasks = JoinSet::new();
     let mut receive_errors: u64 = 0;
     let mut worker_rejections: u64 = 0;
@@ -78,14 +85,19 @@ where
         }
 
         let query = Query {
-            wire: buffer[..len].to_vec(),
+            wire: &buffer[..len],
             src,
-            protocol: Protocol::Udp,
+            transport: Transport::Udp,
             received_at,
         };
         let miss = match resolve(query) {
-            Answer::Local(reply) => {
-                send_now(&socket, reply, src);
+            Answer::Local(mut reply) => {
+                match reply.take_lookups() {
+                    Some(lookups) => {
+                        send_after_lookups(&mut tasks, &held, &socket, reply, lookups, src);
+                    }
+                    None => send_now(&socket, reply, src),
+                }
                 continue;
             }
             Answer::Ignored => continue,
@@ -104,12 +116,11 @@ where
             }
             continue;
         };
-        let Ok(forward) = forward.ready().await;
-        let reply = forward.call(miss);
+        let reply = forward(miss);
         let socket = Arc::clone(&socket);
         tasks.spawn(async move {
             let _worker = worker;
-            let Ok(reply) = reply.await;
+            let reply = reply.await;
             match socket.send_to(reply.bytes(), src).await {
                 Ok(_) => reply.delivered(),
                 Err(error) => debug!(%src, %error, "failed to send dns udp reply"),
@@ -136,6 +147,37 @@ fn send_now(socket: &UdpSocket, reply: Reply, dst: SocketAddr) {
         Ok(_) => reply.delivered(),
         Err(error) => debug!(%dst, %error, "dropped dns udp reply"),
     }
+}
+
+/// Sends `reply` once `lookups` have run, on a task of its own: they may scan
+/// the socket tables, which the receive loop must not wait for, and must see
+/// the client's socket before the reply lets the client close it.
+///
+/// Past [`DNS_UDP_HELD_REPLIES`] held at once, the reply goes at once and the
+/// lookups are dropped, so those waiting for them look the owner up later.
+fn send_after_lookups(
+    tasks: &mut JoinSet<()>,
+    held: &Arc<Semaphore>,
+    socket: &Arc<UdpSocket>,
+    reply: Reply,
+    lookups: HandedOffLookups,
+    dst: SocketAddr,
+) {
+    let Ok(slot) = Arc::clone(held).try_acquire_owned() else {
+        drop(lookups);
+        send_now(socket, reply, dst);
+        return;
+    };
+    let socket = Arc::clone(socket);
+    tasks.spawn(async move {
+        let _slot = slot;
+        // A lookup that panicked still lets the reply go.
+        let _ = tokio::task::spawn_blocking(move || lookups.run()).await;
+        match socket.send_to(reply.bytes(), dst).await {
+            Ok(_) => reply.delivered(),
+            Err(error) => debug!(%dst, %error, "failed to send dns udp reply"),
+        }
+    });
 }
 
 /// Rejects a datagram source that must never receive an answer: a zero port or

@@ -48,7 +48,7 @@ const CONCURRENT_REQUESTS_PER_TIER: usize = 2;
 /// limit active requests to 32; HTTP/2 uses its own stream limits. Bound work
 /// before either queue can return `Busy`, which the pool can lose as
 /// `NoConnections` (also used for genuine connection failures).
-const MAX_IN_FLIGHT_PER_TIER: usize = 32;
+pub(crate) const MAX_IN_FLIGHT_PER_TIER: usize = 32;
 
 /// Hickory transport options for the upstream pools.
 #[must_use]
@@ -98,6 +98,17 @@ impl UpstreamDns {
     #[must_use]
     pub(crate) fn fails_fast(&self) -> bool {
         self.tiers.iter().all(|tier| tier.health.skips_now())
+    }
+
+    /// True when the tier an exchange started now would wait on first has
+    /// failed since it last answered. When every tier is skipped an exchange
+    /// waits on none of them, which is [`Self::fails_fast`] instead.
+    #[must_use]
+    pub(crate) fn failing(&self) -> bool {
+        self.tiers
+            .iter()
+            .find(|tier| !tier.health.skips_now())
+            .is_some_and(|tier| tier.health.has_failed())
     }
 
     /// Parse failures for configured upstreams that were skipped because at

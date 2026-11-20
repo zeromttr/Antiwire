@@ -14,7 +14,7 @@ use crate::models::parse_timestamp;
 mod query;
 
 pub use query::domain_decisions::normalize_domain_key;
-pub use query::{DeletionFence, Resident, ResidentDecision, SeenSubdomain};
+pub use query::{DeletionFence, OutcomeRevision, Resident, ResidentDecision, SeenSubdomain};
 
 /// Applied, in ascending order, to bring a database up to date.
 ///

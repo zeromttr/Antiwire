@@ -4,7 +4,7 @@ use crate::blocklist::PreparedBlocklist;
 use crate::eviction::EnforcementOp;
 use crate::hash::reverse_hash_pair;
 use crate::normalize::parse_ip_net;
-use crate::rule::{CountrySnapshot, RuleSnapshot, TargetType};
+use crate::rule::{CountrySnapshot, RuleSnapshot, TargetType, Verdict};
 use crate::rule_index::{
     remove_ip_entry, remove_keyed_rule, upsert_ip_entry, upsert_keyed_rule, IpRuleEntry,
 };
@@ -67,6 +67,7 @@ impl RuleEngine {
                     crate::app_rule_identity(&rule.target),
                     rule.clone(),
                 );
+                self.app_block_rules += usize::from(rule.verdict == Verdict::Block);
             }
             TargetType::Dns => {
                 upsert_dns_rule(&mut self.dns_rules, &mut self.dns_wildcards, rule.clone());
@@ -113,6 +114,7 @@ impl RuleEngine {
                     &crate::app_rule_identity(&rule.target),
                     rule.id,
                 );
+                self.app_block_rules -= usize::from(rule.verdict == Verdict::Block);
             }
             TargetType::Dns => {
                 remove_dns_rule(&mut self.dns_rules, &mut self.dns_wildcards, rule);

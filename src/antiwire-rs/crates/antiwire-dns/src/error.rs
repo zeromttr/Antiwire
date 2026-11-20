@@ -1,5 +1,5 @@
 /// Result type for DNS operations that can fail with a [`DnsError`].
-pub type Result<T> = std::result::Result<T, DnsError>;
+pub(crate) type Result<T> = std::result::Result<T, DnsError>;
 
 /// Errors returned by the DNS resolver.
 #[derive(Debug, thiserror::Error)]

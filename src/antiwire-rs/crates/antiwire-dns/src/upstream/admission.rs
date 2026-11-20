@@ -59,6 +59,13 @@ impl UpstreamAdmission {
         &self.inner
     }
 
+    /// How many more foreground exchanges could be admitted right now.
+    #[cfg(test)]
+    #[must_use]
+    pub(crate) fn foreground_available(&self) -> usize {
+        self.foreground.available_permits()
+    }
+
     /// True when every upstream tier is down.
     #[must_use]
     pub(crate) fn degraded(&self) -> bool {
@@ -69,6 +76,13 @@ impl UpstreamAdmission {
     #[must_use]
     pub(crate) fn fails_fast(&self) -> bool {
         self.inner.fails_fast()
+    }
+
+    /// True when the upstream an exchange would wait on has failed since it
+    /// last answered.
+    #[must_use]
+    pub(crate) fn failing(&self) -> bool {
+        self.inner.failing()
     }
 
     /// Acquires admission for the requested class.

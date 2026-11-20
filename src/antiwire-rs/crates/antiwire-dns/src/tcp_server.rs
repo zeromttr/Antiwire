@@ -6,10 +6,10 @@
 //! (RFC 1035 §4.2.2) and answered the same way as UDP: local answers from the
 //! connection task, misses on their own tasks. DNS over TCP permits
 //! out-of-order replies, so pipelined misses run concurrently up to a
-//! per-connection `tower` concurrency limit, and reading pauses while that
+//! per-connection concurrency limit, and reading pauses while that
 //! limit is reached.
 
-use std::convert::Infallible;
+use std::future::Future;
 use std::io;
 use std::net::SocketAddr;
 use std::sync::Arc;
@@ -17,22 +17,20 @@ use std::time::Instant;
 
 use bytes::Bytes;
 use futures_util::{SinkExt, StreamExt};
-use hickory_server::net::xfer::Protocol;
 use tokio::net::tcp::OwnedWriteHalf;
 use tokio::net::{TcpListener, TcpStream};
 use tokio::sync::{mpsc, Semaphore};
 use tokio::task::JoinSet;
-use tokio::time::{sleep, sleep_until, timeout};
+use tokio::time::{sleep, sleep_until, timeout, timeout_at};
 use tokio_util::codec::{FramedRead, FramedWrite, LengthDelimitedCodec};
 use tokio_util::sync::CancellationToken;
-use tower::limit::ConcurrencyLimit;
-use tower::{Service, ServiceExt};
 use tracing::{debug, warn};
 
 use antiwire_tuning::{
     DNS_TCP_ACCEPT_ERROR_BACKOFF, DNS_TCP_IO_TIMEOUT, DNS_TCP_MAX_CONNECTION_LIFETIME,
 };
 
+use crate::listener::Transport;
 use crate::service::{Answer, Query, Reply};
 use crate::{DnsError, Result};
 
@@ -41,7 +39,7 @@ use crate::{DnsError, Result};
 const TCP_QUERY_CONCURRENCY: usize = 4;
 
 /// Serves one TCP listener, admitting connections against `connections`.
-pub(crate) async fn serve_tcp<F, M, R>(
+pub(crate) async fn serve_tcp<F, M, R, A>(
     listener: TcpListener,
     resolve: F,
     forward: M,
@@ -49,10 +47,10 @@ pub(crate) async fn serve_tcp<F, M, R>(
     shutdown: CancellationToken,
 ) -> Result<()>
 where
-    F: Fn(Query) -> Answer<R> + Clone + Send + 'static,
+    F: Fn(Query<'_>) -> Answer<R> + Clone + Send + 'static,
     R: Send + 'static,
-    M: Service<R, Response = Reply, Error = Infallible> + Clone + Send + 'static,
-    M::Future: Send + 'static,
+    M: Fn(R) -> A + Clone + Send + 'static,
+    A: Future<Output = Reply> + Send + 'static,
 {
     let mut tasks = JoinSet::new();
     let mut rejections: u64 = 0;
@@ -147,16 +145,16 @@ fn dns_framing() -> LengthDelimitedCodec {
 /// Local answers are written straight from this loop. Misses reply through a
 /// channel the loop drains between reads, so one task owns both halves of the
 /// socket and cancelling the connection stops everything at once.
-async fn serve_connection<F, M, R>(
+async fn serve_connection<F, M, R, A>(
     stream: TcpStream,
     src: SocketAddr,
     resolve: F,
     forward: M,
     shutdown: CancellationToken,
 ) where
-    F: Fn(Query) -> Answer<R>,
-    M: Service<R, Response = Reply, Error = Infallible>,
-    M::Future: Send + 'static,
+    F: Fn(Query<'_>) -> Answer<R>,
+    M: Fn(R) -> A,
+    A: Future<Output = Reply> + Send + 'static,
 {
     let (read, write) = stream.into_split();
     let mut frames = FramedRead::new(read, dns_framing());
@@ -165,25 +163,31 @@ async fn serve_connection<F, M, R>(
     // finishing miss can wait here for room; the loop and the close path both
     // drain the queue, so that wait always ends.
     let (replies, mut outbox) = mpsc::channel(TCP_QUERY_CONCURRENCY);
-    let mut forward = ConcurrencyLimit::new(forward, TCP_QUERY_CONCURRENCY);
+    let misses = Arc::new(Semaphore::new(TCP_QUERY_CONCURRENCY));
     let mut tasks = JoinSet::new();
     let close_at = tokio::time::Instant::now() + DNS_TCP_MAX_CONNECTION_LIFETIME;
 
     loop {
         reap_request_tasks(&mut tasks, src);
         let next = tokio::select! {
-            Some(reply) = outbox.recv() => {
-                if write_reply(&mut sink, reply, src).await {
-                    continue;
-                }
-                break;
-            }
-            next = timeout(DNS_TCP_IO_TIMEOUT, frames.next()) => next,
+            // In this order, so a client that keeps sending cannot hold off
+            // shutdown or the lifetime. Queued replies go out before another
+            // query is read: a finished miss has given back its concurrency
+            // slot, so reading on while its reply waits would let the client
+            // have more replies owed than the limit allows misses.
+            biased;
             () = shutdown.cancelled() => break,
             () = sleep_until(close_at) => {
                 debug!(%src, "dns tcp connection reached its lifetime; closing");
                 break;
             }
+            Some(reply) = outbox.recv() => {
+                if write_reply(&mut sink, reply, src, io_deadline()).await {
+                    continue;
+                }
+                break;
+            }
+            next = timeout(DNS_TCP_IO_TIMEOUT, frames.next()) => next,
         };
         let frame = match next {
             Ok(Some(Ok(frame))) => frame,
@@ -194,15 +198,15 @@ async fn serve_connection<F, M, R>(
             Ok(None) | Err(_) => break,
         };
         let query = Query {
-            wire: frame.to_vec(),
+            wire: &frame,
             src,
-            protocol: Protocol::Tcp,
+            transport: Transport::Tcp,
             received_at: Instant::now(),
         };
 
         match resolve(query) {
             Answer::Local(reply) => {
-                if !write_reply(&mut sink, reply, src).await {
+                if !write_reply(&mut sink, reply, src, io_deadline()).await {
                     break;
                 }
                 // A local answer never waits, so a busy pipelining client
@@ -215,15 +219,17 @@ async fn serve_connection<F, M, R>(
             Answer::Miss(miss) => {
                 // Reading pauses here while the connection's misses are all in
                 // flight; their replies are queued, not lost, meanwhile.
-                let ready = tokio::select! {
-                    ready = forward.ready() => ready,
+                let slot = tokio::select! {
+                    slot = Arc::clone(&misses).acquire_owned() => slot,
                     () = shutdown.cancelled() => break,
                 };
-                let Ok(forward) = ready;
-                let reply = forward.call(miss);
+                // `misses` is never closed.
+                let Ok(slot) = slot else { break };
+                let reply = forward(miss);
                 let replies = replies.clone();
                 tasks.spawn(async move {
-                    let Ok(reply) = reply.await;
+                    let reply = reply.await;
+                    drop(slot);
                     // Fails only once the connection has given up on the client.
                     let _ = replies.send(reply).await;
                 });
@@ -235,10 +241,13 @@ async fn serve_connection<F, M, R>(
     // closing. Draining while they finish, not after, matters: more replies
     // can be owed than the queue holds, and a task blocked on a full queue
     // would never finish. The queue ends once every task has dropped its
-    // sender.
+    // sender. The whole drain gets one I/O timeout, not one per reply, so a
+    // client reading just fast enough to take each reply in time cannot keep
+    // the connection, and its slot, open for a timeout per reply owed.
     drop(replies);
-    while let Some(reply) = outbox.recv().await {
-        if !write_reply(&mut sink, reply, src).await {
+    let drain_until = io_deadline();
+    while let Ok(Some(reply)) = timeout_at(drain_until, outbox.recv()).await {
+        if !write_reply(&mut sink, reply, src, drain_until).await {
             break;
         }
     }
@@ -250,14 +259,21 @@ async fn serve_connection<F, M, R>(
     }
 }
 
-/// Writes one framed reply, returning false once the client is unusable.
+/// When an I/O operation starting now times out.
+fn io_deadline() -> tokio::time::Instant {
+    tokio::time::Instant::now() + DNS_TCP_IO_TIMEOUT
+}
+
+/// Writes one framed reply by `deadline`, returning false once the client is
+/// unusable.
 async fn write_reply(
     sink: &mut FramedWrite<OwnedWriteHalf, LengthDelimitedCodec>,
     reply: Reply,
     src: SocketAddr,
+    deadline: tokio::time::Instant,
 ) -> bool {
     let (bytes, receipt) = reply.into_parts();
-    match timeout(DNS_TCP_IO_TIMEOUT, sink.send(Bytes::from(bytes))).await {
+    match timeout_at(deadline, sink.send(Bytes::from(bytes))).await {
         Ok(Ok(())) => {
             receipt.delivered();
             true
@@ -529,14 +545,68 @@ mod tests {
         harness.stop(TCP_QUERY_CONCURRENCY).await;
     }
 
+    /// The regression this guards: the loop chose between a queued reply and
+    /// the client's next query at random. A finished miss has given back its
+    /// concurrency slot, so while the loop read on, a client that kept
+    /// sending had more replies owed than the limit allows misses: 12 to 39
+    /// in a run of 20,000 pipelined misses with 16 KB replies.
+    ///
+    /// The queued reply and a query the loop could answer at once are both
+    /// waiting when the loop next chooses; at random, all rounds would pass
+    /// about once in 65,536 runs.
+    #[tokio::test]
+    async fn a_queued_reply_goes_out_before_the_next_query_is_read() {
+        const ROUNDS: u16 = 16;
+        // A connection per round, so a round never waits for the server to
+        // see the last one close.
+        let harness = Harness::start(usize::from(ROUNDS)).await;
+        let wait_for = |count: usize| {
+            let started = Arc::clone(&harness.started);
+            async move {
+                timeout(Duration::from_secs(1), async {
+                    while started.load(Ordering::Relaxed) < count {
+                        tokio::task::yield_now().await;
+                    }
+                })
+                .await
+                .expect("misses start");
+            }
+        };
+        let in_flight = u16::try_from(TCP_QUERY_CONCURRENCY).expect("small");
+        for round in 0..ROUNDS {
+            let base = harness.started.load(Ordering::Relaxed);
+            let mut client = harness.connect().await;
+            // Fill every miss slot; the loop then waits for one with the next
+            // miss in hand, reading nothing more.
+            for id in 0..=in_flight {
+                send(&mut client, id, "pipeline.test.").await;
+            }
+            wait_for(base + TCP_QUERY_CONCURRENCY).await;
+            send(&mut client, 99, "cached.test.").await;
+            tokio::time::sleep(Duration::from_millis(20)).await;
+            // One miss finishes: its reply is queued, the waiting miss takes
+            // its slot, and the cached query is still unread.
+            harness.release.add_permits(1);
+            let first = recv(&mut client).await.metadata.id;
+            assert!(first < in_flight, "round {round}: reply {first} went first");
+            harness.release.add_permits(TCP_QUERY_CONCURRENCY);
+            for _ in 0..=in_flight {
+                recv(&mut client).await;
+            }
+        }
+        harness.stop(0).await;
+    }
+
     /// The regression this guards: a miss frees its concurrency slot before
     /// queueing its reply, so a connection can hold more finished replies than
     /// the reply channel has room for. When the loop then exited, the extra
     /// task blocked on `send` while the close path waited for it, and the
     /// connection never closed or delivered its replies.
     ///
-    /// The loop chooses between the queued reply and the client's EOF at
-    /// random, so each round hits the bug about half the time.
+    /// The loop chose between the queued reply and the client's EOF at random
+    /// then, so each round hit the bug about half the time. It now writes
+    /// queued replies first, which leaves fewer owed at EOF; every round still
+    /// checks that each one owed is delivered and the connection closes.
     #[tokio::test]
     async fn replies_queued_past_the_channel_still_drain_after_eof() {
         let harness = Harness::start(1).await;

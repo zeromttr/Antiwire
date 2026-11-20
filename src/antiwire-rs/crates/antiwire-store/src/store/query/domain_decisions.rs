@@ -89,6 +89,15 @@ const DECISION_DELETE_GUARD: Duration = Duration::from_secs(180);
 /// Bound as `?1`: NULL matches every domain.
 const DECISION_SEARCH_CLAUSE: &str = "(?1 IS NULL OR domain LIKE ?1 ESCAPE '\\')";
 
+/// A new applied verdict for a saved domain, worked out from its saved scores.
+#[derive(Debug, Clone, Copy)]
+pub struct OutcomeRevision<'a> {
+    pub domain: &'a str,
+    pub verdict: &'a str,
+    pub top_category: &'a str,
+    pub top_score: f64,
+}
+
 /// When work on a domain began, taken before its network calls.
 ///
 /// A save that carries a fence is dropped if the domain was deleted after the
@@ -502,43 +511,60 @@ impl crate::store::Store {
         )
     }
 
-    /// Replaces the applied verdict for one domain, leaving scores and timestamps.
+    /// Replaces the applied verdicts in `revisions`, leaving scores and
+    /// timestamps, in one transaction. A domain whose row is gone, or already
+    /// has its revised verdict, is left alone.
     ///
-    /// Returns whether a row changed. The in-memory copy is updated too, so a
-    /// later cache hit does not keep the verdict from before this write.
-    pub fn revise_domain_decision_outcome(
+    /// Returns how many rows changed. The in-memory copies are updated too, so
+    /// a later cache hit does not keep a verdict from before this write; one
+    /// whose row did not change is forgotten, and read again when next asked
+    /// for.
+    pub fn revise_domain_decision_outcomes(
         &self,
-        domain: &str,
-        verdict: &str,
-        top_category: &str,
-        top_score: f64,
-    ) -> Result<bool> {
-        let domain = normalize_domain_key(domain)?;
+        revisions: &[OutcomeRevision<'_>],
+    ) -> Result<u64> {
+        let domains = revisions
+            .iter()
+            .map(|revision| normalize_domain_key(revision.domain))
+            .collect::<Result<Vec<_>>>()?;
         let _write = self.decision_write_lock.lock();
-        let Some(current) = self.db.query_optional(
-            SELECT_DOMAIN_DECISION,
-            rusqlite::params![domain],
-            map_domain_decision,
-        )?
-        else {
-            self.decision_cache.remove(&domain);
-            return Ok(false);
-        };
-        if current.verdict == verdict
-            && current.top_category == top_category
-            && (current.top_score - top_score).abs() <= f64::EPSILON
-        {
-            return Ok(false);
+        let revised = self.db.transaction_with(|tx| {
+            let mut update = tx.prepare_cached(
+                "UPDATE domain_decisions
+                 SET verdict = ?2, top_category = ?3, top_score = ?4
+                 WHERE domain = ?1
+                   AND NOT (verdict = ?2 AND top_category = ?3 AND abs(top_score - ?4) <= ?5)",
+            )?;
+            revisions
+                .iter()
+                .zip(&domains)
+                .map(|(revision, domain)| {
+                    let changed = update.execute(rusqlite::params![
+                        domain,
+                        revision.verdict,
+                        revision.top_category,
+                        revision.top_score,
+                        f64::EPSILON,
+                    ])?;
+                    Ok(changed > 0)
+                })
+                .collect::<Result<Vec<_>>>()
+        })?;
+        let mut changed = 0;
+        for ((revision, domain), revised) in revisions.iter().zip(&domains).zip(revised) {
+            if revised {
+                changed += 1;
+                self.decision_cache.revise_outcome(
+                    domain,
+                    revision.verdict,
+                    revision.top_category,
+                    revision.top_score,
+                );
+            } else {
+                self.decision_cache.remove(domain);
+            }
         }
-        self.db.execute(
-            "UPDATE domain_decisions
-             SET verdict = ?2, top_category = ?3, top_score = ?4
-             WHERE domain = ?1",
-            rusqlite::params![domain, verdict, top_category, top_score],
-        )?;
-        self.decision_cache
-            .revise_outcome(&domain, verdict, top_category, top_score);
-        Ok(true)
+        Ok(changed)
     }
 
     /// Deletes the saved decision for `domain` from SQLite and the cache.
@@ -1599,6 +1625,15 @@ mod page_tests {
         assert_eq!(page.total_count, 4);
     }
 
+    fn cleared(domain: &str, top_score: f64) -> OutcomeRevision<'_> {
+        OutcomeRevision {
+            domain,
+            verdict: "",
+            top_category: "",
+            top_score,
+        }
+    }
+
     #[test]
     fn revising_a_verdict_keeps_scores_timestamps_and_the_cache() {
         let (_dir, store) = seeded();
@@ -1608,9 +1643,12 @@ mod page_tests {
             .expect("seeded row");
         assert!(store.cached_domain_decision("ads.example").is_some());
 
-        assert!(store
-            .revise_domain_decision_outcome("ads.example", "", "", before.top_score)
-            .unwrap());
+        assert_eq!(
+            store
+                .revise_domain_decision_outcomes(&[cleared("ads.example", before.top_score)])
+                .unwrap(),
+            1
+        );
         let after = store
             .cached_domain_decision("ads.example")
             .expect("cache keeps the revised row");
@@ -1630,12 +1668,16 @@ mod page_tests {
         assert_eq!(stored.verdict, "");
         assert_eq!(stored.updated_at, before.updated_at);
 
-        assert!(!store
-            .revise_domain_decision_outcome("ads.example", "", "", before.top_score)
-            .unwrap());
-        assert!(!store
-            .revise_domain_decision_outcome("missing.example", "", "", 0.0)
-            .unwrap());
+        assert_eq!(
+            store
+                .revise_domain_decision_outcomes(&[
+                    cleared("ads.example", before.top_score),
+                    cleared("missing.example", 0.0),
+                ])
+                .unwrap(),
+            0,
+            "a row that already has the verdict, and one that is gone, do not change"
+        );
     }
 
     #[test]

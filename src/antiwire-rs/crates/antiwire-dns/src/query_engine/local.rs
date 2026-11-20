@@ -5,16 +5,15 @@
 use std::sync::atomic::{AtomicU32, AtomicU64, Ordering};
 use std::time::{Duration, Instant};
 
+use crate::listener::Transport;
 use antiwire_policy::{DomainBlockSource, PolicyEngine, Verdict};
 use antiwire_tuning::{DNS_FAIL_FAST_REPLY_BUDGET, DNS_FAIL_FAST_REPLY_WINDOW};
 use hickory_proto::op::{Message, ResponseCode};
 use hickory_proto::rr::RecordType;
-use hickory_server::net::xfer::Protocol;
-use hickory_server::zone_handler::MessageRequest;
 use tracing::warn;
 
-use super::ai::AiLocal;
-use super::request::{parse_query, validate_request, PreparedQuery, RequestView};
+use super::gates::GatesLocal;
+use super::request::{parse_query, validate_request, PreparedQuery};
 use super::response::{prepare_cached_message, prepare_uncached_message, PreparedResponse};
 use super::QueryEngine;
 use crate::ai::PostResponseWork;
@@ -23,7 +22,7 @@ use crate::messages::{
     build_any_response, build_cached_failure_response, build_error_response,
     build_servfail_response,
 };
-use crate::new_domain::NewDomainVerdict;
+use crate::port_mapper::QueryClient;
 use crate::response_cache::{CacheKey, CacheProbe, CachedAnswer};
 
 pub(super) enum CoreSyncOutcome {
@@ -112,23 +111,17 @@ impl<P> QueryEngine<P>
 where
     P: PolicyEngine + Send + Sync,
 {
-    pub(super) fn process_core<R>(
+    pub(super) fn process_core(
         &self,
-        request: &R,
-        context: Option<DnsQueryContext>,
-    ) -> CoreSyncOutcome
-    where
-        R: RequestView,
-    {
+        request: &Message,
+        client: Option<QueryClient<'_>>,
+    ) -> CoreSyncOutcome {
         if let Some(rcode) = validate_request(request) {
-            return CoreSyncOutcome::Response(
-                build_error_response(&request.to_message(), rcode),
-                None,
-            );
+            return CoreSyncOutcome::Response(build_error_response(request, rcode), None);
         }
 
         let Ok(mut prepared) = parse_query(request) else {
-            return CoreSyncOutcome::Response(build_servfail_response(&request.to_message()), None);
+            return CoreSyncOutcome::Response(build_servfail_response(request), None);
         };
 
         if let Some(decision) = self
@@ -136,11 +129,9 @@ where
             .evaluate_normalized_domain_with_source(&prepared.cache_key.domain)
         {
             if decision.verdict == Verdict::Block {
-                // Only the echoed question is cloned; the owned message is
-                // built solely for the SERVFAIL fallback.
                 let response = self
-                    .policy_block_response(request, &prepared, decision.source, context)
-                    .unwrap_or_else(|| build_servfail_response(&request.to_message()));
+                    .policy_block_response(request, &prepared, decision.source, client)
+                    .unwrap_or_else(|| build_servfail_response(request));
                 let post_ai = self.policy_block_post_work(&prepared, decision.source);
                 return CoreSyncOutcome::Response(response, post_ai);
             }
@@ -156,66 +147,42 @@ where
             return CoreSyncOutcome::Response(response, None);
         }
 
-        // Like proactive AI, the age check precedes the cache so an answer
-        // cached before a domain's date was known cannot bypass the block.
-        match self.new_domain_verdict(&prepared) {
-            NewDomainVerdict::Block => {
-                let response = self
-                    .new_domain_block_response(request, &prepared, context)
-                    .unwrap_or_else(|| build_servfail_response(&request.to_message()));
-                return CoreSyncOutcome::Response(response, None);
-            }
-            NewDomainVerdict::Pending => return CoreSyncOutcome::Miss(prepared),
-            NewDomainVerdict::Allow => {}
-        }
-
-        // Proactive AI must precede cache/prefetch/upstream access or a cached
-        // answer could bypass AI after proactive mode is enabled. The sync
-        // fast path stays free of DB/network I/O: a decision already in memory
-        // is applied here, and only a query whose decision needs the store or
-        // the classifier moves to the async path.
-        let ai_decided = match self.ai_local(&prepared) {
-            AiLocal::Pending => return CoreSyncOutcome::Miss(prepared),
-            AiLocal::Block(evaluation) => {
+        // The gates precede cache/prefetch/upstream access, or an answer
+        // cached before a domain's date was known, or before proactive mode
+        // was enabled, could bypass their block. The sync fast path stays free
+        // of DB/network I/O: what memory decides is applied here, and only a
+        // query a gate has to wait for moves to the async path.
+        let ai_decided = match self.gates_local(&prepared) {
+            GatesLocal::Pass { ai_decided } => ai_decided,
+            GatesLocal::Block(blocked) => {
                 // The gate has just decided about the domain, so its block
                 // carries no post-response work.
                 let response = self
-                    .ai_block_response(request, &prepared, context, &evaluation)
-                    .unwrap_or_else(|| build_servfail_response(&request.to_message()));
+                    .gate_block_response(request, &prepared, client, &blocked)
+                    .unwrap_or_else(|| build_servfail_response(request));
                 return CoreSyncOutcome::Response(response, None);
             }
-            AiLocal::Decided => true,
-            AiLocal::Clear => false,
+            GatesLocal::Pending => return CoreSyncOutcome::Miss(prepared),
         };
 
-        let answer = if prepared.cache_eligible {
+        // One probe answers every question the miss path asks of the cache:
+        // a fresh answer, or the stale one a failure would serve. Probing
+        // again for the stale entry cost the receive loop a second lookup on
+        // every miss while the upstreams are down.
+        let probe = if prepared.cache_eligible {
             self.probe_cache(&prepared.cache_key)
         } else {
-            None
+            CacheProbe::Miss
         };
-        let Some(answer) = answer else {
-            if let Some(held) = self.held_failure_outcome(request, &prepared, context) {
-                return held;
+        let answer = match probe {
+            CacheProbe::Fresh(answer) => answer,
+            CacheProbe::Stale(stale) => {
+                return self.miss_outcome(request, prepared, Some(stale), client);
             }
-            if self.miss_would_fail_fast(&prepared) {
-                // Answered or dropped here instead of on a task per query;
-                // see `FailFastBudget`.
-                let udp = context.is_some_and(|ctx| ctx.protocol == Protocol::Udp);
-                if udp && !self.fail_fast_replies.try_take() {
-                    self.fail_fast_replies.note_drop();
-                    return CoreSyncOutcome::Dropped;
-                }
-                let servfail = crate::messages::empty_response(
-                    request.metadata(),
-                    request.first_query(),
-                    ResponseCode::ServFail,
-                );
-                return CoreSyncOutcome::Response(servfail, None);
-            }
-            return CoreSyncOutcome::Miss(prepared);
+            CacheProbe::Miss => return self.miss_outcome(request, prepared, None, client),
         };
         let domain = &prepared.cache_key.domain;
-        self.note_client_hint(context, domain, &answer);
+        self.note_client_hint(client, domain, &answer);
         let post_ai = if ai_decided {
             None
         } else {
@@ -224,16 +191,41 @@ where
         CoreSyncOutcome::Cached(answer, post_ai)
     }
 
+    /// What becomes of a query the cache has no fresh answer for. `stale` is
+    /// the stale entry the probe found, which a failure may still serve.
+    fn miss_outcome(
+        &self,
+        request: &Message,
+        prepared: PreparedQuery,
+        stale: Option<CachedAnswer>,
+        client: Option<QueryClient<'_>>,
+    ) -> CoreSyncOutcome {
+        if prepared.cache_eligible && self.response_cache.failure_held(&prepared.cache_key) {
+            return self.held_failure_outcome(request, &prepared, stale, client);
+        }
+        if self.miss_would_fail_fast(&prepared, stale.is_some()) {
+            // Answered or dropped here instead of on a task per query;
+            // see `FailFastBudget`.
+            let udp = client.is_some_and(|client| client.context.transport == Transport::Udp);
+            if udp && !self.fail_fast_replies.try_take() {
+                self.fail_fast_replies.note_drop();
+                return CoreSyncOutcome::Dropped;
+            }
+            let servfail = crate::messages::empty_response(
+                &request.metadata,
+                request.queries.first().cloned(),
+                ResponseCode::ServFail,
+            );
+            return CoreSyncOutcome::Response(servfail, None);
+        }
+        CoreSyncOutcome::Miss(prepared)
+    }
+
     /// The answer to a query this resolver makes up itself, whatever an upstream would say:
     /// one for a special-use name, or an `ANY` query. `None` for any other query.
     ///
-    /// Special-use names are classified from the already-normalized question, so ordinary
-    /// cache hits never clone the client message, and synthesis copies only the question.
-    fn synthesized_response<R: RequestView>(
-        &self,
-        request: &R,
-        prepared: &PreparedQuery,
-    ) -> Option<Message> {
+    /// Special-use names are classified from the already-normalized question.
+    fn synthesized_response(&self, request: &Message, prepared: &PreparedQuery) -> Option<Message> {
         let special_use = crate::special_use::classify_special_use_with(
             &prepared.cache_key.domain,
             self.answer_local_names,
@@ -241,80 +233,75 @@ where
         if special_use.is_none() && prepared.qtype != RecordType::ANY {
             return None;
         }
-        let Some(question) = request.first_query() else {
-            return Some(build_servfail_response(&request.to_message()));
+        let Some(question) = request.queries.first() else {
+            return Some(build_servfail_response(request));
         };
         Some(match special_use {
             Some(kind) => crate::special_use::synthesize_special_use(
-                request.metadata(),
-                &question,
-                request.edns(),
+                &request.metadata,
+                question,
+                request.edns.as_ref(),
                 kind,
                 prepared.qtype,
             ),
-            None => build_any_response(request.metadata(), question),
+            None => build_any_response(&request.metadata, question.clone()),
         })
     }
 
     /// Answers a name whose recent failure is still held, without asking
-    /// upstream: the stale answer at once (the RFC 8767 §5 failure recheck
-    /// timer), or SERVFAIL from the cached failure (RFC 9520 §3.2). `None`
-    /// when no failure is held.
-    fn held_failure_outcome<R: RequestView>(
+    /// upstream: `stale` at once (the RFC 8767 §5 failure recheck timer), or
+    /// SERVFAIL from the cached failure (RFC 9520 §3.2).
+    fn held_failure_outcome(
         &self,
-        request: &R,
+        request: &Message,
         prepared: &PreparedQuery,
-        context: Option<DnsQueryContext>,
-    ) -> Option<CoreSyncOutcome> {
+        stale: Option<CachedAnswer>,
+        client: Option<QueryClient<'_>>,
+    ) -> CoreSyncOutcome {
         let key = &prepared.cache_key;
-        if !(prepared.cache_eligible && self.response_cache.failure_held(key)) {
-            return None;
-        }
-        Some(match self.response_cache.stale_after_failure(key) {
+        match stale {
             Some(stale) => {
-                self.note_client_hint(context, &key.domain, &stale);
+                self.note_client_hint(client, &key.domain, &stale);
                 let post_ai = self.post_work_for_answer(&key.domain, &stale);
                 CoreSyncOutcome::Cached(stale, post_ai)
             }
             None => CoreSyncOutcome::Response(
                 build_cached_failure_response(
-                    request.metadata(),
-                    request.first_query(),
-                    request.edns(),
+                    &request.metadata,
+                    request.queries.first().cloned(),
+                    request.edns.as_ref(),
                 ),
                 None,
             ),
-        })
+        }
     }
 
     /// True when the miss path would answer SERVFAIL without trying upstream:
     /// every tier is down with no recovery attempt available, no stale answer
-    /// would be served instead, and there is no in-flight fetch to join — the
-    /// recovery attempt itself may be resolving this very name.
-    fn miss_would_fail_fast(&self, prepared: &PreparedQuery) -> bool {
+    /// would be served instead (`stale_available`), and there is no in-flight
+    /// fetch to join — the recovery attempt itself may be resolving this very
+    /// name.
+    fn miss_would_fail_fast(&self, prepared: &PreparedQuery, stale_available: bool) -> bool {
         self.upstream.read().fails_fast()
             && !(prepared.cache_eligible
-                && (self.response_cache.fetch_in_flight(&prepared.cache_key)
-                    || self
-                        .response_cache
-                        .stale_after_failure(&prepared.cache_key)
-                        .is_some()))
+                && (stale_available || self.response_cache.fetch_in_flight(&prepared.cache_key)))
     }
 
-    /// Probes the cache and reserves near-expiry prefetch, without policy work.
-    pub(super) fn probe_cache(&self, cache_key: &CacheKey) -> Option<CachedAnswer> {
+    /// Probes the cache, reserving a fresh answer's near-expiry prefetch,
+    /// without policy work.
+    pub(super) fn probe_cache(&self, cache_key: &CacheKey) -> CacheProbe {
         // Stale entries must attempt a foreground refresh before being served.
         // Do not let a background prefetch take ownership of that miss: it has
         // separate admission limits and could delay the foreground request.
-        let CacheProbe::Fresh(answer) = self.response_cache.probe(cache_key) else {
-            return None;
-        };
-        if answer.should_prefetch() {
-            if let Some(reservation) = self.response_cache.try_reserve_prefetch(cache_key) {
-                self.spawn_prefetch(cache_key.clone(), reservation);
+        let probe = self.response_cache.probe(cache_key);
+        if let CacheProbe::Fresh(answer) = &probe {
+            if answer.should_prefetch() {
+                if let Some(reservation) = self.response_cache.try_reserve_prefetch(cache_key) {
+                    self.spawn_prefetch(cache_key.clone(), reservation);
+                }
             }
         }
-        Some(answer)
+        probe
     }
 
     /// Returns a policy, special-use, or cached response without upstream I/O.
@@ -328,10 +315,10 @@ where
     )]
     pub(crate) fn try_handle_parsed_sync(
         &self,
-        request: &MessageRequest,
-        context: Option<DnsQueryContext>,
+        request: &Message,
+        client: Option<QueryClient<'_>>,
     ) -> std::result::Result<Option<PreparedResponse>, PreparedQuery> {
-        match self.process_core(request, context) {
+        match self.process_core(request, client) {
             CoreSyncOutcome::Response(message, post_ai) => {
                 Ok(Some(prepare_uncached_message(message, post_ai)))
             }
@@ -344,12 +331,12 @@ where
     }
 
     /// Answers a policy block, reporting the rule or blocklists that matched.
-    pub(super) fn policy_block_response<R: RequestView>(
+    pub(super) fn policy_block_response(
         &self,
-        request: &R,
+        request: &Message,
         prepared: &PreparedQuery,
         source: Option<DomainBlockSource>,
-        context: Option<DnsQueryContext>,
+        client: Option<QueryClient<'_>>,
     ) -> Option<Message> {
         let domain = &prepared.cache_key.domain;
         self.block_response(
@@ -357,7 +344,7 @@ where
             domain,
             prepared.qtype,
             source.map(DomainBlockSource::as_str),
-            context,
+            client,
             || {
                 let matching = if source == Some(DomainBlockSource::Blocklist) {
                     self.policy.matching_normalized_blocklists(domain)
@@ -381,7 +368,7 @@ where
         source: Option<DomainBlockSource>,
     ) -> Option<PostResponseWork> {
         (source == Some(DomainBlockSource::Blocklist))
-            .then(|| self.post_work_for_domain_key(&prepared.cache_key.domain, true))
+            .then(|| self.post_work_for_domain_key(&prepared.cache_key.domain))
             .flatten()
     }
 
@@ -412,24 +399,28 @@ where
             // A block that cannot be built still blocks: `None` here would
             // mean "resolve upstream".
             Verdict::Block => Some((
-                self.policy_block_response(request, prepared, decision.source, context)
-                    .unwrap_or_else(|| build_servfail_response(request)),
+                self.policy_block_response(
+                    request,
+                    prepared,
+                    decision.source,
+                    context.map(QueryClient::scanned_here),
+                )
+                .unwrap_or_else(|| build_servfail_response(request)),
                 self.policy_block_post_work(prepared, decision.source),
             )),
         }
     }
 
-    pub(super) fn block_response<R, F>(
+    pub(super) fn block_response<F>(
         &self,
-        request: &R,
+        request: &Message,
         normalized: &str,
         qtype: RecordType,
         source: Option<&'static str>,
-        context: Option<DnsQueryContext>,
+        client: Option<QueryClient<'_>>,
         resolve_blocklist_names: F,
     ) -> Option<Message>
     where
-        R: RequestView,
         F: FnOnce() -> Vec<String>,
     {
         self.block_signals.signal_block(
@@ -437,14 +428,14 @@ where
             qtype,
             source,
             self.block_mode,
-            context,
+            client,
             resolve_blocklist_names,
         );
-        let question = request.first_query()?;
+        let question = request.queries.first().cloned()?;
         let response = build_block_response(
-            request.metadata(),
+            &request.metadata,
             question,
-            request.edns(),
+            request.edns.as_ref(),
             self.block_mode,
             self.custom_block_ip,
         )

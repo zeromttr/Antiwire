@@ -30,7 +30,6 @@ futures-util = { workspace = true }
 moka = { workspace = true }
 hickory-proto = { workspace = true }
 hickory-resolver = { workspace = true }
-hickory-server = { workspace = true }
 ipnet = { workspace = true }
 parking_lot = { workspace = true }
 psl = { workspace = true }
@@ -41,8 +40,7 @@ socket2 = { workspace = true }
 sysinfo = { workspace = true }
 thiserror = { workspace = true }
 tokio = { workspace = true }
-tokio-util = { workspace = true, features = ["codec", "rt"] }
-tower = { workspace = true }
+tokio-util = { workspace = true, features = ["codec"] }
 tracing = { workspace = true }
 time = { workspace = true }
 url = { workspace = true }

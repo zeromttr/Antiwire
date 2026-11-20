@@ -86,7 +86,7 @@ fn verdict_changes_enforcement(previous: &str, next: &str) -> bool {
 }
 
 /// Builds a classifier from saved credentials, if AI is enabled.
-pub fn build_classifier_from_settings(
+pub(crate) fn build_classifier_from_settings(
     settings: &antiwire_store::DaemonSetting,
 ) -> Result<Option<AiBackendClassifier>, String> {
     if !settings.ai_enabled {
@@ -137,7 +137,7 @@ pub(crate) fn unavailable_runtime_config(
 /// enabled configuration with an unavailable client still gets a coordinator
 /// so saved proactive decisions remain enforceable.
 #[must_use]
-pub fn build_coordinator_from_store(store: Arc<Store>) -> Option<Arc<AiCoordinator>> {
+pub(crate) fn build_coordinator_from_store(store: Arc<Store>) -> Option<Arc<AiCoordinator>> {
     let settings = match store.get_settings() {
         Ok(settings) => settings,
         Err(error) => {
@@ -172,7 +172,7 @@ pub fn build_coordinator_from_store(store: Arc<Store>) -> Option<Arc<AiCoordinat
 /// Comparing the built policy rather than listing fields means a category
 /// setting it starts reading is picked up here too.
 #[must_use]
-pub fn ai_config_changed(
+pub(crate) fn ai_config_changed(
     prev: &antiwire_store::DaemonSetting,
     next: &antiwire_store::DaemonSetting,
 ) -> bool {
@@ -257,14 +257,12 @@ mod tests {
             enabled: false,
             threshold_percent: 80,
             block: false,
-            order: 0,
         }; 8];
         categories[4] = AiCategorySetting {
             id: "malicious",
             enabled: true,
             threshold_percent: 80,
             block: true,
-            order: 4,
         };
         let policy = AiPolicySnapshot {
             enabled: true,

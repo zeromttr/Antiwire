@@ -1,6 +1,6 @@
 //! Ageing of cached record TTLs and RFC 2308 negative-TTL derivation.
 
-use std::sync::Arc;
+use std::sync::{Arc, OnceLock};
 
 use hickory_proto::op::{Message, ResponseCode};
 use hickory_proto::rr::{RData, Record};
@@ -11,6 +11,7 @@ use antiwire_tuning::{
 };
 
 use super::entry::CachedAnswer;
+use crate::answers::{answered_addresses, AnswerHint};
 
 #[derive(Debug)]
 pub(super) struct AgedBucket {
@@ -28,22 +29,22 @@ pub(crate) struct AgedSections {
     pub(crate) answers: Vec<Record>,
     pub(crate) authorities: Vec<Record>,
     pub(crate) additionals: Vec<Record>,
+    /// The address hint read from these sections, once something asks for it
+    /// (see [`super::ResponseCache::answer_hint`]).
+    pub(super) hint: OnceLock<Option<AnswerHint>>,
 }
 
 impl super::ResponseCache {
-    /// Counts the record TTLs of `message` down by the time `cached` has spent
-    /// in the cache.
+    /// Counts the record TTLs of `cached`'s message down by the time it has
+    /// spent in the cache.
     ///
     /// Returns `None` within the first second, when the stored records can be
     /// served exactly as they are; only then is nothing copied. The caller
     /// overlays the client-specific transaction ID and RD bit itself and
-    /// supplies the original request question to hickory's response builder,
-    /// so neither the header nor the question section is ever cloned.
+    /// echoes the request's own question section, so neither the header nor
+    /// the question section is ever cloned.
     #[must_use]
-    pub(crate) fn age_sections(
-        cached: &CachedAnswer,
-        message: &Message,
-    ) -> Option<Arc<AgedSections>> {
+    pub(crate) fn age_sections(cached: &CachedAnswer) -> Option<Arc<AgedSections>> {
         let elapsed = u32::try_from(cached.cached_at.elapsed().as_secs()).unwrap_or(u32::MAX);
         if elapsed == 0 {
             return None;
@@ -57,12 +58,14 @@ impl super::ResponseCache {
                 }
             }
         }
+        let message = &*cached.parsed_message;
         let negative =
             message.metadata.response_code == ResponseCode::NXDomain || message.answers.is_empty();
         let mut sections = AgedSections {
             answers: message.answers.clone(),
             authorities: message.authorities.clone(),
             additionals: message.additionals.clone(),
+            hint: OnceLock::new(),
         };
         // Answers define positive-entry freshness and the SOA defines
         // negative-entry freshness. Preserve those semantic records at a
@@ -87,6 +90,30 @@ impl super::ResponseCache {
             sections: Arc::clone(&sections),
         });
         Some(sections)
+    }
+
+    /// The addresses `cached` gives for the name asked about, as a serve now
+    /// sends them: read from the TTL-aged sections, which can have dropped an
+    /// expired additional record, and good for their aged TTL.
+    ///
+    /// Following a CNAME chain to its addresses costs more than serving the
+    /// answer does, so the hint is kept with the sections it was read from and
+    /// worked out once per entry and elapsed second, not on every hit.
+    #[must_use]
+    pub(crate) fn answer_hint(cached: &CachedAnswer) -> Option<AnswerHint> {
+        let message = &*cached.parsed_message;
+        match Self::age_sections(cached) {
+            Some(sections) => sections
+                .hint
+                .get_or_init(|| {
+                    answered_addresses(message, &sections.answers, &sections.additionals)
+                })
+                .clone(),
+            None => cached
+                .unaged_hint
+                .get_or_init(|| answered_addresses(message, &message.answers, &message.additionals))
+                .clone(),
+        }
     }
 
     /// Cache lifetime for `message`, in seconds.

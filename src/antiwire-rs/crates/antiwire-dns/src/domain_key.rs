@@ -96,7 +96,7 @@ impl PartialEq<&str> for DomainKey {
 /// Labels made only of hostname-safe bytes are copied straight from Hickory's
 /// label storage; anything else defers to `Name::to_ascii` so the key matches
 /// what [`Name::from_ascii`] will parse back for prefetch.
-pub(crate) fn from_name(name: &Name, needs_lowercase: bool) -> DomainKey {
+pub(crate) fn from_name(name: &Name) -> DomainKey {
     let mut key = DomainKey::new();
     for (index, label) in name.iter().enumerate() {
         let Some(label) = plain_label(label) else {
@@ -107,9 +107,7 @@ pub(crate) fn from_name(name: &Name, needs_lowercase: bool) -> DomainKey {
         }
         key.push_str(label);
     }
-    if needs_lowercase {
-        key.make_ascii_lowercase();
-    }
+    key.make_ascii_lowercase();
     key
 }
 
@@ -173,17 +171,10 @@ mod tests {
             ".",
         ] {
             let name = Name::from_ascii(text).expect("name");
-            let key = from_name(&name, true);
+            let key = from_name(&name);
             assert!(!key.spilled(), "{text}");
             assert_eq!(key.as_str(), to_ascii_normalized(&name), "{text}");
         }
-    }
-
-    #[test]
-    fn lowercase_is_applied_only_when_requested() {
-        let name = Name::from_ascii("ExAmPlE.TeSt.").expect("name");
-        assert_eq!(from_name(&name, false), "ExAmPlE.TeSt");
-        assert_eq!(from_name(&name, true), "example.test");
     }
 
     #[test]
@@ -198,7 +189,7 @@ mod tests {
         ])
         .expect("labels");
         name.set_fqdn(true);
-        let key = from_name(&name, true);
+        let key = from_name(&name);
         assert!(key.contains("\\."), "escapes survive: {key}");
         assert_eq!(key.as_str(), to_ascii_normalized(&name));
         assert!(
@@ -212,7 +203,7 @@ mod tests {
         let label = "a".repeat(63);
         let text = format!("{label}.{label}.{label}.{}.", "b".repeat(61));
         let name = Name::from_ascii(&text).expect("253-byte name");
-        let key = from_name(&name, true);
+        let key = from_name(&name);
         assert!(!key.spilled());
         assert_eq!(key.len(), INLINE_CAPACITY);
     }

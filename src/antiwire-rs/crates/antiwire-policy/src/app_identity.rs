@@ -15,6 +15,8 @@
 //! uses [`app_rule_identity`] to match a rule created for one version against
 //! the next.
 
+use std::borrow::Cow;
+
 /// Placeholder path used when a process name is known but its location is not.
 ///
 /// Unlike the unknown placeholders (each its own identity) and `System` (a
@@ -140,7 +142,9 @@ pub fn stable_identity(app_name: &str, app_path: &str, authoritative: bool) -> S
 /// [`crate::normalize_rule`], which lowercases app targets before indexing.
 #[must_use]
 pub fn app_rule_identity(path: &str) -> String {
-    normalize_versioned_path(path).to_ascii_lowercase()
+    let mut identity = normalize_versioned_path(path);
+    identity.make_ascii_lowercase();
+    identity
 }
 
 /// Normalizes an executable path by erasing version-shaped segments.
@@ -167,56 +171,94 @@ fn stable_identity_with(
     format!("n:{}", app_name.trim().to_lowercase())
 }
 
+/// Runs for every flow an application rule could match, so a component is
+/// borrowed from `path` unless a layout rule rewrites it, and the result is
+/// the only string built.
 fn normalize_versioned_path_with(path: &str, platform: Platform) -> String {
     let windows = platform == Platform::Windows;
-    let mut normalized = path.trim().to_owned();
+    let mut path = path.trim();
     if windows {
-        normalized = strip_extended_prefix(&normalized).replace('\\', "/");
+        path = strip_extended_prefix(path);
     }
+    // Windows accepts either separator; the result always uses `/`.
+    let is_separator = |c: char| c == '/' || (windows && c == '\\');
 
-    let (root, body) = split_root(&normalized, windows);
-
-    let mut components: Vec<String> = body
-        .split('/')
-        .filter(|component| !component.is_empty() && *component != ".")
-        .map(str::to_owned)
-        .collect();
+    let (root, body) = split_root(path, is_separator, windows);
+    let mut components: Vec<Cow<'_, str>> =
+        Vec::with_capacity(body.matches(is_separator).count() + 1);
+    components.extend(
+        body.split(is_separator)
+            .filter(|component| !component.is_empty() && *component != ".")
+            .map(Cow::Borrowed),
+    );
     apply_platform_sequence_rules(&mut components, platform);
-    let joined = components
-        .iter()
-        .map(|component| replace_version_tokens(component))
-        .collect::<Vec<_>>()
-        .join("/");
 
-    let result = match root.as_str() {
-        "" => joined,
-        "//" => format!("//{joined}"),
-        "/" => format!("/{joined}"),
-        drive => format!("{drive}/{joined}"),
-    };
+    // A version token is never shorter than `{v}`; the spare room covers the
+    // layout rules that lengthen a short component (`Office16`, snap's `1`).
+    let mut normalized = String::with_capacity(path.len() + 8);
+    root.write(&mut normalized);
+    for (index, component) in components.iter().enumerate() {
+        if index > 0 {
+            normalized.push('/');
+        }
+        push_without_versions(&mut normalized, component);
+    }
     if windows {
-        result.to_lowercase()
+        fold_case(normalized)
     } else {
-        result
+        normalized
     }
 }
 
-/// Splits the volume/root marker from the path body.
+/// The volume or root marker in front of a path's components.
 ///
 /// Keeping the marker literal prevents `C:x` from collapsing into `x` and a UNC
 /// path from collapsing into a relative one.
-fn split_root(path: &str, windows: bool) -> (String, &str) {
+enum Root<'a> {
+    Relative,
+    Unc,
+    Absolute,
+    Drive(&'a str),
+}
+
+impl Root<'_> {
+    fn write(&self, out: &mut String) {
+        match self {
+            Self::Relative => {}
+            Self::Unc => out.push_str("//"),
+            Self::Absolute => out.push('/'),
+            Self::Drive(drive) => {
+                out.push_str(drive);
+                out.push('/');
+            }
+        }
+    }
+}
+
+/// Splits the root marker from the path body.
+fn split_root(path: &str, is_separator: impl Fn(char) -> bool, windows: bool) -> (Root<'_>, &str) {
     if windows && is_drive_prefix(path) {
         let (drive, body) = path.split_at(2);
-        return (drive.to_ascii_lowercase(), body.trim_start_matches('/'));
+        return (Root::Drive(drive), body);
     }
-    if let Some(rest) = path.strip_prefix("//") {
-        return ("//".to_owned(), rest);
+    let mut leading = path.chars().map(is_separator);
+    // The separators are ASCII, so these offsets fall on character boundaries.
+    match (leading.next() == Some(true), leading.next() == Some(true)) {
+        (true, true) => (Root::Unc, &path[2..]),
+        (true, false) => (Root::Absolute, &path[1..]),
+        _ => (Root::Relative, path),
     }
-    if let Some(rest) = path.strip_prefix('/') {
-        return ("/".to_owned(), rest);
+}
+
+/// Windows paths are case-insensitive. ASCII folds in place; anything else
+/// takes the full Unicode mapping, as stored identities always have.
+fn fold_case(mut path: String) -> String {
+    if path.is_ascii() {
+        path.make_ascii_lowercase();
+        path
+    } else {
+        path.to_lowercase()
     }
-    (String::new(), path)
 }
 
 fn is_drive_prefix(path: &str) -> bool {
@@ -239,7 +281,7 @@ fn strip_extended_prefix(path: &str) -> &str {
 /// Each rule runs only on the platform whose layouts it describes, so a
 /// Linux-only pattern cannot rewrite a macOS path (and vice versa). The
 /// anchored rules never match a path that merely contains a number.
-fn apply_platform_sequence_rules(components: &mut [String], platform: Platform) {
+fn apply_platform_sequence_rules(components: &mut [Cow<'_, str>], platform: Platform) {
     match platform {
         Platform::Windows => apply_windows_rules(components),
         Platform::MacOs => apply_macos_rules(components),
@@ -256,18 +298,19 @@ fn apply_platform_sequence_rules(components: &mut [String], platform: Platform) 
 }
 
 /// Windows-only release layouts.
-fn apply_windows_rules(components: &mut [String]) {
+fn apply_windows_rules(components: &mut [Cow<'_, str>]) {
     // Microsoft Office installs into `root/Office<major>` (`Office16`).
     for component in components.iter_mut() {
         if is_office_version_dir(component) {
-            component.truncate("Office".len());
-            component.push_str(VERSION_TOKEN);
+            let rewritten = component.to_mut();
+            rewritten.truncate("Office".len());
+            rewritten.push_str(VERSION_TOKEN);
         }
     }
 }
 
 /// macOS-only release layouts.
-fn apply_macos_rules(components: &mut [String]) {
+fn apply_macos_rules(components: &mut [Cow<'_, str>]) {
     // Frameworks: `Versions/A`, `Versions/B`, and the `Versions/Current`
     // symlink are generations of the same framework.
     for index in 0..components.len().saturating_sub(1) {
@@ -275,7 +318,7 @@ fn apply_macos_rules(components: &mut [String]) {
             let next = &components[index + 1];
             let generation = next.len() == 1 && next.as_bytes()[0].is_ascii_uppercase();
             if generation || next.eq_ignore_ascii_case("Current") {
-                VERSION_TOKEN.clone_into(&mut components[index + 1]);
+                components[index + 1] = Cow::Borrowed(VERSION_TOKEN);
             }
         }
     }
@@ -285,13 +328,13 @@ fn apply_macos_rules(components: &mut [String]) {
     // fork an application row every time it starts.
     for index in 0..components.len().saturating_sub(1) {
         if components[index].eq_ignore_ascii_case("AppTranslocation") {
-            VERSION_TOKEN.clone_into(&mut components[index + 1]);
+            components[index + 1] = Cow::Borrowed(VERSION_TOKEN);
         }
     }
 }
 
 /// Linux-only release layouts.
-fn apply_linux_rules(components: &mut [String]) {
+fn apply_linux_rules(components: &mut [Cow<'_, str>]) {
     // Snap: `/snap/<package>/<revision>/...`, where the revision is a
     // monotonic integer or the `current` symlink.
     for index in 0..components.len().saturating_sub(2) {
@@ -300,7 +343,7 @@ fn apply_linux_rules(components: &mut [String]) {
             if revision.eq_ignore_ascii_case("current")
                 || (!revision.is_empty() && revision.bytes().all(|b| b.is_ascii_digit()))
             {
-                VERSION_TOKEN.clone_into(&mut components[index + 2]);
+                components[index + 2] = Cow::Borrowed(VERSION_TOKEN);
             }
         }
     }
@@ -315,7 +358,7 @@ fn apply_linux_rules(components: &mut [String]) {
         if deployment {
             let commit = &components[index + 5];
             if commit.eq_ignore_ascii_case("active") || is_hex_commit(commit) {
-                VERSION_TOKEN.clone_into(&mut components[index + 5]);
+                components[index + 5] = Cow::Borrowed(VERSION_TOKEN);
             }
         }
     }
@@ -325,7 +368,7 @@ fn apply_linux_rules(components: &mut [String]) {
     // from the name; the inner path and executable disambiguate.
     for component in components.iter_mut() {
         if is_appimage_mount(component) {
-            VERSION_TOKEN.clone_into(component);
+            *component = Cow::Borrowed(VERSION_TOKEN);
         }
     }
 }
@@ -333,17 +376,17 @@ fn apply_linux_rules(components: &mut [String]) {
 /// Homebrew and Linuxbrew: `Cellar/<formula>/<version>/`, where the version may
 /// carry a revision suffix (`1.2.3_2`) that the generic token rule leaves
 /// behind and would otherwise split the family on every rebuild.
-fn apply_homebrew_rules(components: &mut [String]) {
+fn apply_homebrew_rules(components: &mut [Cow<'_, str>]) {
     for index in 0..components.len().saturating_sub(2) {
         if components[index].eq_ignore_ascii_case("Cellar") {
-            VERSION_TOKEN.clone_into(&mut components[index + 2]);
+            components[index + 2] = Cow::Borrowed(VERSION_TOKEN);
         }
     }
 }
 
 /// Nix: `/nix/store/<hash>-<package>-<version>/`. The store hash changes on
 /// every update, so it is erased while the package path is kept.
-fn apply_nix_rules(components: &mut [String]) {
+fn apply_nix_rules(components: &mut [Cow<'_, str>]) {
     for index in 1..components.len().saturating_sub(1) {
         if components[index].eq_ignore_ascii_case("store")
             && components[index - 1].eq_ignore_ascii_case("nix")
@@ -351,7 +394,7 @@ fn apply_nix_rules(components: &mut [String]) {
             let replaced = nix_store_package(&components[index + 1])
                 .map(|package| format!("{VERSION_TOKEN}-{package}"));
             if let Some(replaced) = replaced {
-                components[index + 1] = replaced;
+                components[index + 1] = Cow::Owned(replaced);
             }
         }
     }
@@ -359,24 +402,25 @@ fn apply_nix_rules(components: &mut [String]) {
 
 /// Playwright browsers: `~/.cache/ms-playwright/<browser>-<build>/...` uses a
 /// bare integer build number with no dotted token.
-fn apply_playwright_rules(components: &mut [String]) {
+fn apply_playwright_rules(components: &mut [Cow<'_, str>]) {
     for index in 0..components.len().saturating_sub(1) {
         if components[index].eq_ignore_ascii_case("ms-playwright") {
             let replaced = playwright_browser(&components[index + 1])
                 .map(|browser| format!("{browser}-{VERSION_TOKEN}"));
             if let Some(replaced) = replaced {
-                components[index + 1] = replaced;
+                components[index + 1] = Cow::Owned(replaced);
             }
         }
     }
 }
 
 /// Vendor release directories that end in a bare year (`Adobe Photoshop 2024`).
-fn apply_vendor_release_rules(components: &mut [String]) {
+fn apply_vendor_release_rules(components: &mut [Cow<'_, str>]) {
     for component in components.iter_mut() {
         if let Some(separator) = trailing_year_separator(component) {
-            component.truncate(separator + 1);
-            component.push_str(VERSION_TOKEN);
+            let rewritten = component.to_mut();
+            rewritten.truncate(separator + 1);
+            rewritten.push_str(VERSION_TOKEN);
         }
     }
 }
@@ -453,14 +497,15 @@ fn is_office_version_dir(value: &str) -> bool {
     !rest.is_empty() && rest.len() <= 3 && rest.bytes().all(|byte| byte.is_ascii_digit())
 }
 
-/// Replaces every version token in one path component with [`VERSION_TOKEN`].
-fn replace_version_tokens(component: &str) -> String {
+/// Appends one path component to `out` with every version token replaced by
+/// [`VERSION_TOKEN`].
+fn push_without_versions(out: &mut String, component: &str) {
     let bytes = component.as_bytes();
     if !bytes.iter().any(u8::is_ascii_digit) {
-        return component.to_owned();
+        out.push_str(component);
+        return;
     }
 
-    let mut out = String::with_capacity(component.len());
     let mut copied_to = 0;
     let mut index = 0;
     while index < bytes.len() {
@@ -477,12 +522,7 @@ fn replace_version_tokens(component: &str) -> String {
         }
         index += utf8_char_len(bytes[index]);
     }
-
-    if copied_to == 0 {
-        return component.to_owned();
-    }
     out.push_str(&component[copied_to..]);
-    out
 }
 
 /// Returns true when a version token may start at `index`.
@@ -675,6 +715,30 @@ mod tests {
     fn windows_folds_case_and_separators_but_unix_preserves_case() {
         assert_eq!(win(r"C:\Apps\Tool.EXE"), win(r"c:/apps/tool.exe"));
         assert_ne!(linux("/opt/Tool/App.exe"), linux("/opt/tool/app.exe"));
+    }
+
+    #[test]
+    fn windows_roots_and_mixed_separators_keep_their_shape() {
+        assert_eq!(win(r"C:/Apps\v1.2/Tool.exe"), "c:/apps/{v}/tool.exe");
+        assert_eq!(
+            win(r"\\Server\Share\app-1.2\x.exe"),
+            "//server/share/app-{v}/x.exe"
+        );
+        assert_eq!(win(r"/\Server\x.exe"), "//server/x.exe");
+        assert_eq!(win(r"\Apps\.\\Tool.exe"), "/apps/tool.exe");
+        assert_eq!(win(r"C:Tool.exe"), "c:/tool.exe");
+        assert_eq!(win("C:"), "c:/");
+        // Only Windows treats a backslash as a separator.
+        assert_eq!(linux(r"/opt/a\b/tool"), r"/opt/a\b/tool");
+        assert_eq!(linux(r"\\server\x"), r"\\server\x");
+    }
+
+    #[test]
+    fn windows_folds_case_beyond_ascii() {
+        assert_eq!(
+            win(r"C:\Users\ÉMILE\Ünï-1.2\App.exe"),
+            "c:/users/émile/ünï-{v}/app.exe"
+        );
     }
 
     #[test]

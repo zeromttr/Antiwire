@@ -148,6 +148,15 @@ mod dns_interceptor {
     /// background. The RFC recommends 1.8 s, just under common 2 s client
     /// timeouts.
     pub const DNS_STALE_ANSWER_TIMER: Duration = Duration::from_millis(1_800);
+    /// The client response timer while the upstream an exchange would wait on
+    /// has failed since it last answered. Until it answers again, a stale
+    /// answer goes out this soon and the refresh goes on in the background:
+    /// a failing upstream that answers at all usually does so well inside one
+    /// transport timeout, and waiting out the full timer cost each query of an
+    /// outage's first seconds about as long as a failed exchange takes. The
+    /// cost is serving an expired answer sooner to a query that a slow but
+    /// working upstream would have answered between this and the full timer.
+    pub const DNS_STALE_ANSWER_TIMER_WHILE_FAILING: Duration = Duration::from_millis(400);
     /// RFC 8767 §4: TTL given to each expired record in a stale answer. The
     /// RFC recommends 30 s, so a client does not re-ask every second while
     /// the upstream is failing.
@@ -187,8 +196,8 @@ mod dns_interceptor {
     /// the new-domain lookup) leaves of [`DNS_QUERY_DEADLINE`]. Upstream
     /// admission refuses a query with no more than [`DNS_TRANSPORT_TIMEOUT`]
     /// left, so a gate that leaves less turns a fail-open into SERVFAIL. The
-    /// margin on top covers the wait for an admission permit. The gates run
-    /// one after the other and each leaves this much, so together they do too.
+    /// margin on top covers the wait for an admission permit. The gates wait
+    /// side by side, each leaving this much.
     pub const DNS_GATE_UPSTREAM_RESERVE: Duration =
         DNS_TRANSPORT_TIMEOUT.saturating_add(DNS_UPSTREAM_ADMISSION_TIMEOUT);
     /// Bounded timeout for a background AI classification once started.
@@ -351,6 +360,11 @@ mod dns_server {
     /// known to break the socket, so an unexpected repeating error cannot spin
     /// the receive loop.
     pub const DNS_UDP_RECEIVE_ERROR_BACKOFF: Duration = Duration::from_millis(100);
+    /// UDP replies one listener socket holds back at once while their client's
+    /// owner is looked up in the socket tables. A lookup that has to scan is
+    /// due at most once per refresh interval, so this bounds a burst, not a
+    /// rate; past it a reply goes at once and its owner is looked up later.
+    pub const DNS_UDP_HELD_REPLIES: usize = 16;
     pub const DNS_TCP_LISTEN_BACKLOG: i32 = 100;
     pub const DNS_SERVER_SHUTDOWN_TIMEOUT: Duration = Duration::from_secs(3);
     /// Retry a failed adapter DNS restore after a listener could not start.

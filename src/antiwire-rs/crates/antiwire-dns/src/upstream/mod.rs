@@ -11,11 +11,11 @@ pub use doh_block::{doh_block_targets, DOH_PORT};
 pub(crate) use providers::resolve_upstream_urls;
 pub(crate) use providers::upstreams_for_settings;
 pub(crate) use providers::{withhold_shape, WithholdShape};
-#[cfg(test)]
-pub(crate) use resolver::RecoveryHold;
 pub(crate) use resolver::{
     build_upstream_dns, check_upstream_endpoints, dialled_addresses, UpstreamAnswer, UpstreamDns,
 };
+#[cfg(test)]
+pub(crate) use resolver::{RecoveryHold, MAX_IN_FLIGHT_PER_TIER};
 
 use hickory_proto::rr::rdata::opt::EdnsCode;
 use hickory_resolver::net::NetError;
@@ -77,6 +77,8 @@ pub(crate) fn is_upstream_transport_option(code: EdnsCode) -> bool {
 const ADMISSION_DENIED: &str = "upstream admission denied";
 /// This tier could not admit the query to its pooled connections in time.
 const TIER_BUSY: &str = "upstream tier busy";
+/// This tier went down while the query waited its turn on it.
+const TIER_WENT_DOWN: &str = "upstream tier went down";
 /// Every tier is down and its one recovery attempt is already running.
 const EVERY_TIER_DOWN: &str = "every upstream tier is down";
 
@@ -85,5 +87,10 @@ const EVERY_TIER_DOWN: &str = "every upstream tier is down";
 /// They say nothing about the name, so they are not resolution failures in
 /// the RFC 9520 §2 sense and must not hold the name.
 pub(crate) fn query_never_sent(error: &NetError) -> bool {
-    matches!(error, NetError::Msg(message) if message == ADMISSION_DENIED || message == TIER_BUSY || message == EVERY_TIER_DOWN)
+    matches!(
+        error,
+        NetError::Msg(message)
+            if [ADMISSION_DENIED, TIER_BUSY, TIER_WENT_DOWN, EVERY_TIER_DOWN]
+                .contains(&message.as_str())
+    )
 }

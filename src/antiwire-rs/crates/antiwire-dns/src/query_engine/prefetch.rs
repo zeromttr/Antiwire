@@ -12,7 +12,7 @@ use super::QueryEngine;
 use crate::provider_block::ProviderFilter;
 use crate::rebinding::message_find_rebinding_address;
 use crate::response_cache::{
-    CacheKey, PrefetchReservation, ResponseCache, SharedOutcome, FETCH_GENERATION_ATTEMPTS,
+    CacheKey, Fetched, PrefetchReservation, ResponseCache, SharedOutcome, FETCH_GENERATION_ATTEMPTS,
 };
 use crate::upstream::AdmissionClass;
 use crate::{DnsError, Result};
@@ -20,33 +20,29 @@ use crate::{DnsError, Result};
 /// EDNS advertised payload size for reconstructed prefetch queries.
 const DNS_EDNS_MAX_PAYLOAD: u16 = 1232;
 
-/// What a refresh caches in place of an answer rebinding protection withholds,
-/// or `None` when the answer passes.
+/// What a refresh makes of an answer rebinding protection withholds, or `None`
+/// when the answer passes.
 ///
 /// A refresh that sees a private/hint address must not replace the still-fresh
-/// public entry with NODATA. It is a failed prefetch, so the existing answer
-/// stays until it expires. The configured resolver's own block is the
-/// exception: it is what the miss path caches for the name too, so the refresh
-/// takes it, and a blocked name is not fetched again in the foreground every
-/// time its entry runs out.
+/// public entry with NODATA. It withdraws, so the existing answer stays until
+/// it expires, and a query waiting on the refresh resolves the name itself and
+/// is answered as the miss path answers it. The configured resolver's own block
+/// is the exception: it is what the miss path caches for the name too, so the
+/// refresh takes it, and a blocked name is not fetched again in the foreground
+/// every time its entry runs out.
 fn withheld_refresh(
     request: &Message,
     cache_key: &CacheKey,
     message: &Message,
     provider_filter: ProviderFilter,
-) -> Option<Result<Message>> {
+) -> Option<Fetched> {
     let ip = message_find_rebinding_address(message)?;
     if provider_filter.is_block(message) {
-        return Some(Ok(withheld_answer(
-            request,
-            cache_key.flags.dnssec_ok,
-            Withheld::ProviderBlock,
-        )));
+        let withheld = withheld_answer(request, cache_key.flags.dnssec_ok, Withheld::ProviderBlock);
+        return Some(ResponseCache::entry_from_message(&withheld, true).into());
     }
     warn!(%ip, "prefetch discarded rebinding answer; keeping cached entry");
-    Some(Err(DnsError::Upstream(
-        "prefetch discarded rebinding answer".to_owned(),
-    )))
+    Some(Fetched::Withdrawn)
 }
 
 impl<P> QueryEngine<P>
@@ -83,23 +79,32 @@ where
                             let cache = &cache;
                             let cache_key = &cache_key;
                             async move {
-                                let permits = upstream
-                                    .acquire(AdmissionClass::Background, None)
-                                    .await
-                                    .ok_or_else(|| {
-                                        DnsError::Upstream(
-                                            "background upstream admission denied".to_owned(),
-                                        )
-                                    })?;
-                                let answer = upstream
+                                // A query that misses while this refresh runs
+                                // joins it. Failing for want of background
+                                // admission, or of a tier slot within a
+                                // refresh's short wait, says nothing about the
+                                // name, and the query has admission and a wait
+                                // of its own: withdraw rather than fail it.
+                                let Some(permits) =
+                                    upstream.acquire(AdmissionClass::Background, None).await
+                                else {
+                                    return Fetched::Withdrawn;
+                                };
+                                let answer = match upstream
                                     .exchange_admitted(request.as_ref(), permits)
                                     .await
-                                    .map_err(|error| {
-                                        if !crate::upstream::query_never_sent(&error) {
-                                            cache.record_failure(cache_key, attempt_generation);
-                                        }
-                                        DnsError::Upstream(error.to_string())
-                                    })?;
+                                {
+                                    Ok(answer) => answer,
+                                    Err(error) if crate::upstream::query_never_sent(&error) => {
+                                        return Fetched::Withdrawn;
+                                    }
+                                    Err(error) => {
+                                        cache.record_failure(cache_key, attempt_generation);
+                                        return Fetched::Done(Err(DnsError::Upstream(
+                                            error.to_string(),
+                                        )));
+                                    }
+                                };
                                 let withheld = rebinding_protection_enabled
                                     .then(|| {
                                         withheld_refresh(
@@ -110,12 +115,9 @@ where
                                         )
                                     })
                                     .flatten();
-                                match withheld {
-                                    Some(withheld) => {
-                                        ResponseCache::entry_from_message(&withheld?, true)
-                                    }
-                                    None => ResponseCache::entry_from_upstream(answer),
-                                }
+                                withheld.unwrap_or_else(|| {
+                                    ResponseCache::entry_from_upstream(answer).into()
+                                })
                             }
                         })
                         .await;
@@ -124,6 +126,7 @@ where
                         // Discarded against a retired generation; retry with a
                         // freshly acquired pair.
                         SharedOutcome::GenerationRetired => {}
+                        SharedOutcome::Withdrawn => return false,
                     }
                 }
                 false

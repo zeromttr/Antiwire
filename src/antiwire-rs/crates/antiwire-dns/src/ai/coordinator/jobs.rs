@@ -101,7 +101,7 @@ impl AiCoordinator {
         let classifier = config
             .classifier
             .ok_or_else(|| ClassifierError::Unavailable("ai client unavailable".to_owned()))?;
-        let provider_epoch = config.provider_epoch;
+        let generation = config.policy.generation;
         let domain = canonical.to_owned();
         let assessment = tokio::time::timeout_at(
             tokio::time::Instant::from_std(deadline),
@@ -111,7 +111,7 @@ impl AiCoordinator {
         .map_err(|_| ClassifierError::Transient("ai timed out".to_owned()))??;
 
         let current = self.config.read().clone();
-        if current.provider_epoch != provider_epoch {
+        if current.policy.generation != generation {
             return Err(ClassifierError::Transient(
                 "ai provider changed during classification".to_owned(),
             ));
@@ -143,7 +143,7 @@ impl AiCoordinator {
             return Err(ClassifierError::Transient("ai budget expired".to_owned()));
         }
         match self
-            .persist_stored_until(&stored, provider_epoch, deadline, admission, fence)
+            .persist_stored_until(&stored, generation, deadline, admission, fence)
             .await
         {
             Ok(()) | Err(PersistError::Superseded) => {}
@@ -153,7 +153,7 @@ impl AiCoordinator {
                 ));
             }
             Err(PersistError::Failed(error)) => {
-                self.schedule_persist_retry(stored.clone(), provider_epoch, fence);
+                self.schedule_persist_retry(stored.clone(), generation, fence);
                 warn!(%error, "ai decision persistence failed; retry scheduled");
             }
         }
@@ -272,7 +272,7 @@ impl AiCoordinator {
     pub(super) async fn persist_stored_until(
         &self,
         stored: &StoredDecision,
-        provider_epoch: u64,
+        generation: u64,
         deadline: Instant,
         admission: &mut Admission,
         fence: DeletionFence,
@@ -283,7 +283,7 @@ impl AiCoordinator {
         let persist_gate = Arc::clone(&self.persist_gate);
         let mut handle = tokio::task::spawn_blocking(move || {
             let _gate = persist_gate.lock();
-            if config.read().provider_epoch != provider_epoch {
+            if config.read().policy.generation != generation {
                 return Err(PersistError::StaleProvider);
             }
             match store.insert_domain_decision_if_absent(&stored, fence) {

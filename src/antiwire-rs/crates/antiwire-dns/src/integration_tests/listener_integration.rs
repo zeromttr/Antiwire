@@ -1,4 +1,4 @@
-//! Integration tests for the hickory-server backed DNS listener (UDP and TCP).
+//! Integration tests for the DNS listener (UDP and TCP).
 
 use std::net::SocketAddr;
 use std::sync::Arc;
