@@ -39,6 +39,9 @@ pub struct RuleEngine {
     /// App rules keyed by version family, so a rule created for one install
     /// version keeps matching after an in-place update.
     app_rules_normalized: AHashMap<String, Vec<RuleSnapshot>>,
+    /// Application rules that block. Only a block carries over to another
+    /// version, so with none the version-family lookup is skipped.
+    app_block_rules: usize,
     /// Bare user domain rules (`example.com`): this host and all subdomains.
     /// Name-only: never emitted as [`crate::EnforcementOp`].
     dns_rules: DnsRuleMap,
@@ -65,6 +68,7 @@ impl RuleEngine {
             rules_by_id: AHashMap::new(),
             app_rules: AHashMap::new(),
             app_rules_normalized: AHashMap::new(),
+            app_block_rules: 0,
             dns_rules: DnsRuleMap::default(),
             dns_wildcards: DnsRuleMap::default(),
             ip_rules: JointPrefixMap::new(),
@@ -107,6 +111,7 @@ impl RuleEngine {
         self.rules_by_id.clear();
         self.app_rules.clear();
         self.app_rules_normalized.clear();
+        self.app_block_rules = 0;
         self.dns_rules = DnsRuleMap::default();
         self.dns_wildcards = DnsRuleMap::default();
         self.ip_rules.clear();
