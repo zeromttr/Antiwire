@@ -8,7 +8,7 @@ use antiwire_policy::{PolicyEngine, AI_BLOCK_LABEL};
 use hickory_proto::op::{Message, ResponseCode};
 use tracing::debug;
 
-use super::request::{PreparedQuery, RequestView};
+use super::request::PreparedQuery;
 use super::QueryEngine;
 use crate::ai::coordinator::ResidentOutcome;
 use crate::ai::decision::AiEvaluation;
@@ -72,9 +72,9 @@ where
     }
 
     /// Answers a block the AI gate decided on.
-    pub(super) fn ai_block_response<R: RequestView>(
+    pub(super) fn ai_block_response(
         &self,
-        request: &R,
+        request: &Message,
         prepared: &PreparedQuery,
         client: Option<QueryClient<'_>>,
         evaluation: &AiEvaluation,

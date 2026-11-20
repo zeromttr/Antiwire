@@ -562,7 +562,7 @@ impl Drop for DnsInterceptor {
         // `QueryEngine` reference, which joins the block-signal worker thread
         // while it may be mid-event. So it all runs on a blocking thread, the
         // listener after the divert: until the divert is gone, DNS it catches
-        // is still answered. `DnsListener::drop` cancels the hickory server
+        // is still answered. `DnsListener::drop` cancels the listener
         // and aborts its task.
         //
         // `self.redirect` restores whatever is still redirected as it drops,

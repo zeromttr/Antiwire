@@ -8,6 +8,7 @@
 //! each caller says where a scan may run ([`Scans`]).
 
 use crate::block::DnsQueryContext;
+use crate::listener::Transport;
 use std::sync::atomic::{AtomicU64, Ordering};
 
 pub(crate) use netmetrics::Ownership;
@@ -533,9 +534,9 @@ fn prefer_recorded(
 /// The client endpoint `context`'s query came from. A redirected query
 /// arrives from a synthetic endpoint; its flow belongs to the one it replaced.
 fn client_endpoint(context: &DnsQueryContext) -> (netmetrics::Protocol, netmetrics::LocalEndpoint) {
-    let protocol = match context.protocol {
-        hickory_server::net::xfer::Protocol::Tcp => netmetrics::Protocol::Tcp,
-        _ => netmetrics::Protocol::Udp,
+    let protocol = match context.transport {
+        Transport::Tcp => netmetrics::Protocol::Tcp,
+        Transport::Udp => netmetrics::Protocol::Udp,
     };
     let endpoint = netmetrics::LocalEndpoint {
         address: context.client_addr,
@@ -573,7 +574,7 @@ mod refine_tests {
         DnsQueryContext {
             client_addr: local.ip(),
             client_port: local.port(),
-            protocol: hickory_server::net::xfer::Protocol::Udp,
+            transport: crate::listener::Transport::Udp,
             received_at,
         }
     }
@@ -641,7 +642,7 @@ mod refine_tests {
         let context = DnsQueryContext {
             client_addr: std::net::IpAddr::V4(std::net::Ipv4Addr::LOCALHOST),
             client_port: 50_000,
-            protocol: hickory_server::net::xfer::Protocol::Udp,
+            transport: crate::listener::Transport::Udp,
             received_at,
         };
         let worker = crate::owner_worker::OwnerWorker::default();
@@ -710,7 +711,7 @@ mod refine_tests {
             let context = DnsQueryContext {
                 client_addr: local.ip(),
                 client_port: local.port(),
-                protocol: hickory_server::net::xfer::Protocol::Udp,
+                transport: crate::listener::Transport::Udp,
                 received_at: std::time::Instant::now(),
             };
             let scans = shared_table_scans();

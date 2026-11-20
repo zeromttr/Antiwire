@@ -18,7 +18,7 @@ use hickory_proto::op::Message;
 use super::ai::AiLocal;
 use super::local::GateBlock;
 use super::miss::remaining_deadline;
-use super::request::{PreparedQuery, RequestView};
+use super::request::PreparedQuery;
 use super::QueryEngine;
 use crate::ai::coordinator::ProactiveOutcome;
 use crate::ai::decision::AiEvaluation;
@@ -69,9 +69,9 @@ where
     }
 
     /// Answers a block a gate decided on.
-    pub(super) fn gate_block_response<R: RequestView>(
+    pub(super) fn gate_block_response(
         &self,
-        request: &R,
+        request: &Message,
         prepared: &PreparedQuery,
         client: Option<QueryClient<'_>>,
         blocked: &Blocked,

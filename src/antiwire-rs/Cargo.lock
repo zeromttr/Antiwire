@@ -207,7 +207,6 @@ dependencies = [
  "futures-util",
  "hickory-proto",
  "hickory-resolver",
- "hickory-server",
  "ipnet",
  "moka",
  "netmetrics",
@@ -224,7 +223,6 @@ dependencies = [
  "time",
  "tokio",
  "tokio-util",
- "tower 0.5.3",
  "tracing",
  "url",
  "webpki-roots",
@@ -1825,7 +1823,6 @@ dependencies = [
  "prefix-trie 0.8.4",
  "rand 0.10.2",
  "ring",
- "serde",
  "thiserror 2.0.21",
  "tinyvec",
  "tracing",
@@ -1860,29 +1857,6 @@ dependencies = [
  "tokio-rustls",
  "tracing",
  "webpki-roots",
-]
-
-[[package]]
-name = "hickory-server"
-version = "0.26.3"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "950c2ad9ba2ad35d6890b725baff91305f65b87d7719a6c6071514dc70f13eeb"
-dependencies = [
- "async-trait",
- "bytes",
- "cfg-if",
- "data-encoding",
- "futures-util",
- "hickory-net",
- "hickory-proto",
- "ipnet",
- "prefix-trie 0.8.4",
- "serde",
- "thiserror 2.0.21",
- "time",
- "tokio",
- "tokio-util",
- "tracing",
 ]
 
 [[package]]
@@ -4291,10 +4265,8 @@ dependencies = [
  "pin-project-lite",
  "sync_wrapper",
  "tokio",
- "tokio-util",
  "tower-layer",
  "tower-service",
- "tracing",
 ]
 
 [[package]]
@@ -4480,7 +4452,6 @@ dependencies = [
  "idna",
  "percent-encoding",
  "serde",
- "serde_derive",
 ]
 
 [[package]]

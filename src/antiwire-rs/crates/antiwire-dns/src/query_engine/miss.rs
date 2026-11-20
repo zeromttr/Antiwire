@@ -9,11 +9,10 @@ use antiwire_tuning::{
 };
 use hickory_proto::op::Message;
 use hickory_proto::rr::RecordType;
-use hickory_server::zone_handler::MessageRequest;
 use tracing::{debug, info, warn};
 
 use super::ai::answer_is_ai_eligible;
-use super::request::{PreparedQuery, RequestView};
+use super::request::PreparedQuery;
 use super::response::{prepare_cached_message, prepare_uncached_message, PreparedResponse};
 use super::QueryEngine;
 use crate::block::DnsQueryContext;
@@ -42,18 +41,6 @@ where
 {
     /// Completes a miss returned by [`Self::try_handle_parsed_sync`].
     pub(crate) async fn handle_parsed_miss(
-        &self,
-        request: &MessageRequest,
-        context: Option<DnsQueryContext>,
-        prepared: PreparedQuery,
-        enqueued_at: Instant,
-    ) -> PreparedResponse {
-        let request = request.to_message();
-        self.resolve_miss_message(&request, context, prepared, enqueued_at)
-            .await
-    }
-
-    pub(super) async fn resolve_miss_message(
         &self,
         request: &Message,
         context: Option<DnsQueryContext>,

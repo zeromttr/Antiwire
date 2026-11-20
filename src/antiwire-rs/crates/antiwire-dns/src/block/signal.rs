@@ -14,11 +14,11 @@ use tracing::{info, warn};
 
 use super::response::BlockResponseMode;
 use super::sink::DnsBlockSink;
+use crate::listener::Transport;
 use crate::port_mapper::{
     deferred_query_owner, recorded_owners_available, reply_path_query_owner, Ownership,
     PromisedOwner, Purpose, QueryClient, ReplyPathOwner,
 };
-use hickory_server::net::xfer::Protocol;
 use std::net::IpAddr;
 
 /// Optional per-query client metadata for block attribution.
@@ -26,7 +26,7 @@ use std::net::IpAddr;
 pub(crate) struct DnsQueryContext {
     pub(crate) client_addr: IpAddr,
     pub(crate) client_port: u16,
-    pub(crate) protocol: Protocol,
+    pub(crate) transport: Transport,
     pub(crate) received_at: Instant,
 }
 
@@ -383,7 +383,7 @@ mod tests {
             Some(QueryClient::scanned_here(DnsQueryContext {
                 client_addr: addr.ip(),
                 client_port: addr.port(),
-                protocol: Protocol::Udp,
+                transport: Transport::Udp,
                 received_at: Instant::now(),
             })),
             Vec::new,

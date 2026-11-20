@@ -128,7 +128,7 @@ workspaces.
 | [flate2](https://github.com/rust-lang/flate2-rs) | 1.1.9 | MIT OR Apache-2.0 |
 | [futures-util](https://github.com/rust-lang/futures-rs) | 0.3.33 | MIT OR Apache-2.0 |
 | [getrandom](https://github.com/rust-random/getrandom) | 0.2.17 | MIT OR Apache-2.0 |
-| [hickory-proto, hickory-resolver, hickory-server](https://github.com/hickory-dns/hickory-dns) | 0.26.3 | MIT OR Apache-2.0 |
+| [hickory-proto, hickory-resolver](https://github.com/hickory-dns/hickory-dns) | 0.26.3 | MIT OR Apache-2.0 |
 | [hyper-util](https://github.com/hyperium/hyper-util) | 0.1.21 | MIT |
 | [ipconfig](https://github.com/liranringel/ipconfig) | 0.3.4 | MIT OR Apache-2.0 |
 | [ipnet](https://github.com/krisprice/ipnet) | 2.12 | MIT OR Apache-2.0 |

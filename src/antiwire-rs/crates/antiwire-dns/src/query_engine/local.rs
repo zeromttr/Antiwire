@@ -5,16 +5,15 @@
 use std::sync::atomic::{AtomicU32, AtomicU64, Ordering};
 use std::time::{Duration, Instant};
 
+use crate::listener::Transport;
 use antiwire_policy::{DomainBlockSource, PolicyEngine, Verdict};
 use antiwire_tuning::{DNS_FAIL_FAST_REPLY_BUDGET, DNS_FAIL_FAST_REPLY_WINDOW};
 use hickory_proto::op::{Message, ResponseCode};
 use hickory_proto::rr::RecordType;
-use hickory_server::net::xfer::Protocol;
-use hickory_server::zone_handler::MessageRequest;
 use tracing::warn;
 
 use super::gates::GatesLocal;
-use super::request::{parse_query, validate_request, PreparedQuery, RequestView};
+use super::request::{parse_query, validate_request, PreparedQuery};
 use super::response::{prepare_cached_message, prepare_uncached_message, PreparedResponse};
 use super::QueryEngine;
 use crate::ai::PostResponseWork;
@@ -112,23 +111,17 @@ impl<P> QueryEngine<P>
 where
     P: PolicyEngine + Send + Sync,
 {
-    pub(super) fn process_core<R>(
+    pub(super) fn process_core(
         &self,
-        request: &R,
+        request: &Message,
         client: Option<QueryClient<'_>>,
-    ) -> CoreSyncOutcome
-    where
-        R: RequestView,
-    {
+    ) -> CoreSyncOutcome {
         if let Some(rcode) = validate_request(request) {
-            return CoreSyncOutcome::Response(
-                build_error_response(&request.to_message(), rcode),
-                None,
-            );
+            return CoreSyncOutcome::Response(build_error_response(request, rcode), None);
         }
 
         let Ok(mut prepared) = parse_query(request) else {
-            return CoreSyncOutcome::Response(build_servfail_response(&request.to_message()), None);
+            return CoreSyncOutcome::Response(build_servfail_response(request), None);
         };
 
         if let Some(decision) = self
@@ -136,11 +129,9 @@ where
             .evaluate_normalized_domain_with_source(&prepared.cache_key.domain)
         {
             if decision.verdict == Verdict::Block {
-                // Only the echoed question is cloned; the owned message is
-                // built solely for the SERVFAIL fallback.
                 let response = self
                     .policy_block_response(request, &prepared, decision.source, client)
-                    .unwrap_or_else(|| build_servfail_response(&request.to_message()));
+                    .unwrap_or_else(|| build_servfail_response(request));
                 let post_ai = self.policy_block_post_work(&prepared, decision.source);
                 return CoreSyncOutcome::Response(response, post_ai);
             }
@@ -168,7 +159,7 @@ where
                 // carries no post-response work.
                 let response = self
                     .gate_block_response(request, &prepared, client, &blocked)
-                    .unwrap_or_else(|| build_servfail_response(&request.to_message()));
+                    .unwrap_or_else(|| build_servfail_response(request));
                 return CoreSyncOutcome::Response(response, None);
             }
             GatesLocal::Pending => return CoreSyncOutcome::Miss(prepared),
@@ -202,9 +193,9 @@ where
 
     /// What becomes of a query the cache has no fresh answer for. `stale` is
     /// the stale entry the probe found, which a failure may still serve.
-    fn miss_outcome<R: RequestView>(
+    fn miss_outcome(
         &self,
-        request: &R,
+        request: &Message,
         prepared: PreparedQuery,
         stale: Option<CachedAnswer>,
         client: Option<QueryClient<'_>>,
@@ -215,14 +206,14 @@ where
         if self.miss_would_fail_fast(&prepared, stale.is_some()) {
             // Answered or dropped here instead of on a task per query;
             // see `FailFastBudget`.
-            let udp = client.is_some_and(|client| client.context.protocol == Protocol::Udp);
+            let udp = client.is_some_and(|client| client.context.transport == Transport::Udp);
             if udp && !self.fail_fast_replies.try_take() {
                 self.fail_fast_replies.note_drop();
                 return CoreSyncOutcome::Dropped;
             }
             let servfail = crate::messages::empty_response(
-                request.metadata(),
-                request.first_query(),
+                &request.metadata,
+                request.queries.first().cloned(),
                 ResponseCode::ServFail,
             );
             return CoreSyncOutcome::Response(servfail, None);
@@ -233,13 +224,8 @@ where
     /// The answer to a query this resolver makes up itself, whatever an upstream would say:
     /// one for a special-use name, or an `ANY` query. `None` for any other query.
     ///
-    /// Special-use names are classified from the already-normalized question, so ordinary
-    /// cache hits never clone the client message, and synthesis copies only the question.
-    fn synthesized_response<R: RequestView>(
-        &self,
-        request: &R,
-        prepared: &PreparedQuery,
-    ) -> Option<Message> {
+    /// Special-use names are classified from the already-normalized question.
+    fn synthesized_response(&self, request: &Message, prepared: &PreparedQuery) -> Option<Message> {
         let special_use = crate::special_use::classify_special_use_with(
             &prepared.cache_key.domain,
             self.answer_local_names,
@@ -247,27 +233,27 @@ where
         if special_use.is_none() && prepared.qtype != RecordType::ANY {
             return None;
         }
-        let Some(question) = request.first_query() else {
-            return Some(build_servfail_response(&request.to_message()));
+        let Some(question) = request.queries.first() else {
+            return Some(build_servfail_response(request));
         };
         Some(match special_use {
             Some(kind) => crate::special_use::synthesize_special_use(
-                request.metadata(),
-                &question,
-                request.edns(),
+                &request.metadata,
+                question,
+                request.edns.as_ref(),
                 kind,
                 prepared.qtype,
             ),
-            None => build_any_response(request.metadata(), question),
+            None => build_any_response(&request.metadata, question.clone()),
         })
     }
 
     /// Answers a name whose recent failure is still held, without asking
     /// upstream: `stale` at once (the RFC 8767 §5 failure recheck timer), or
     /// SERVFAIL from the cached failure (RFC 9520 §3.2).
-    fn held_failure_outcome<R: RequestView>(
+    fn held_failure_outcome(
         &self,
-        request: &R,
+        request: &Message,
         prepared: &PreparedQuery,
         stale: Option<CachedAnswer>,
         client: Option<QueryClient<'_>>,
@@ -281,9 +267,9 @@ where
             }
             None => CoreSyncOutcome::Response(
                 build_cached_failure_response(
-                    request.metadata(),
-                    request.first_query(),
-                    request.edns(),
+                    &request.metadata,
+                    request.queries.first().cloned(),
+                    request.edns.as_ref(),
                 ),
                 None,
             ),
@@ -329,7 +315,7 @@ where
     )]
     pub(crate) fn try_handle_parsed_sync(
         &self,
-        request: &MessageRequest,
+        request: &Message,
         client: Option<QueryClient<'_>>,
     ) -> std::result::Result<Option<PreparedResponse>, PreparedQuery> {
         match self.process_core(request, client) {
@@ -345,9 +331,9 @@ where
     }
 
     /// Answers a policy block, reporting the rule or blocklists that matched.
-    pub(super) fn policy_block_response<R: RequestView>(
+    pub(super) fn policy_block_response(
         &self,
-        request: &R,
+        request: &Message,
         prepared: &PreparedQuery,
         source: Option<DomainBlockSource>,
         client: Option<QueryClient<'_>>,
@@ -425,9 +411,9 @@ where
         }
     }
 
-    pub(super) fn block_response<R, F>(
+    pub(super) fn block_response<F>(
         &self,
-        request: &R,
+        request: &Message,
         normalized: &str,
         qtype: RecordType,
         source: Option<&'static str>,
@@ -435,7 +421,6 @@ where
         resolve_blocklist_names: F,
     ) -> Option<Message>
     where
-        R: RequestView,
         F: FnOnce() -> Vec<String>,
     {
         self.block_signals.signal_block(
@@ -446,11 +431,11 @@ where
             client,
             resolve_blocklist_names,
         );
-        let question = request.first_query()?;
+        let question = request.queries.first().cloned()?;
         let response = build_block_response(
-            request.metadata(),
+            &request.metadata,
             question,
-            request.edns(),
+            request.edns.as_ref(),
             self.block_mode,
             self.custom_block_ip,
         )

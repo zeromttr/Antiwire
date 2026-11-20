@@ -6,10 +6,10 @@
 //! (RFC 1035 §4.2.2) and answered the same way as UDP: local answers from the
 //! connection task, misses on their own tasks. DNS over TCP permits
 //! out-of-order replies, so pipelined misses run concurrently up to a
-//! per-connection `tower` concurrency limit, and reading pauses while that
+//! per-connection concurrency limit, and reading pauses while that
 //! limit is reached.
 
-use std::convert::Infallible;
+use std::future::Future;
 use std::io;
 use std::net::SocketAddr;
 use std::sync::Arc;
@@ -17,7 +17,6 @@ use std::time::Instant;
 
 use bytes::Bytes;
 use futures_util::{SinkExt, StreamExt};
-use hickory_server::net::xfer::Protocol;
 use tokio::net::tcp::OwnedWriteHalf;
 use tokio::net::{TcpListener, TcpStream};
 use tokio::sync::{mpsc, Semaphore};
@@ -25,14 +24,13 @@ use tokio::task::JoinSet;
 use tokio::time::{sleep, sleep_until, timeout, timeout_at};
 use tokio_util::codec::{FramedRead, FramedWrite, LengthDelimitedCodec};
 use tokio_util::sync::CancellationToken;
-use tower::limit::ConcurrencyLimit;
-use tower::{Service, ServiceExt};
 use tracing::{debug, warn};
 
 use antiwire_tuning::{
     DNS_TCP_ACCEPT_ERROR_BACKOFF, DNS_TCP_IO_TIMEOUT, DNS_TCP_MAX_CONNECTION_LIFETIME,
 };
 
+use crate::listener::Transport;
 use crate::service::{Answer, Query, Reply};
 use crate::{DnsError, Result};
 
@@ -41,7 +39,7 @@ use crate::{DnsError, Result};
 const TCP_QUERY_CONCURRENCY: usize = 4;
 
 /// Serves one TCP listener, admitting connections against `connections`.
-pub(crate) async fn serve_tcp<F, M, R>(
+pub(crate) async fn serve_tcp<F, M, R, A>(
     listener: TcpListener,
     resolve: F,
     forward: M,
@@ -49,10 +47,10 @@ pub(crate) async fn serve_tcp<F, M, R>(
     shutdown: CancellationToken,
 ) -> Result<()>
 where
-    F: Fn(Query) -> Answer<R> + Clone + Send + 'static,
+    F: Fn(Query<'_>) -> Answer<R> + Clone + Send + 'static,
     R: Send + 'static,
-    M: Service<R, Response = Reply, Error = Infallible> + Clone + Send + 'static,
-    M::Future: Send + 'static,
+    M: Fn(R) -> A + Clone + Send + 'static,
+    A: Future<Output = Reply> + Send + 'static,
 {
     let mut tasks = JoinSet::new();
     let mut rejections: u64 = 0;
@@ -147,16 +145,16 @@ fn dns_framing() -> LengthDelimitedCodec {
 /// Local answers are written straight from this loop. Misses reply through a
 /// channel the loop drains between reads, so one task owns both halves of the
 /// socket and cancelling the connection stops everything at once.
-async fn serve_connection<F, M, R>(
+async fn serve_connection<F, M, R, A>(
     stream: TcpStream,
     src: SocketAddr,
     resolve: F,
     forward: M,
     shutdown: CancellationToken,
 ) where
-    F: Fn(Query) -> Answer<R>,
-    M: Service<R, Response = Reply, Error = Infallible>,
-    M::Future: Send + 'static,
+    F: Fn(Query<'_>) -> Answer<R>,
+    M: Fn(R) -> A,
+    A: Future<Output = Reply> + Send + 'static,
 {
     let (read, write) = stream.into_split();
     let mut frames = FramedRead::new(read, dns_framing());
@@ -165,7 +163,7 @@ async fn serve_connection<F, M, R>(
     // finishing miss can wait here for room; the loop and the close path both
     // drain the queue, so that wait always ends.
     let (replies, mut outbox) = mpsc::channel(TCP_QUERY_CONCURRENCY);
-    let mut forward = ConcurrencyLimit::new(forward, TCP_QUERY_CONCURRENCY);
+    let misses = Arc::new(Semaphore::new(TCP_QUERY_CONCURRENCY));
     let mut tasks = JoinSet::new();
     let close_at = tokio::time::Instant::now() + DNS_TCP_MAX_CONNECTION_LIFETIME;
 
@@ -200,9 +198,9 @@ async fn serve_connection<F, M, R>(
             Ok(None) | Err(_) => break,
         };
         let query = Query {
-            wire: frame.to_vec(),
+            wire: &frame,
             src,
-            protocol: Protocol::Tcp,
+            transport: Transport::Tcp,
             received_at: Instant::now(),
         };
 
@@ -221,15 +219,17 @@ async fn serve_connection<F, M, R>(
             Answer::Miss(miss) => {
                 // Reading pauses here while the connection's misses are all in
                 // flight; their replies are queued, not lost, meanwhile.
-                let ready = tokio::select! {
-                    ready = forward.ready() => ready,
+                let slot = tokio::select! {
+                    slot = Arc::clone(&misses).acquire_owned() => slot,
                     () = shutdown.cancelled() => break,
                 };
-                let Ok(forward) = ready;
-                let reply = forward.call(miss);
+                // `misses` is never closed.
+                let Ok(slot) = slot else { break };
+                let reply = forward(miss);
                 let replies = replies.clone();
                 tasks.spawn(async move {
-                    let Ok(reply) = reply.await;
+                    let reply = reply.await;
+                    drop(slot);
                     // Fails only once the connection has given up on the client.
                     let _ = replies.send(reply).await;
                 });

@@ -23,7 +23,7 @@ use super::key::CacheKey;
 /// Cached DNS answer with freshness metadata.
 #[derive(Debug, Clone)]
 pub(crate) struct CachedAnswer {
-    /// Pre-parsed response used by hickory-server's cache-hit path.
+    /// Pre-parsed response the cache-hit path encodes from.
     ///
     /// Entries admitted from raw bytes parse once at insertion. Invalid raw
     /// bytes can still be used by cache bookkeeping tests, but cannot be

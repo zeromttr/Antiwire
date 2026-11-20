@@ -6,7 +6,7 @@
 //! - `prefetch`: background refresh of entries nearing expiry.
 //! - `ai`: the AI gate and post-response classification work.
 //! - `hints`: reporting answered addresses to the flow tracker.
-//! - `response`: the parsed response handed to hickory-server.
+//! - `response`: the parsed response a reply is encoded from.
 
 mod ai;
 mod gates;

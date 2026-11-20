@@ -52,8 +52,6 @@ async fn network_reset_replaces_and_releases_the_upstream_pool() {
     .expect("retired upstream pool must be released");
 }
 
-use std::cell::Cell;
-
 use parking_lot::Mutex;
 
 use super::ai::*;
@@ -66,10 +64,11 @@ use crate::domain_key;
 use crate::port_mapper::QueryClient;
 use crate::response_cache::{CacheKey, QueryFlags};
 use crate::service::testing::{respond, respond_locally};
+use crate::test_support::a_query;
 use antiwire_policy::DomainDecision;
 use antiwire_policy::{DomainBlockSource, Verdict};
 use antiwire_tuning::{DNS_FAIL_FAST_REPLY_BUDGET, DNS_FAIL_FAST_REPLY_WINDOW, DNS_QUERY_DEADLINE};
-use hickory_proto::op::{Edns, Message, Metadata, ResponseCode};
+use hickory_proto::op::{Edns, Message, ResponseCode};
 use hickory_proto::op::{MessageType, OpCode, Query};
 use hickory_proto::rr::{rdata::opt::EdnsOption, Name};
 use hickory_proto::rr::{DNSClass, Record, RecordType};
@@ -103,7 +102,6 @@ fn ai_eligibility_accepts_single_character_labels() {
     let eligible = |name: &str| {
         ai_domain_eligible(&domain_key::from_name(
             &Name::from_ascii(name).expect("name"),
-            true,
         ))
     };
     assert!(eligible("x.com."));
@@ -405,25 +403,15 @@ fn edns_options_and_nonstandard_fields_bypass_the_cache() {
 }
 
 #[test]
-fn cache_key_domain_is_built_inline_from_both_request_views() {
+fn cache_key_domain_is_built_inline() {
     let mut request = Message::new(0, MessageType::Query, OpCode::Query);
     request.add_query(Query::query(
         Name::from_ascii("Long-Ish.SubDomain.ExAmPlE.example.").expect("name"),
         RecordType::A,
     ));
-    let from_message = parse_query(&request).expect("parse").cache_key;
-    assert!(!from_message.domain.spilled(), "no heap for the key");
-    assert_eq!(from_message.domain, "long-ish.subdomain.example.example");
-
-    let parsed = hickory_server::server::Request::from_bytes(
-        crate::messages::encode_message(&request).expect("encode"),
-        "127.0.0.1:53000".parse().expect("client address"),
-        hickory_server::net::xfer::Protocol::Udp,
-    )
-    .expect("hickory parses request");
-    let from_request = parse_query(&*parsed).expect("parse").cache_key;
-    assert!(!from_request.domain.spilled(), "no heap for the key");
-    assert_eq!(from_request, from_message, "both views produce one key");
+    let key = parse_query(&request).expect("parse").cache_key;
+    assert!(!key.domain.spilled(), "no heap for the key");
+    assert_eq!(key.domain, "long-ish.subdomain.example.example");
 }
 
 struct AllowAll;
@@ -431,45 +419,6 @@ struct AllowAll;
 impl PolicyEngine for AllowAll {
     fn evaluate_domain_with_source(&self, _: &str) -> Option<DomainDecision> {
         None
-    }
-}
-
-struct SpyRequest {
-    metadata: Metadata,
-    query: Query,
-    to_message_calls: Cell<usize>,
-    first_query_calls: Cell<usize>,
-}
-
-impl RequestView for SpyRequest {
-    fn metadata(&self) -> &Metadata {
-        &self.metadata
-    }
-
-    fn query_count(&self) -> usize {
-        1
-    }
-
-    fn question(&self) -> Option<QuestionParts> {
-        Some(QuestionParts {
-            normalized: domain_key::from_name(self.query.name(), true),
-            qtype: self.query.query_type(),
-            qclass: u16::from(self.query.query_class()),
-        })
-    }
-
-    fn edns(&self) -> Option<&Edns> {
-        None
-    }
-
-    fn to_message(&self) -> Message {
-        self.to_message_calls.set(self.to_message_calls.get() + 1);
-        panic!("ordinary lookups must not clone the full message before cache");
-    }
-
-    fn first_query(&self) -> Option<Query> {
-        self.first_query_calls.set(self.first_query_calls.get() + 1);
-        Some(self.query.clone())
     }
 }
 
@@ -481,15 +430,6 @@ fn spy_engine() -> QueryEngine<AllowAll> {
             ..DnsConfig::default()
         },
     )
-}
-
-fn spy_request(name: &str) -> SpyRequest {
-    SpyRequest {
-        metadata: Metadata::new(1, MessageType::Query, OpCode::Query),
-        query: Query::query(Name::from_ascii(name).expect("name"), RecordType::A),
-        to_message_calls: Cell::new(0),
-        first_query_calls: Cell::new(0),
-    }
 }
 
 /// Hints as `(pid, query, ttl_ms)`, and separately when each was answered.
@@ -516,7 +456,7 @@ fn hint_context() -> DnsQueryContext {
     DnsQueryContext {
         client_addr: std::net::IpAddr::V4(std::net::Ipv4Addr::LOCALHOST),
         client_port: 0,
-        protocol: hickory_server::net::xfer::Protocol::Udp,
+        transport: crate::listener::Transport::Udp,
         received_at: Instant::now(),
     }
 }
@@ -601,14 +541,14 @@ async fn async_miss_credits_the_client_when_another_request_filled_the_cache() {
     );
 
     let _ = engine
-        .resolve_miss_message(&request, Some(hint_context()), prepared, Instant::now())
+        .handle_parsed_miss(&request, Some(hint_context()), prepared, Instant::now())
         .await;
 
     assert_eq!(hints.0.lock().len(), 1);
 }
 
 #[test]
-fn policy_block_clones_only_the_question() {
+fn a_policy_block_is_answered_locally() {
     struct BlockAll;
 
     impl PolicyEngine for BlockAll {
@@ -627,11 +567,11 @@ fn policy_block_clones_only_the_question() {
             ..DnsConfig::default()
         },
     );
-    let request = spy_request("blocked.example.");
+    let request = a_query(1, "blocked.example.");
     match engine.process_core(&request, None) {
         CoreSyncOutcome::Response(message, _) => {
             assert_eq!(message.metadata.id, 1);
-            assert_eq!(message.queries, vec![request.query.clone()]);
+            assert_eq!(message.queries, request.queries);
             assert_eq!(message.metadata.response_code, ResponseCode::NoError);
             assert_eq!(message.answers.len(), 1, "sinkhole answer");
             assert!(message.edns.is_some(), "EDE option is attached");
@@ -640,26 +580,12 @@ fn policy_block_clones_only_the_question() {
             panic!("expected block response")
         }
     }
-    assert_eq!(request.to_message_calls.get(), 0);
-    assert_eq!(request.first_query_calls.get(), 1);
 }
 
 #[test]
-fn cache_miss_does_not_clone_the_request_message() {
+fn a_special_use_name_is_answered_locally() {
     let engine = spy_engine();
-    let request = spy_request("example.example.");
-    assert!(matches!(
-        engine.process_core(&request, None),
-        CoreSyncOutcome::Miss(_)
-    ));
-    assert_eq!(request.to_message_calls.get(), 0);
-    assert_eq!(request.first_query_calls.get(), 0);
-}
-
-#[test]
-fn special_use_clones_only_the_question() {
-    let engine = spy_engine();
-    let request = spy_request("localhost.");
+    let request = a_query(1, "localhost.");
     match engine.process_core(&request, None) {
         CoreSyncOutcome::Response(message, _) => {
             assert_eq!(message.metadata.response_code, ResponseCode::NoError);
@@ -669,8 +595,6 @@ fn special_use_clones_only_the_question() {
             panic!("expected special-use response")
         }
     }
-    assert_eq!(request.to_message_calls.get(), 0);
-    assert_eq!(request.first_query_calls.get(), 1);
 }
 
 /// RFC 8482 §4.2. The query must not reach an upstream: resolvers answer it NOTIMP, which
@@ -678,8 +602,8 @@ fn special_use_clones_only_the_question() {
 #[test]
 fn an_any_query_is_answered_here_with_the_rfc_8482_record() {
     let engine = spy_engine();
-    let mut request = spy_request("example.example.");
-    request.query.set_query_type(RecordType::ANY);
+    let mut request = a_query(1, "example.example.");
+    request.queries[0].set_query_type(RecordType::ANY);
     match engine.process_core(&request, None) {
         CoreSyncOutcome::Response(message, _) => {
             assert_eq!(message.metadata.response_code, ResponseCode::NoError);
@@ -789,7 +713,7 @@ mod ai_gate {
         let classifier = MockClassifier::failing("unused");
         let ai = AiCoordinator::new(store, Some(classifier), &proactive_block_policy(), None);
         engine.set_ai(Some(ai));
-        let request = spy_request("deferred.example.");
+        let request = a_query(1, "deferred.example.");
         assert!(matches!(
             engine.process_core(&request, None),
             CoreSyncOutcome::Miss(_)
@@ -1301,7 +1225,7 @@ mod ai_gate {
         );
         engine.set_ai(Some(ai.clone()));
 
-        let boot = spy_request("boot-gated.example.");
+        let boot = a_query(1, "boot-gated.example.");
         match engine.process_core(&boot, None) {
             CoreSyncOutcome::Response(_, post_ai) => assert!(post_ai.is_none()),
             CoreSyncOutcome::Cached(_, _) | CoreSyncOutcome::Miss(_) | CoreSyncOutcome::Dropped => {
@@ -1309,7 +1233,7 @@ mod ai_gate {
             }
         }
 
-        let special = spy_request("localhost.");
+        let special = a_query(1, "localhost.");
         match engine.process_core(&special, None) {
             CoreSyncOutcome::Response(_, post_ai) => assert!(post_ai.is_none()),
             CoreSyncOutcome::Cached(_, _) | CoreSyncOutcome::Miss(_) | CoreSyncOutcome::Dropped => {
@@ -1319,7 +1243,6 @@ mod ai_gate {
 
         assert!(!ai_domain_eligible(&domain_key::from_name(
             &Name::from_ascii("_dmarc.example.").expect("name"),
-            true,
         )));
         let _ = respond(&engine, &query_for("_dmarc.example."), Instant::now()).await;
         assert_eq!(classifier.call_count(), 0);

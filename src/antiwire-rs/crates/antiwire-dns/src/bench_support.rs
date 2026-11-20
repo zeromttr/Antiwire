@@ -15,14 +15,14 @@ use std::time::{Duration, Instant};
 use antiwire_policy::RuleEngine;
 use hickory_proto::op::{Edns, Message, MessageType, OpCode, Query, ResponseCode};
 use hickory_proto::rr::{rdata, Name, RData, Record, RecordType};
-use hickory_server::net::xfer::Protocol;
-use hickory_server::server::Request;
 
+use crate::block::DnsQueryContext;
+use crate::listener::Transport;
 use crate::messages::encode_message;
 use crate::port_mapper::Scans;
 use crate::query_engine::{EngineServices, QueryEngine};
 use crate::response_cache::{CacheKey, QueryFlags, ResponseCache};
-use crate::service::{answer_locally, Reply};
+use crate::service::{answer_locally, parse, Reply};
 use crate::settings::DnsConfig;
 
 /// Runs the benchmark groups named on the command line, or every default group.
@@ -180,12 +180,9 @@ fn time_cache_hits(
         RecordType::A,
     ));
     query.edns = Some(edns_with(false, 4096));
-    let request = Request::from_bytes(
-        encode_message(&query).expect("encode query"),
-        client,
-        Protocol::Udp,
-    )
-    .expect("parse request");
+    // Parsed from the wire, as the listener would.
+    let wire = encode_message(&query).expect("encode query");
+    let (request, questions) = parse(&wire).expect("parse request");
     let mut response = Message::response(0, OpCode::Query);
     response.metadata.recursion_available = true;
     response.queries.clone_from(&query.queries);
@@ -203,7 +200,13 @@ fn time_cache_hits(
         cached,
     );
     let hit = || -> Reply {
-        answer_locally(&stub, &request, Instant::now(), Scans::Here)
+        let context = DnsQueryContext {
+            client_addr: client.ip(),
+            client_port: client.port(),
+            transport: Transport::Udp,
+            received_at: Instant::now(),
+        };
+        answer_locally(&stub, &request, questions, context, Scans::Here)
             .ok()
             .flatten()
             .expect("seeded name is a cache hit")

@@ -5,7 +5,7 @@
 use antiwire_policy::PolicyEngine;
 use hickory_proto::op::Message;
 
-use super::request::{PreparedQuery, RequestView};
+use super::request::PreparedQuery;
 use super::QueryEngine;
 use crate::new_domain::{NewDomainVerdict, NEW_DOMAIN_BLOCK_LABEL};
 use crate::port_mapper::QueryClient;
@@ -26,9 +26,9 @@ where
     }
 
     /// Answers a block for a recently registered domain.
-    pub(super) fn new_domain_block_response<R: RequestView>(
+    pub(super) fn new_domain_block_response(
         &self,
-        request: &R,
+        request: &Message,
         prepared: &PreparedQuery,
         client: Option<QueryClient<'_>>,
     ) -> Option<Message> {
