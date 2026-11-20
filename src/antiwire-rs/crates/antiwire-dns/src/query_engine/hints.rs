@@ -7,9 +7,8 @@ use hickory_proto::op::Message;
 
 use super::QueryEngine;
 use crate::answers::{answered_addresses, AnswerHint};
-use crate::block::DnsQueryContext;
 use crate::port_mapper::{
-    deferred_query_owner, recorded_owners_available, reply_path_query_owner, Purpose,
+    deferred_query_owner, recorded_owners_available, reply_path_query_owner, Purpose, QueryClient,
     ReplyPathOwner,
 };
 use crate::response_cache::{CachedAnswer, ResponseCache};
@@ -34,16 +33,17 @@ where
     /// Attributes a served answer to the client socket so flow logs can name it.
     pub(super) fn note_client_hint(
         &self,
-        context: Option<DnsQueryContext>,
+        client: Option<QueryClient<'_>>,
         domain: &str,
         answer: &CachedAnswer,
     ) {
         let Some(sink) = self.hint_sink.read().clone() else {
             return;
         };
-        let Some(context) = context else {
+        let Some(client) = client else {
             return;
         };
+        let context = client.context;
         let Some(message) = answer.parsed_message.as_deref() else {
             return;
         };
@@ -60,7 +60,7 @@ where
         let promised = if recorded_owners_available() {
             None
         } else {
-            match reply_path_query_owner(&context, Purpose::ServedAnswer) {
+            match reply_path_query_owner(client, Purpose::ServedAnswer) {
                 ReplyPathOwner::Known(owner) => {
                     let pid = owner.resolved_pid().unwrap_or(0);
                     sink.record_hint(pid, domain, &addresses, ttl_ms, answered_at_ms);
@@ -93,7 +93,7 @@ where
             return;
         }
         // The worker's queue is full: name what the newest snapshot can.
-        let pid = match reply_path_query_owner(&context, Purpose::ServedAnswer) {
+        let pid = match reply_path_query_owner(client, Purpose::ServedAnswer) {
             ReplyPathOwner::Known(owner) => owner.resolved_pid().unwrap_or(0),
             ReplyPathOwner::Promised(_) | ReplyPathOwner::Busy => 0,
         };

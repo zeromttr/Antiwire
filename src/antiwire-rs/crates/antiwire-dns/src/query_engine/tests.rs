@@ -63,6 +63,7 @@ use super::request::*;
 use super::*;
 use crate::block::DnsQueryContext;
 use crate::domain_key;
+use crate::port_mapper::QueryClient;
 use crate::response_cache::{CacheKey, QueryFlags};
 use crate::service::testing::{respond, respond_locally};
 use antiwire_policy::DomainDecision;
@@ -550,7 +551,11 @@ fn cached_hint_uses_the_ttl_sent_to_the_client() {
         .expect("fits")
     };
     let before = unix_ms();
-    engine.note_client_hint(Some(hint_context()), "hint.example", &answer);
+    engine.note_client_hint(
+        Some(QueryClient::scanned_here(hint_context())),
+        "hint.example",
+        &answer,
+    );
     let after = unix_ms();
 
     assert_eq!(&*hints.0.lock(), &[(0, "hint.example".to_owned(), 1_000)]);
@@ -572,7 +577,11 @@ fn cached_provider_block_does_not_create_a_hint() {
     let message = hint_answer(std::net::Ipv4Addr::UNSPECIFIED, 60);
     let answer = ResponseCache::entry_from_message(&message, false).expect("entry");
 
-    engine.note_client_hint(Some(hint_context()), "hint.example", &answer);
+    engine.note_client_hint(
+        Some(QueryClient::scanned_here(hint_context())),
+        "hint.example",
+        &answer,
+    );
 
     assert!(hints.0.lock().is_empty());
 }

@@ -4,9 +4,10 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use super::support::{
-    allow_policy, build_query, forward, positive_cache_entry, stub_config_with_controlled,
-    stub_config_with_upstream, BlockOnePolicy, ControlledUpstream, MockUpstream,
-    MockUpstreamConfig, NegativeAnswer,
+    ai_policy, allow_policy, behind_both_gates, build_query, forward, positive_cache_entry,
+    sinkholed, stub_config_with_controlled, stub_config_with_upstream, BlockOnePolicy,
+    ControlledUpstream, MockUpstream, MockUpstreamConfig, NegativeAnswer, BENIGN, MALICIOUS,
+    OLD_DOMAIN, YOUNG_DOMAIN,
 };
 use crate::service::testing::{respond, respond_locally};
 use crate::{BlockResponseMode, CacheKey, CacheProbe, DnsConfig, QueryEngine, ResponseCache};
@@ -1000,29 +1001,136 @@ async fn a_name_both_gates_time_out_on_still_resolves() {
     ai.shutdown_cancel();
 }
 
-const CACHED_ANSWER: std::net::Ipv4Addr = std::net::Ipv4Addr::new(192, 0, 2, 44);
-
-/// AI settings that block a name judged malicious.
-fn ai_policy(mode: &str) -> crate::ai::AiPolicySnapshot {
-    let settings = antiwire_store::DaemonSetting {
-        ai_enabled: true,
-        ai_decision_mode: mode.to_owned(),
-        ai_malicious_action: "block".to_owned(),
-        ai_confidence_malicious: 80,
-        ..Default::default()
-    };
-    crate::ai::AiPolicySnapshot::from_settings(&settings, 1)
-}
-
-/// An engine that cannot reach upstream, with `name` already cached.
-fn engine_with_cached(name: &str) -> QueryEngine<super::support::AllowAllPolicy> {
-    let engine = QueryEngine::new(
+/// An engine whose upstream never answers.
+fn unreachable_engine() -> QueryEngine<super::support::AllowAllPolicy> {
+    QueryEngine::new(
         allow_policy(),
         DnsConfig {
             upstreams: vec!["127.0.0.1:1".to_owned()],
             ..DnsConfig::default()
         },
+    )
+}
+
+/// Asks an engine that cannot reach upstream for `example.com`, behind both
+/// gates (see [`behind_both_gates`]). Returns whether the name was blocked,
+/// and how long that took on a paused clock.
+///
+/// Each call gets a runtime of its own, its clock paused at zero. The AI
+/// coordinator counts its budget on the system clock, which a paused runtime
+/// does not hold back: on one shared by several calls, each later call's AI
+/// budget would end early by the virtual time the earlier ones used.
+fn judged_by_both_gates(
+    classifier: Duration,
+    malicious: f64,
+    lookup: Duration,
+    age_days: i64,
+) -> (bool, Duration) {
+    tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .start_paused(true)
+        .build()
+        .expect("runtime")
+        .block_on(judge_by_both_gates(classifier, malicious, lookup, age_days))
+}
+
+async fn judge_by_both_gates(
+    classifier: Duration,
+    malicious: f64,
+    lookup: Duration,
+    age_days: i64,
+) -> (bool, Duration) {
+    let (engine, ai) = behind_both_gates(
+        unreachable_engine(),
+        "example.com",
+        classifier,
+        malicious,
+        lookup,
+        age_days,
     );
+    let started = tokio::time::Instant::now();
+    let bytes = respond(
+        &engine,
+        &build_query("example.com", RecordType::A, 7),
+        Instant::now(),
+    )
+    .await;
+    let waited = started.elapsed();
+    ai.shutdown_cancel();
+    (sinkholed(&bytes), waited)
+}
+
+/// The regression this guards: the miss path ran the proactive AI gate to the
+/// end before it started the new-domain lookup, so a name both had to judge
+/// waited for one and then the other. Whichever gate blocks, it does so as
+/// soon as its own wait is over.
+#[test]
+fn the_gates_judge_a_name_side_by_side() {
+    let delay = Duration::from_millis(300);
+    for (malicious, age_days, blocker) in [
+        (BENIGN, YOUNG_DOMAIN, "the new-domain guard"),
+        (MALICIOUS, OLD_DOMAIN, "AI"),
+    ] {
+        let (blocked, waited) = judged_by_both_gates(delay, malicious, delay, age_days);
+        assert!(blocked, "{blocker} blocks the name");
+        assert!(
+            waited < delay * 2,
+            "{blocker}'s block waited for the other gate too ({waited:?})"
+        );
+    }
+}
+
+/// A block from one gate is answered at once, without waiting out the other's
+/// budget.
+#[test]
+fn a_gate_that_blocks_does_not_wait_for_the_other() {
+    let quick = Duration::from_millis(100);
+    let hung = Duration::from_secs(3_600);
+    for (classifier, malicious, lookup, age_days, blocker) in [
+        (hung, BENIGN, quick, YOUNG_DOMAIN, "the new-domain guard"),
+        (quick, MALICIOUS, hung, OLD_DOMAIN, "AI"),
+    ] {
+        let (blocked, waited) = judged_by_both_gates(classifier, malicious, lookup, age_days);
+        assert!(blocked, "{blocker} blocks the name");
+        assert!(
+            waited < antiwire_tuning::DNS_AI_FOREGROUND_BUDGET,
+            "{blocker}'s block waited for the other gate ({waited:?})"
+        );
+    }
+}
+
+/// A block AI holds in memory is answered on the sync path, though the
+/// registry has yet to date the name: one gate's block does not wait for the
+/// other gate there either.
+#[tokio::test]
+async fn a_saved_ai_block_is_answered_locally_while_the_registry_is_out() {
+    let (engine, ai) = behind_both_gates(
+        unreachable_engine(),
+        "evil.com",
+        Duration::ZERO,
+        MALICIOUS,
+        Duration::from_secs(3_600),
+        OLD_DOMAIN,
+    );
+    let query = build_query("evil.com", RecordType::A, 7);
+    assert!(
+        sinkholed(&respond(&engine, &query, Instant::now()).await),
+        "AI blocks the name"
+    );
+
+    let local = respond_locally(&engine, &query);
+    assert!(
+        local.is_some_and(|bytes| sinkholed(&bytes)),
+        "the saved block is answered without leaving the sync path"
+    );
+    ai.shutdown_cancel();
+}
+
+const CACHED_ANSWER: std::net::Ipv4Addr = std::net::Ipv4Addr::new(192, 0, 2, 44);
+
+/// An engine that cannot reach upstream, with `name` already cached.
+fn engine_with_cached(name: &str) -> QueryEngine<super::support::AllowAllPolicy> {
+    let engine = unreachable_engine();
     engine.response_cache().insert(
         CacheKey::from_query(name, RecordType::A, 1),
         positive_cache_entry(name, CACHED_ANSWER, 300),

@@ -32,7 +32,7 @@ use tracing::warn;
 
 use crate::ai::{AiCoordinator, PostResponseWork};
 use crate::block::DnsQueryContext;
-use crate::port_mapper::{resolve_handing_off_scans, HandedOffLookups};
+use crate::port_mapper::{HandedOffLookups, QueryClient, Scans};
 #[cfg(test)]
 use crate::query_engine::prepare_uncached_message;
 use crate::query_engine::QueryEngine;
@@ -175,24 +175,25 @@ where
         return Answer::Ignored;
     }
     let received_at = query.received_at;
+    // A UDP listener answers every datagram from one receive loop, so an owner
+    // lookup that would scan the socket tables is handed to its reply instead.
+    // A TCP connection has a task of its own and looks owners up where it is.
+    let lookups = HandedOffLookups::default();
+    let scans = if request.protocol() == Protocol::Udp {
+        Scans::HandedOff(&lookups)
+    } else {
+        Scans::Here
+    };
     #[expect(
         clippy::result_large_err,
         reason = "the miss keeps its PreparedQuery so upstream never re-parses"
     )]
-    let answer =
-        || catch_sync_query_panic(&request, || answer_locally(engine, &request, received_at));
-    // A UDP listener answers every datagram from one receive loop, so an owner
-    // lookup that would scan the socket tables is handed to its reply instead
-    // (see `port_mapper::resolve_handing_off_scans`). A TCP connection has a
-    // task of its own and looks owners up where it is.
-    let (local, lookups) = if request.protocol() == Protocol::Udp {
-        resolve_handing_off_scans(answer)
-    } else {
-        (answer(), None)
-    };
+    let local = catch_sync_query_panic(&request, || {
+        answer_locally(engine, &request, received_at, scans)
+    });
     match local {
         Some(Ok(Some(mut reply))) => {
-            reply.lookups = lookups;
+            reply.lookups = lookups.any();
             Answer::Local(reply)
         }
         Some(Ok(None)) => Answer::Ignored,
@@ -206,7 +207,8 @@ where
 }
 
 /// Answers `request` from policy or cache, or returns the state its miss needs.
-/// `None` means the query is owed no reply.
+/// `None` means the query is owed no reply. An owner lookup that has to scan
+/// the socket tables goes where `scans` says.
 ///
 /// `try_handle_parsed_sync` evaluates policy *before* probing the cache, which is what
 /// makes a newly added block rule take effect immediately without any cache
@@ -219,11 +221,16 @@ pub(crate) fn answer_locally<P>(
     engine: &QueryEngine<P>,
     request: &Request,
     received_at: Instant,
+    scans: Scans<'_>,
 ) -> Result<Option<Reply>, PreparedQuery>
 where
     P: PolicyEngine + Send + Sync + Unpin + 'static,
 {
-    let prepared = engine.try_handle_parsed_sync(request, Some(context(request, received_at)))?;
+    let client = QueryClient {
+        context: context(request, received_at),
+        scans,
+    };
+    let prepared = engine.try_handle_parsed_sync(request, Some(client))?;
     Ok(prepared.map(|prepared| encode_prepared(request, prepared, engine.ai_coordinator())))
 }
 

@@ -17,6 +17,7 @@ use hickory_server::server::Request;
 
 use crate::block::DnsBlockSink;
 use crate::messages::encode_message;
+use crate::port_mapper::Scans;
 use crate::query_engine::{EngineServices, QueryEngine};
 use crate::response_cache::{CacheKey, QueryFlags, ResponseCache};
 use crate::service::answer_locally;
@@ -162,7 +163,7 @@ where
             let request =
                 Request::from_bytes(wire.clone(), src, Protocol::Udp).expect("parse request");
             let start = Instant::now();
-            let reply = answer_locally(engine, &request, start);
+            let reply = answer_locally(engine, &request, start, Scans::Here);
             samples.push(start.elapsed());
             assert!(matches!(reply, Ok(Some(_))), "{label}: answered locally");
         }

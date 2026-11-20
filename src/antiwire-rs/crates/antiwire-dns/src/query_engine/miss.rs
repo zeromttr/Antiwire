@@ -18,6 +18,7 @@ use super::response::{prepare_cached_message, prepare_uncached_message, Prepared
 use super::QueryEngine;
 use crate::block::DnsQueryContext;
 use crate::messages::{build_nodata_response, build_servfail_response};
+use crate::port_mapper::QueryClient;
 use crate::rebinding::message_find_rebinding_address;
 use crate::response_cache::{
     CacheKey, CacheProbe, CachedAnswer, ResponseCache, SharedOutcome, FETCH_GENERATION_ATTEMPTS,
@@ -59,16 +60,10 @@ where
         prepared: PreparedQuery,
         enqueued_at: Instant,
     ) -> PreparedResponse {
-        // Proactive AI precedes cache/prefetch/upstream: an AI block prevents
-        // any upstream request; fallback continues normal resolution.
+        // The gates precede cache/prefetch/upstream: a block prevents any
+        // upstream request, and a pass continues normal resolution.
         if let Some((block, post_ai)) = self
-            .ai_proactive_block(request, &prepared, context, enqueued_at)
-            .await
-        {
-            return prepare_uncached_message(block, post_ai);
-        }
-        if let Some((block, post_ai)) = self
-            .new_domain_block(request, &prepared, context, enqueued_at)
+            .gates_block(request, &prepared, context, enqueued_at)
             .await
         {
             return prepare_uncached_message(block, post_ai);
@@ -80,7 +75,7 @@ where
             .await
         {
             Some(entry) => {
-                self.note_client_hint(context, &domain, &entry);
+                self.note_client_hint(context.map(QueryClient::scanned_here), &domain, &entry);
                 let post_ai = post_ai.filter(|_| answer_is_ai_eligible(&entry));
                 prepare_cached_message(entry, request, post_ai)
             }
@@ -328,7 +323,7 @@ where
             miss.qtype,
             Some("dns_provider"),
             self.block_mode,
-            miss.context,
+            miss.context.map(QueryClient::scanned_here),
             || vec![crate::provider_block::DNS_PROVIDER_BLOCK_LABEL.to_owned()],
         );
     }
@@ -364,7 +359,7 @@ where
                 miss.qtype,
                 Some("dns_rebinding"),
                 self.block_mode,
-                miss.context,
+                miss.context.map(QueryClient::scanned_here),
                 Vec::new,
             );
             Withheld::Rebinding

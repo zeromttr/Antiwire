@@ -137,6 +137,24 @@ pub(crate) mod test_helpers {
         }
     }
 
+    /// Judges every name after `delay`, as a classifier behind a slow link
+    /// does, with `malicious` as its malicious score.
+    pub struct SlowClassifier {
+        pub delay: std::time::Duration,
+        pub malicious: f64,
+    }
+
+    #[async_trait::async_trait]
+    impl Classifier for SlowClassifier {
+        async fn classify(
+            &self,
+            domain: &str,
+        ) -> Result<antiwire_ai::DomainAssessment, ClassifierError> {
+            tokio::time::sleep(self.delay).await;
+            Ok(assessment_for(domain, self.malicious))
+        }
+    }
+
     pub fn assessment_for(domain: &str, malicious: f64) -> antiwire_ai::DomainAssessment {
         antiwire_ai::DomainAssessment {
             domain: domain.to_owned(),

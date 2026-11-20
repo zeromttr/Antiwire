@@ -4,7 +4,8 @@
 //! answer, so its socket is still bound and the live socket table can name the
 //! owner. A scan of that table is due at most once per refresh interval, and
 //! any other lookup goes to a worker. The scan itself runs off the UDP receive
-//! loop, before the reply it holds back is sent, so it stalls no other query.
+//! loop, before the reply it holds back is sent, so it stalls no other query:
+//! each caller says where a scan may run ([`Scans`]).
 
 use crate::block::DnsQueryContext;
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -137,12 +138,41 @@ impl Purpose {
     }
 }
 
+/// Where a reply-path owner lookup runs when it has to scan the socket tables.
+#[derive(Clone, Copy)]
+pub(crate) enum Scans<'a> {
+    /// On this thread, stepping off its async worker where it can: for a
+    /// query answered on a task of its own, a TCP connection's or a miss's.
+    Here,
+    /// Handed to the reply of a query a UDP receive loop answers itself, so a
+    /// scan never stalls that loop.
+    HandedOff(&'a HandedOffLookups),
+}
+
+/// The client a query came from, and where the reply path's lookup of its
+/// owner may scan.
+#[derive(Clone, Copy)]
+pub(crate) struct QueryClient<'a> {
+    pub(crate) context: DnsQueryContext,
+    pub(crate) scans: Scans<'a>,
+}
+
+impl QueryClient<'_> {
+    /// A client whose owner is looked up on this thread ([`Scans::Here`]).
+    pub(crate) fn scanned_here(context: DnsQueryContext) -> Self {
+        Self {
+            context,
+            scans: Scans::Here,
+        }
+    }
+}
+
 /// What the reply path knows of the owner of the socket a query came from.
 pub(crate) enum ReplyPathOwner {
     /// The newest socket-table snapshot names the owner, or says there is none.
     Known(Ownership),
     /// A lookup handed off the receive loop names it before the reply goes
-    /// out (see [`resolve_handing_off_scans`]).
+    /// out (see [`Scans::HandedOff`]).
     Promised(PromisedOwner),
     /// Naming it needs a scan that may not start now: finish it with
     /// [`deferred_query_owner`] off the reply path.
@@ -169,9 +199,12 @@ impl PromisedOwner {
     }
 }
 
-/// Owner lookups handed off a receive loop, to run before the reply of the
-/// query that needed them is sent.
-pub(crate) struct HandedOffLookups(Vec<HandedOff>);
+/// Owner lookups a receive loop hands off while it answers one query, to run
+/// before that query's reply is sent, on a thread that may block (see
+/// [`Self::run`]). They have to see the client's socket, and the client closes
+/// it once the reply arrives.
+#[derive(Default)]
+pub(crate) struct HandedOffLookups(std::cell::RefCell<Vec<HandedOff>>);
 
 struct HandedOff {
     protocol: netmetrics::Protocol,
@@ -181,10 +214,32 @@ struct HandedOff {
 }
 
 impl HandedOffLookups {
+    /// These lookups, or `None` when nothing was handed off.
+    pub(crate) fn any(mut self) -> Option<Self> {
+        (!self.0.get_mut().is_empty()).then_some(self)
+    }
+
+    /// Hands off a lookup and returns its promise.
+    fn hand_off(
+        &self,
+        protocol: netmetrics::Protocol,
+        endpoint: netmetrics::LocalEndpoint,
+        received_at: std::time::Instant,
+    ) -> PromisedOwner {
+        let (promise, owner) = std::sync::mpsc::sync_channel(1);
+        self.0.borrow_mut().push(HandedOff {
+            protocol,
+            endpoint,
+            received_at,
+            promise,
+        });
+        PromisedOwner(owner)
+    }
+
     /// Runs the lookups, scanning the socket tables when they must, and keeps
     /// each promise. Blocks for the scan; run it where that may.
     pub(crate) fn run(self) {
-        for lookup in self.0 {
+        for lookup in self.0.into_inner() {
             let owner = socket_table::lookup_socket_owner(
                 lookup.protocol,
                 lookup.endpoint,
@@ -198,88 +253,32 @@ impl HandedOffLookups {
     }
 }
 
-std::thread_local! {
-    /// Lookups handed off while a receive loop resolves one query on this
-    /// thread; `None` outside [`resolve_handing_off_scans`].
-    static HANDED_OFF: std::cell::RefCell<Option<Vec<HandedOff>>> =
-        const { std::cell::RefCell::new(None) };
-}
-
-/// Runs `resolve` with every owner lookup that would scan the socket tables
-/// handed off instead of run on this thread, and returns them.
-///
-/// A receive loop calls this so a scan never stalls it: what `resolve` decides
-/// is returned with the lookups, which must run before its reply is sent, on a
-/// thread that may block (see [`HandedOffLookups::run`]). They have to see the
-/// client's socket, and the client closes it once the reply arrives.
-pub(crate) fn resolve_handing_off_scans<T>(
-    resolve: impl FnOnce() -> T,
-) -> (T, Option<HandedOffLookups>) {
-    /// Puts back what was handed off outside, even if `resolve` panics.
-    struct Scope(Option<Vec<HandedOff>>);
-    impl Drop for Scope {
-        fn drop(&mut self) {
-            HANDED_OFF.set(self.0.take());
-        }
-    }
-    let scope = Scope(HANDED_OFF.replace(Some(Vec::new())));
-    let resolved = resolve();
-    let handed_off = HANDED_OFF.take().filter(|lookups| !lookups.is_empty());
-    drop(scope);
-    (resolved, handed_off.map(HandedOffLookups))
-}
-
-/// Hands a lookup to the enclosing [`resolve_handing_off_scans`] and returns
-/// its promise, or `None` when there is none.
-fn hand_off(
-    protocol: netmetrics::Protocol,
-    endpoint: netmetrics::LocalEndpoint,
-    received_at: std::time::Instant,
-) -> Option<PromisedOwner> {
-    HANDED_OFF.with_borrow_mut(|handed_off| {
-        let handed_off = handed_off.as_mut()?;
-        let (promise, owner) = std::sync::mpsc::sync_channel(1);
-        handed_off.push(HandedOff {
-            protocol,
-            endpoint,
-            received_at,
-            promise,
-        });
-        Some(PromisedOwner(owner))
-    })
-}
-
-/// Owner of the socket `context`'s query came from, as far as the reply path
+/// Owner of the socket `client`'s query came from, as far as the reply path
 /// can tell it.
 ///
 /// Call it before the answer is sent, while the client's socket is still
 /// bound. Most lookups are answered by the snapshot already taken, or need a
 /// scan that is not due, and either is answered at once. One that may start a
-/// scan, at most once per refresh interval, is handed off when a receive loop
-/// is resolving the query (see [`resolve_handing_off_scans`]), and otherwise
-/// scans here, stepping off the async worker on a multi-threaded runtime.
+/// scan, at most once per refresh interval, goes where `client.scans` says.
 ///
 /// A lookup whose `purpose` is not worth a scan ([`Purpose::may_scan`]) is
 /// answered [`Ownership::NotFound`] without one.
-pub(crate) fn reply_path_query_owner(
-    context: &DnsQueryContext,
-    purpose: Purpose,
-) -> ReplyPathOwner {
+pub(crate) fn reply_path_query_owner(client: QueryClient<'_>, purpose: Purpose) -> ReplyPathOwner {
     if !purpose.may_scan() {
         return ReplyPathOwner::Known(Ownership::NotFound);
     }
+    let context = &client.context;
     let (protocol, endpoint) = client_endpoint(context);
     match lookup_without_scan(protocol, endpoint, context, false) {
         socket_table::WithoutScan::Owner(owner) => ReplyPathOwner::Known(owner),
         socket_table::WithoutScan::Busy => ReplyPathOwner::Busy,
-        socket_table::WithoutScan::Blocks => hand_off(protocol, endpoint, context.received_at)
-            .map_or_else(
-                || {
-                    scan_here(protocol, endpoint, context.received_at, false)
-                        .map_or(ReplyPathOwner::Busy, ReplyPathOwner::Known)
-                },
-                ReplyPathOwner::Promised,
-            ),
+        socket_table::WithoutScan::Blocks => match client.scans {
+            Scans::HandedOff(lookups) => {
+                ReplyPathOwner::Promised(lookups.hand_off(protocol, endpoint, context.received_at))
+            }
+            Scans::Here => scan_here(protocol, endpoint, context.received_at, false)
+                .map_or(ReplyPathOwner::Busy, ReplyPathOwner::Known),
+        },
     }
 }
 
@@ -550,22 +549,20 @@ mod refine_tests {
         }
     }
 
-    /// A lookup handed off while a receive loop resolves a query comes back
-    /// with the result, to run elsewhere, and names the owner to whoever
-    /// waits on its promise. Outside that scope nothing is handed off.
+    /// A lookup handed off a receive loop comes back with its reply, to run
+    /// elsewhere, and names the owner to whoever waits on its promise.
     #[test]
     fn a_lookup_handed_off_the_receive_loop_keeps_its_promise() {
         let socket = std::net::UdpSocket::bind("127.0.0.1:0").expect("client socket");
         let context = context_for(&socket, std::time::Instant::now());
         let (protocol, endpoint) = client_endpoint(&context);
-        let (promise, lookups) =
-            resolve_handing_off_scans(|| hand_off(protocol, endpoint, context.received_at));
-        let promise = promise.expect("handed off inside the scope");
         assert!(
-            hand_off(protocol, endpoint, context.received_at).is_none(),
-            "nothing is handed off outside the scope"
+            HandedOffLookups::default().any().is_none(),
+            "a reply with nothing handed off carries no lookups"
         );
-        lookups.expect("the lookup comes back").run();
+        let lookups = HandedOffLookups::default();
+        let promise = lookups.hand_off(protocol, endpoint, context.received_at);
+        lookups.any().expect("the lookup comes back").run();
         assert_eq!(
             promise.wait(&context),
             Some(Ownership::Resolved(std::process::id()))
@@ -580,11 +577,11 @@ mod refine_tests {
         let socket = std::net::UdpSocket::bind("127.0.0.1:0").expect("client socket");
         let context = context_for(&socket, std::time::Instant::now());
         let (protocol, endpoint) = client_endpoint(&context);
-        let (promise, lookups) =
-            resolve_handing_off_scans(|| hand_off(protocol, endpoint, context.received_at));
+        let lookups = HandedOffLookups::default();
+        let promise = lookups.hand_off(protocol, endpoint, context.received_at);
         drop(lookups);
         let started = std::time::Instant::now();
-        assert_eq!(promise.expect("handed off").wait(&context), None);
+        assert_eq!(promise.wait(&context), None);
         assert!(started.elapsed() < std::time::Duration::from_millis(100));
     }
 
@@ -689,7 +686,7 @@ mod refine_tests {
             };
             let scans = shared_table_scans();
             assert!(matches!(
-                reply_path_query_owner(&context, Purpose::ServedAnswer),
+                reply_path_query_owner(QueryClient::scanned_here(context), Purpose::ServedAnswer),
                 ReplyPathOwner::Known(Ownership::NotFound)
             ));
             assert_eq!(

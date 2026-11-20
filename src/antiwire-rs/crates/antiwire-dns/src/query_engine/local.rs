@@ -13,7 +13,7 @@ use hickory_server::net::xfer::Protocol;
 use hickory_server::zone_handler::MessageRequest;
 use tracing::warn;
 
-use super::ai::AiLocal;
+use super::gates::GatesLocal;
 use super::request::{parse_query, validate_request, PreparedQuery, RequestView};
 use super::response::{prepare_cached_message, prepare_uncached_message, PreparedResponse};
 use super::QueryEngine;
@@ -23,7 +23,7 @@ use crate::messages::{
     build_any_response, build_cached_failure_response, build_error_response,
     build_servfail_response,
 };
-use crate::new_domain::NewDomainVerdict;
+use crate::port_mapper::QueryClient;
 use crate::response_cache::{CacheKey, CacheProbe, CachedAnswer};
 
 pub(super) enum CoreSyncOutcome {
@@ -115,7 +115,7 @@ where
     pub(super) fn process_core<R>(
         &self,
         request: &R,
-        context: Option<DnsQueryContext>,
+        client: Option<QueryClient<'_>>,
     ) -> CoreSyncOutcome
     where
         R: RequestView,
@@ -139,7 +139,7 @@ where
                 // Only the echoed question is cloned; the owned message is
                 // built solely for the SERVFAIL fallback.
                 let response = self
-                    .policy_block_response(request, &prepared, decision.source, context)
+                    .policy_block_response(request, &prepared, decision.source, client)
                     .unwrap_or_else(|| build_servfail_response(&request.to_message()));
                 let post_ai = self.policy_block_post_work(&prepared, decision.source);
                 return CoreSyncOutcome::Response(response, post_ai);
@@ -156,36 +156,22 @@ where
             return CoreSyncOutcome::Response(response, None);
         }
 
-        // Like proactive AI, the age check precedes the cache so an answer
-        // cached before a domain's date was known cannot bypass the block.
-        match self.new_domain_verdict(&prepared) {
-            NewDomainVerdict::Block => {
-                let response = self
-                    .new_domain_block_response(request, &prepared, context)
-                    .unwrap_or_else(|| build_servfail_response(&request.to_message()));
-                return CoreSyncOutcome::Response(response, None);
-            }
-            NewDomainVerdict::Pending => return CoreSyncOutcome::Miss(prepared),
-            NewDomainVerdict::Allow => {}
-        }
-
-        // Proactive AI must precede cache/prefetch/upstream access or a cached
-        // answer could bypass AI after proactive mode is enabled. The sync
-        // fast path stays free of DB/network I/O: a decision already in memory
-        // is applied here, and only a query whose decision needs the store or
-        // the classifier moves to the async path.
-        let ai_decided = match self.ai_local(&prepared) {
-            AiLocal::Pending => return CoreSyncOutcome::Miss(prepared),
-            AiLocal::Block(evaluation) => {
+        // The gates precede cache/prefetch/upstream access, or an answer
+        // cached before a domain's date was known, or before proactive mode
+        // was enabled, could bypass their block. The sync fast path stays free
+        // of DB/network I/O: what memory decides is applied here, and only a
+        // query a gate has to wait for moves to the async path.
+        let ai_decided = match self.gates_local(&prepared) {
+            GatesLocal::Pass { ai_decided } => ai_decided,
+            GatesLocal::Block(blocked) => {
                 // The gate has just decided about the domain, so its block
                 // carries no post-response work.
                 let response = self
-                    .ai_block_response(request, &prepared, context, &evaluation)
+                    .gate_block_response(request, &prepared, client, &blocked)
                     .unwrap_or_else(|| build_servfail_response(&request.to_message()));
                 return CoreSyncOutcome::Response(response, None);
             }
-            AiLocal::Decided => true,
-            AiLocal::Clear => false,
+            GatesLocal::Pending => return CoreSyncOutcome::Miss(prepared),
         };
 
         // One probe answers every question the miss path asks of the cache:
@@ -200,12 +186,12 @@ where
         let answer = match probe {
             CacheProbe::Fresh(answer) => answer,
             CacheProbe::Stale(stale) => {
-                return self.miss_outcome(request, prepared, Some(stale), context);
+                return self.miss_outcome(request, prepared, Some(stale), client);
             }
-            CacheProbe::Miss => return self.miss_outcome(request, prepared, None, context),
+            CacheProbe::Miss => return self.miss_outcome(request, prepared, None, client),
         };
         let domain = &prepared.cache_key.domain;
-        self.note_client_hint(context, domain, &answer);
+        self.note_client_hint(client, domain, &answer);
         let post_ai = if ai_decided {
             None
         } else {
@@ -221,15 +207,15 @@ where
         request: &R,
         prepared: PreparedQuery,
         stale: Option<CachedAnswer>,
-        context: Option<DnsQueryContext>,
+        client: Option<QueryClient<'_>>,
     ) -> CoreSyncOutcome {
         if prepared.cache_eligible && self.response_cache.failure_held(&prepared.cache_key) {
-            return self.held_failure_outcome(request, &prepared, stale, context);
+            return self.held_failure_outcome(request, &prepared, stale, client);
         }
         if self.miss_would_fail_fast(&prepared, stale.is_some()) {
             // Answered or dropped here instead of on a task per query;
             // see `FailFastBudget`.
-            let udp = context.is_some_and(|ctx| ctx.protocol == Protocol::Udp);
+            let udp = client.is_some_and(|client| client.context.protocol == Protocol::Udp);
             if udp && !self.fail_fast_replies.try_take() {
                 self.fail_fast_replies.note_drop();
                 return CoreSyncOutcome::Dropped;
@@ -284,12 +270,12 @@ where
         request: &R,
         prepared: &PreparedQuery,
         stale: Option<CachedAnswer>,
-        context: Option<DnsQueryContext>,
+        client: Option<QueryClient<'_>>,
     ) -> CoreSyncOutcome {
         let key = &prepared.cache_key;
         match stale {
             Some(stale) => {
-                self.note_client_hint(context, &key.domain, &stale);
+                self.note_client_hint(client, &key.domain, &stale);
                 let post_ai = self.post_work_for_answer(&key.domain, &stale);
                 CoreSyncOutcome::Cached(stale, post_ai)
             }
@@ -344,9 +330,9 @@ where
     pub(crate) fn try_handle_parsed_sync(
         &self,
         request: &MessageRequest,
-        context: Option<DnsQueryContext>,
+        client: Option<QueryClient<'_>>,
     ) -> std::result::Result<Option<PreparedResponse>, PreparedQuery> {
-        match self.process_core(request, context) {
+        match self.process_core(request, client) {
             CoreSyncOutcome::Response(message, post_ai) => {
                 Ok(Some(prepare_uncached_message(message, post_ai)))
             }
@@ -364,7 +350,7 @@ where
         request: &R,
         prepared: &PreparedQuery,
         source: Option<DomainBlockSource>,
-        context: Option<DnsQueryContext>,
+        client: Option<QueryClient<'_>>,
     ) -> Option<Message> {
         let domain = &prepared.cache_key.domain;
         self.block_response(
@@ -372,7 +358,7 @@ where
             domain,
             prepared.qtype,
             source.map(DomainBlockSource::as_str),
-            context,
+            client,
             || {
                 let matching = if source == Some(DomainBlockSource::Blocklist) {
                     self.policy.matching_normalized_blocklists(domain)
@@ -427,8 +413,13 @@ where
             // A block that cannot be built still blocks: `None` here would
             // mean "resolve upstream".
             Verdict::Block => Some((
-                self.policy_block_response(request, prepared, decision.source, context)
-                    .unwrap_or_else(|| build_servfail_response(request)),
+                self.policy_block_response(
+                    request,
+                    prepared,
+                    decision.source,
+                    context.map(QueryClient::scanned_here),
+                )
+                .unwrap_or_else(|| build_servfail_response(request)),
                 self.policy_block_post_work(prepared, decision.source),
             )),
         }
@@ -440,7 +431,7 @@ where
         normalized: &str,
         qtype: RecordType,
         source: Option<&'static str>,
-        context: Option<DnsQueryContext>,
+        client: Option<QueryClient<'_>>,
         resolve_blocklist_names: F,
     ) -> Option<Message>
     where
@@ -452,7 +443,7 @@ where
             qtype,
             source,
             self.block_mode,
-            context,
+            client,
             resolve_blocklist_names,
         );
         let question = request.first_query()?;

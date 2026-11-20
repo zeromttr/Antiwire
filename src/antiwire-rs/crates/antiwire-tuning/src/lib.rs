@@ -191,8 +191,8 @@ mod dns_interceptor {
     /// the new-domain lookup) leaves of [`DNS_QUERY_DEADLINE`]. Upstream
     /// admission refuses a query with no more than [`DNS_TRANSPORT_TIMEOUT`]
     /// left, so a gate that leaves less turns a fail-open into SERVFAIL. The
-    /// margin on top covers the wait for an admission permit. The gates run
-    /// one after the other and each leaves this much, so together they do too.
+    /// margin on top covers the wait for an admission permit. The gates wait
+    /// side by side, each leaving this much.
     pub const DNS_GATE_UPSTREAM_RESERVE: Duration =
         DNS_TRANSPORT_TIMEOUT.saturating_add(DNS_UPSTREAM_ADMISSION_TIMEOUT);
     /// Bounded timeout for a background AI classification once started.

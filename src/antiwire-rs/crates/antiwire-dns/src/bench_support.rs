@@ -19,6 +19,7 @@ use hickory_server::net::xfer::Protocol;
 use hickory_server::server::Request;
 
 use crate::messages::encode_message;
+use crate::port_mapper::Scans;
 use crate::query_engine::{EngineServices, QueryEngine};
 use crate::response_cache::{CacheKey, QueryFlags, ResponseCache};
 use crate::service::{answer_locally, Reply};
@@ -202,7 +203,7 @@ fn time_cache_hits(
         cached,
     );
     let hit = || -> Reply {
-        answer_locally(&stub, &request, Instant::now())
+        answer_locally(&stub, &request, Instant::now(), Scans::Here)
             .ok()
             .flatten()
             .expect("seeded name is a cache hit")

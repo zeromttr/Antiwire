@@ -4,11 +4,11 @@
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
-use hickory_proto::op::Message;
 use hickory_proto::rr::RecordType;
 
 use super::support::{
-    allow_policy, build_query, stub_config_with_upstream, MockUpstream, MockUpstreamConfig,
+    allow_policy, behind_both_gates, build_query, sinkholed, stub_config_with_upstream,
+    MockUpstream, MockUpstreamConfig, BENIGN, MALICIOUS, OLD_DOMAIN, YOUNG_DOMAIN,
 };
 use crate::new_domain::testing::{days_ago, FixedSource};
 use crate::new_domain::{
@@ -30,16 +30,6 @@ fn build_engine(upstream: &MockUpstream, guard: Option<NewDomainGuard>) -> Engin
         Some(guard) => engine.with_new_domain_guard(guard),
         None => engine,
     }
-}
-
-fn sinkholed(bytes: &[u8]) -> bool {
-    let response = Message::from_vec(bytes).expect("decode");
-    response.answers.iter().any(|record| {
-        matches!(
-            record.data,
-            hickory_proto::rr::RData::A(hickory_proto::rr::rdata::A(ip)) if ip.is_unspecified()
-        )
-    })
 }
 
 fn ms(duration: Duration) -> u128 {
@@ -151,6 +141,68 @@ async fn probe_cold_query_latency() {
             "  guard on, lookup {lookup_ms}ms: {}ms",
             ms(start.elapsed())
         );
+    }
+}
+
+/// First query for a name that proactive AI and the guard both have to judge,
+/// for classifier and registry delays from fast to past their budgets.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[ignore = "timing diagnostic"]
+async fn probe_cold_query_through_both_gates() {
+    // A classifier that never answers within any budget.
+    const HUNG: u64 = 3_600_000;
+    let upstream = MockUpstream::start().await;
+    // (classifier delay ms, malicious score, registry delay ms, registered days ago)
+    let cases: [(u64, f64, u64, i64); 6] = [
+        (100, BENIGN, 100, OLD_DOMAIN),
+        (300, BENIGN, 300, OLD_DOMAIN),
+        (300, BENIGN, 300, YOUNG_DOMAIN),
+        (HUNG, BENIGN, 300, OLD_DOMAIN),
+        (300, BENIGN, 800, YOUNG_DOMAIN),
+        (100, MALICIOUS, 900, OLD_DOMAIN),
+    ];
+    for (index, (classifier_ms, malicious, lookup_ms, age_days)) in cases.into_iter().enumerate() {
+        let domain: &'static str = Box::leak(format!("gates{index}.com").into_boxed_str());
+        let (engine, ai) = behind_both_gates(
+            build_engine(&upstream, None),
+            domain,
+            Duration::from_millis(classifier_ms),
+            malicious,
+            Duration::from_millis(lookup_ms),
+            age_days,
+        );
+        let start = Instant::now();
+        let bytes = respond(
+            &engine,
+            &build_query(domain, RecordType::A, u16::try_from(index).expect("id")),
+            start,
+        )
+        .await;
+        let classifier = if classifier_ms == HUNG {
+            "hung".to_owned()
+        } else {
+            format!("{classifier_ms}ms")
+        };
+        println!(
+            "classifier {classifier} {}, registry {lookup_ms}ms {}: {}ms, {}",
+            if malicious == MALICIOUS {
+                "malicious"
+            } else {
+                "benign"
+            },
+            if age_days == YOUNG_DOMAIN {
+                "young"
+            } else {
+                "old"
+            },
+            ms(start.elapsed()),
+            if sinkholed(&bytes) {
+                "blocked"
+            } else {
+                "resolved"
+            }
+        );
+        ai.shutdown_cancel();
     }
 }
 

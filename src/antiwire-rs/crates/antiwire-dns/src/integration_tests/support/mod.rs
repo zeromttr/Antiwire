@@ -38,6 +38,69 @@ impl PolicyEngine for BlockOnePolicy {
     }
 }
 
+/// AI settings that block a name judged malicious, in `mode`.
+pub fn ai_policy(mode: &str) -> crate::ai::AiPolicySnapshot {
+    let settings = antiwire_store::DaemonSetting {
+        ai_enabled: true,
+        ai_decision_mode: mode.to_owned(),
+        ai_malicious_action: "block".to_owned(),
+        ai_confidence_malicious: 80,
+        ..Default::default()
+    };
+    crate::ai::AiPolicySnapshot::from_settings(&settings, 1)
+}
+
+/// A malicious score [`ai_policy`] lets through.
+pub const BENIGN: f64 = 0.01;
+/// A malicious score [`ai_policy`] blocks.
+pub const MALICIOUS: f64 = 0.97;
+/// A registration age, in days, that no new-domain setting blocks.
+pub const OLD_DOMAIN: i64 = 4_000;
+/// A registration age, in days, that every new-domain setting blocks.
+pub const YOUNG_DOMAIN: i64 = 1;
+
+/// `engine` behind both gates: proactive AI judging every name `malicious`
+/// after `classifier`, and a registry that dates `domain` `age_days` old
+/// after `lookup`. The coordinator is returned for the test to cancel.
+pub fn behind_both_gates<P: PolicyEngine + Send + Sync>(
+    engine: QueryEngine<P>,
+    domain: &'static str,
+    classifier: Duration,
+    malicious: f64,
+    lookup: Duration,
+    age_days: i64,
+) -> (QueryEngine<P>, Arc<crate::ai::AiCoordinator>) {
+    use crate::new_domain::testing::{days_ago, FixedSource};
+    use crate::new_domain::{NewDomainGuard, RegistrationCache};
+
+    let registry = RegistrationCache::new(FixedSource::new([(domain, days_ago(age_days))], lookup));
+    let engine = engine.with_new_domain_guard(NewDomainGuard::new(30, registry));
+    let ai = crate::ai::AiCoordinator::new(
+        crate::test_support::leaked_store(),
+        Some(Arc::new(
+            crate::ai::classifier::test_helpers::SlowClassifier {
+                delay: classifier,
+                malicious,
+            },
+        )),
+        &ai_policy("proactive"),
+        None,
+    );
+    engine.set_ai(Some(Arc::clone(&ai)));
+    (engine, ai)
+}
+
+/// Whether `bytes` is a sinkhole block answer, the default block mode's.
+pub fn sinkholed(bytes: &[u8]) -> bool {
+    let response = Message::from_vec(bytes).expect("decode");
+    response.answers.iter().any(|record| {
+        matches!(
+            record.data,
+            RData::A(rdata::A(ip)) if ip.is_unspecified()
+        )
+    })
+}
+
 /// An answerless upstream reply carrying an authority SOA, as a zone serving
 /// NXDOMAIN or NODATA does. `soa_ttl` and `minimum` are the two inputs to the
 /// RFC 2308 negative TTL.

@@ -9,6 +9,7 @@
 //! - `response`: the parsed response handed to hickory-server.
 
 mod ai;
+mod gates;
 mod hints;
 mod local;
 mod miss;
