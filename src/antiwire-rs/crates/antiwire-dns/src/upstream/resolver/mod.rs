@@ -48,7 +48,7 @@ const CONCURRENT_REQUESTS_PER_TIER: usize = 2;
 /// limit active requests to 32; HTTP/2 uses its own stream limits. Bound work
 /// before either queue can return `Busy`, which the pool can lose as
 /// `NoConnections` (also used for genuine connection failures).
-const MAX_IN_FLIGHT_PER_TIER: usize = 32;
+pub(crate) const MAX_IN_FLIGHT_PER_TIER: usize = 32;
 
 /// Hickory transport options for the upstream pools.
 #[must_use]

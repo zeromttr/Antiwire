@@ -113,6 +113,48 @@ async fn foreground_retry_after_network_reset_uses_the_new_pool() {
     );
 }
 
+/// The regression this guards: only an answer was checked against the
+/// generation. A fetch that failed after a reset, as one does when the network
+/// it used goes away, was answered SERVFAIL instead of retried on the new pool.
+#[tokio::test]
+async fn a_failure_after_a_network_reset_is_retried_on_the_new_pool() {
+    // Long enough for the reset to land while the fetch is in flight, short
+    // enough to leave the retry the transport attempt admission reserves.
+    let old = MockUpstream::start_with(MockUpstreamConfig {
+        delay: Duration::from_millis(150),
+        servfail: true,
+        ..MockUpstreamConfig::default()
+    })
+    .await;
+    let new = MockUpstream::start_with(MockUpstreamConfig {
+        answer_ipv4: NEW_MARKER,
+        ..MockUpstreamConfig::default()
+    })
+    .await;
+    let engine = engine_pointing_at(&old);
+    let query = build_query("fail-after-reset.example", RecordType::A, 1);
+
+    let task_engine = Arc::clone(&engine);
+    let task = tokio::spawn(async move { respond(&task_engine, &query, Instant::now()).await });
+    wait_for_calls(&old, 1, "the first foreground fetch").await;
+    engine.set_upstream_endpoints_for_test(vec![new.endpoint()]);
+    engine
+        .reset_after_network_change()
+        .await
+        .expect("rebuild upstream pool");
+
+    let bytes = tokio::time::timeout(Duration::from_secs(5), task)
+        .await
+        .expect("retried query completes")
+        .expect("join");
+    let response = Message::from_vec(&bytes).expect("decode retried response");
+    assert_eq!(
+        answer_ip(&response),
+        Some(NEW_MARKER),
+        "the old pool's failure must be retried on the new pool, not answered"
+    );
+}
+
 /// Prefetch captures nothing at spawn time: a reset between the spawn and the
 /// refresh must still land the new pool's answer, not discard a retired-pool
 /// fetch and exhaust the budget on a second retired-pool fetch.

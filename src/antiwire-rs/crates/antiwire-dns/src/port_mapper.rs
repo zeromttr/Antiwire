@@ -37,11 +37,7 @@ mod socket_table {
         // Past the deadline the client has given up and its port may belong to
         // another process, so a scan then would name the wrong owner.
         let wait = if wait_for_scan {
-            Wait::Until(
-                received_at
-                    .checked_add(antiwire_tuning::DNS_QUERY_DEADLINE)
-                    .unwrap_or(received_at),
-            )
+            Wait::Until(super::query_deadline(received_at))
         } else {
             Wait::Never
         };
@@ -50,6 +46,35 @@ mod socket_table {
             Err(Pending::Busy) => None,
             Err(_) => Some(Ownership::NotFound),
         }
+    }
+
+    /// Owner of the client socket at `endpoint` in a snapshot taken after its
+    /// query arrived at `received_at`, which shows every socket bound before
+    /// the query and still open. For a lookup handed off the receive loop,
+    /// whose reply is held back until it answers.
+    ///
+    /// Unlike [`lookup_socket_owner`] it never waits for the refresh interval,
+    /// only for a scan already running, and then scans. A lookup is handed off
+    /// when a scan is due, so one started since began after the query arrived
+    /// and its snapshot answers; only when that scan left none would the
+    /// interval apply. `None` once the query's deadline has passed.
+    pub(crate) fn fresh_socket_owner<S>(
+        cache: &SocketOwnerCache<S>,
+        protocol: Protocol,
+        endpoint: LocalEndpoint,
+        received_at: Instant,
+    ) -> Option<Ownership>
+    where
+        S: Fn(Protocol) -> netmetrics::SocketOwnerSnapshot,
+    {
+        cache
+            .snapshot_since(
+                protocol,
+                received_at,
+                Wait::Until(super::query_deadline(received_at)),
+            )
+            .ok()
+            .map(|snapshot| snapshot.owners().local_endpoint_owner(protocol, endpoint))
     }
 
     /// What [`lookup_socket_owner`] would do, found without blocking.
@@ -189,10 +214,7 @@ impl PromisedOwner {
     /// many replies as it may: look the owner up with
     /// [`deferred_query_owner`] instead.
     pub(crate) fn wait(self, context: &DnsQueryContext) -> Option<Ownership> {
-        let deadline = context
-            .received_at
-            .checked_add(antiwire_tuning::DNS_QUERY_DEADLINE)
-            .unwrap_or(context.received_at);
+        let deadline = query_deadline(context.received_at);
         self.0
             .recv_timeout(deadline.saturating_duration_since(std::time::Instant::now()))
             .ok()
@@ -240,11 +262,11 @@ impl HandedOffLookups {
     /// each promise. Blocks for the scan; run it where that may.
     pub(crate) fn run(self) {
         for lookup in self.0.into_inner() {
-            let owner = socket_table::lookup_socket_owner(
+            let owner = socket_table::fresh_socket_owner(
+                netmetrics::SocketOwnerCache::shared(),
                 lookup.protocol,
                 lookup.endpoint,
                 lookup.received_at,
-                true,
             )
             .unwrap_or(Ownership::NotFound);
             // The caller may have stopped waiting; the owner is then not needed.
@@ -485,6 +507,13 @@ pub(crate) fn shared_table_scans() -> u64 {
     netmetrics::SocketOwnerCache::shared().scans()
 }
 
+/// When a query received at `received_at` reaches its deadline.
+fn query_deadline(received_at: std::time::Instant) -> std::time::Instant {
+    received_at
+        .checked_add(antiwire_tuning::DNS_QUERY_DEADLINE)
+        .unwrap_or(received_at)
+}
+
 /// Whether a query received at `received_at` is past its deadline, after which
 /// the client's port may have gone to another process.
 fn port_may_be_reused(received_at: std::time::Instant) -> bool {
@@ -716,7 +745,7 @@ mod reply_path_tests {
     use netmetrics::owner_cache::{Wait, DEFAULT_REFRESH};
     use netmetrics::{LocalEndpoint, Protocol, SocketOwnerCache, SocketOwnerSnapshot};
 
-    use super::socket_table::{lookup_without_scan, WithoutScan};
+    use super::socket_table::{fresh_socket_owner, lookup_without_scan, WithoutScan};
     use super::Ownership;
 
     fn local(port: u16) -> LocalEndpoint {
@@ -774,5 +803,37 @@ mod reply_path_tests {
             "a caller that may wait blocks for that scan"
         );
         assert_eq!(scans.load(Ordering::Relaxed), 1, "asking scans nothing");
+    }
+
+    /// The regression this guards: a lookup handed off the receive loop
+    /// waited as one off the reply path does, for the refresh interval to
+    /// allow its scan, though its reply is held back until it answers. It is
+    /// handed off when a scan is due, so a scan started since usually answers
+    /// it; when the one that took the slot left nothing newer than its query,
+    /// as a scan that panicked does, the reply waited out the interval.
+    #[test]
+    fn a_handed_off_lookup_never_waits_for_the_refresh_interval() {
+        let scans = AtomicUsize::new(0);
+        let cache = SocketOwnerCache::with_scanner(DEFAULT_REFRESH, |_| {
+            scans.fetch_add(1, Ordering::Relaxed);
+            SocketOwnerSnapshot::default()
+        });
+        // This scan takes the slot but predates the query, so it cannot say
+        // whether the client's socket, bound later, is open.
+        let _ = cache.owner(Protocol::Udp, local(50_001), Instant::now(), Wait::Never);
+        std::thread::sleep(std::time::Duration::from_millis(5));
+        let received_at = Instant::now();
+
+        let started = Instant::now();
+        assert_eq!(
+            fresh_socket_owner(&cache, Protocol::Udp, local(50_000), received_at),
+            Some(Ownership::NotFound)
+        );
+        assert!(
+            started.elapsed() < DEFAULT_REFRESH / 2,
+            "the lookup scanned at once: {:?}",
+            started.elapsed()
+        );
+        assert_eq!(scans.load(Ordering::Relaxed), 2);
     }
 }

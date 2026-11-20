@@ -1126,6 +1126,70 @@ async fn a_saved_ai_block_is_answered_locally_while_the_registry_is_out() {
     ai.shutdown_cancel();
 }
 
+/// The regression this guards: a miss that joined a background refresh
+/// inherited the refresh's narrower terms. With every slot of the upstream tier
+/// taken, the refresh gave up after its 150 ms wait for one, unsent, and the
+/// miss waiting on it was answered from stale, though a wait of its own for a
+/// slot would have outlasted the busy tier and fetched the fresh answer.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_miss_joined_to_a_refresh_that_was_never_sent_fetches_for_itself() {
+    const BUSY: Duration = Duration::from_millis(400);
+    const FRESH: std::net::Ipv4Addr = std::net::Ipv4Addr::new(198, 51, 100, 7);
+    let upstream = MockUpstream::start_with(MockUpstreamConfig {
+        delay: BUSY,
+        answer_ipv4: FRESH,
+        ..MockUpstreamConfig::default()
+    })
+    .await;
+    let engine = Arc::new(QueryEngine::new(
+        allow_policy(),
+        stub_config_with_upstream(&upstream),
+    ));
+    let name = "refreshing.example";
+    let key = CacheKey::from_query(name, RecordType::A, 1);
+    // An answer due for its refresh now, and stale soon after.
+    let mut entry = positive_cache_entry(name, CACHED_ANSWER, 300);
+    entry.prefetch_at = Instant::now();
+    entry.fresh_until = Instant::now() + Duration::from_millis(50);
+    engine.response_cache().insert(key.clone(), entry);
+
+    // Misses the upstream holds for `BUSY` take every slot of its tier.
+    let slots = crate::upstream::MAX_IN_FLIGHT_PER_TIER;
+    for id in 0..slots {
+        let engine = Arc::clone(&engine);
+        let query = build_query(&format!("busy{id}.example"), RecordType::A, 100);
+        tokio::spawn(async move { respond(&engine, &query, Instant::now()).await });
+    }
+    super::support::wait_until(Duration::from_secs(2), "the tier fills", || {
+        upstream.calls() >= u32::try_from(slots).expect("slot count")
+    })
+    .await;
+
+    // A hit starts the refresh, which waits for a slot that does not come.
+    let query = build_query(name, RecordType::A, 1);
+    assert!(serves_cached_answer(
+        &respond(&engine, &query, Instant::now()).await
+    ));
+    assert!(engine.response_cache().prefetch_in_flight(&key));
+    tokio::time::sleep(Duration::from_millis(60)).await;
+
+    // The entry is stale now, so this query misses and joins the refresh.
+    let bytes = respond(&engine, &query, Instant::now()).await;
+    let response = Message::from_vec(&bytes).expect("decode");
+    let answered = response
+        .answers
+        .iter()
+        .find_map(|record| match &record.data {
+            RData::A(addr) => Some(addr.0),
+            _ => None,
+        });
+    assert_eq!(
+        answered,
+        Some(FRESH),
+        "the miss must fetch for itself once the tier frees, not take the stale answer"
+    );
+}
+
 const CACHED_ANSWER: std::net::Ipv4Addr = std::net::Ipv4Addr::new(192, 0, 2, 44);
 
 /// An engine that cannot reach upstream, with `name` already cached.

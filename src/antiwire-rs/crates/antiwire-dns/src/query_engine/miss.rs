@@ -236,6 +236,7 @@ where
     ) -> Option<CachedAnswer> {
         let cache_key = miss.cache_key;
         let mut attempts_remaining = FETCH_GENERATION_ATTEMPTS;
+        let mut fetched_for_itself = false;
         while attempts_remaining > 0 {
             attempts_remaining -= 1;
             let (attempt_generation, attempt_upstream) = self.current_generation_and_upstream();
@@ -253,14 +254,21 @@ where
                 .await
             {
                 SharedOutcome::Ready(Ok(entry)) => return Some(entry),
-                // Genuine upstream errors are never retried; like any other
-                // failure they fall back to a stale answer when one exists.
-                SharedOutcome::Ready(Err(_)) => {
-                    return self.stale_fallback(cache_key, miss.cache_eligible);
-                }
                 // The answer was resolved over a retired network and discarded;
                 // loop around and retry with a freshly acquired pair.
                 SharedOutcome::GenerationRetired => {}
+                // A background refresh this miss joined gave up for reasons of
+                // its own. Fetch under the miss's own admission and deadline,
+                // once, without spending a generation attempt on it.
+                SharedOutcome::Withdrawn if !fetched_for_itself => {
+                    fetched_for_itself = true;
+                    attempts_remaining += 1;
+                }
+                // Genuine upstream errors are never retried; like any other
+                // failure they fall back to a stale answer when one exists.
+                SharedOutcome::Ready(Err(_)) | SharedOutcome::Withdrawn => {
+                    return self.stale_fallback(cache_key, miss.cache_eligible);
+                }
             }
         }
 

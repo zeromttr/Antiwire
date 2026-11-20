@@ -189,6 +189,7 @@ impl MockUpstream {
         let received = Received::default();
         let queries = Arc::clone(&received);
         let config = Arc::new(config);
+        let socket = Arc::new(socket);
 
         let task = tokio::spawn(async move {
             let mut buf = vec![0u8; 512];
@@ -197,20 +198,29 @@ impl MockUpstream {
                     continue;
                 };
                 calls.fetch_add(1, Ordering::SeqCst);
-                if config.delay > Duration::ZERO {
-                    tokio::time::sleep(config.delay).await;
-                }
-                if !config.respond {
-                    continue;
-                }
-                let Ok(request) = Message::from_vec(&buf[..len]) else {
-                    continue;
-                };
-                queries.lock().expect("received").push(request.clone());
-                let response = mock_response(&config, &request);
-                if let Ok(wire) = encode_message(&response) {
-                    let _ = socket.send_to(&wire, peer).await;
-                }
+                // Each query is answered on its own, as a server answers
+                // queries in parallel: `delay` holds back one reply, not every
+                // query behind it.
+                let wire = buf[..len].to_vec();
+                let socket = Arc::clone(&socket);
+                let queries = Arc::clone(&queries);
+                let config = Arc::clone(&config);
+                tokio::spawn(async move {
+                    if config.delay > Duration::ZERO {
+                        tokio::time::sleep(config.delay).await;
+                    }
+                    if !config.respond {
+                        return;
+                    }
+                    let Ok(request) = Message::from_vec(&wire) else {
+                        return;
+                    };
+                    queries.lock().expect("received").push(request.clone());
+                    let response = mock_response(&config, &request);
+                    if let Ok(wire) = encode_message(&response) {
+                        let _ = socket.send_to(&wire, peer).await;
+                    }
+                });
             }
         });
 

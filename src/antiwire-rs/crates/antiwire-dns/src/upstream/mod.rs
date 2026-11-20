@@ -11,11 +11,11 @@ pub use doh_block::{doh_block_targets, DOH_PORT};
 pub(crate) use providers::resolve_upstream_urls;
 pub(crate) use providers::upstreams_for_settings;
 pub(crate) use providers::{withhold_shape, WithholdShape};
-#[cfg(test)]
-pub(crate) use resolver::RecoveryHold;
 pub(crate) use resolver::{
     build_upstream_dns, check_upstream_endpoints, dialled_addresses, UpstreamAnswer, UpstreamDns,
 };
+#[cfg(test)]
+pub(crate) use resolver::{RecoveryHold, MAX_IN_FLIGHT_PER_TIER};
 
 use hickory_proto::rr::rdata::opt::EdnsCode;
 use hickory_resolver::net::NetError;

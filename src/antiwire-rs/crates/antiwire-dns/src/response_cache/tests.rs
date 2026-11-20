@@ -60,9 +60,78 @@ where
             SharedOutcome::Ready(Ok(entry)) => return Ok(entry),
             SharedOutcome::Ready(Err(error)) => return Err((*error).clone()),
             SharedOutcome::GenerationRetired => generation = cache.current_generation(),
+            SharedOutcome::Withdrawn => unreachable!("these fetches never withdraw"),
         }
     }
     Err(DnsError::Config("cache generation changed".to_owned()))
+}
+
+/// The regression this guards: an error was shared with every waiter whatever
+/// the generation, though only answers were checked against it. A fetch that
+/// failed because a network change took its sockets away was answered
+/// SERVFAIL instead of retried over the new network.
+#[tokio::test]
+async fn an_error_from_a_retired_generation_is_retried_not_shared() {
+    let cache = ResponseCache::new();
+    let key = CacheKey::from_query("reset-mid-fetch.test", RecordType::A, 1);
+    let outcome = cache
+        .resolve_once(&key, cache.current_generation(), &|| async {
+            cache.bump_generation();
+            Err::<CachedAnswer, _>(DnsError::Upstream("network unreachable".to_owned()))
+        })
+        .await;
+    assert!(matches!(outcome, SharedOutcome::GenerationRetired));
+}
+
+/// A fetch that withdraws hands every waiter `Withdrawn` and leaves the map,
+/// so the next caller fetches for itself instead of joining it again.
+#[tokio::test]
+async fn a_withdrawn_fetch_leaves_the_next_caller_to_fetch_for_itself() {
+    let cache = ResponseCache::new();
+    let key = CacheKey::from_query("withdrawn.test", RecordType::A, 1);
+    let generation = cache.current_generation();
+    let release = Arc::new(tokio::sync::Notify::new());
+    let background = {
+        let release = Arc::clone(&release);
+        move || {
+            let release = Arc::clone(&release);
+            async move {
+                release.notified().await;
+                Fetched::Withdrawn
+            }
+        }
+    };
+    let foreground = || async { ResponseCache::entry_from_message(&sample_response(), false) };
+
+    let refresh = cache.resolve_once(&key, generation, &background);
+    tokio::pin!(refresh);
+    assert!(
+        tokio::time::timeout(Duration::from_millis(20), &mut refresh)
+            .await
+            .is_err(),
+        "the refresh is in flight"
+    );
+    let joined = cache.resolve_once(&key, generation, &foreground);
+    tokio::pin!(joined);
+    assert!(
+        tokio::time::timeout(Duration::from_millis(20), &mut joined)
+            .await
+            .is_err(),
+        "a miss joins the refresh rather than fetching"
+    );
+    release.notify_one();
+    assert!(matches!(refresh.await, SharedOutcome::Withdrawn));
+    assert!(matches!(joined.await, SharedOutcome::Withdrawn));
+    assert!(
+        !cache.inflight.contains_key(&key),
+        "the withdrawn cell is gone"
+    );
+
+    let refetched = cache.resolve_once(&key, generation, &foreground).await;
+    assert!(
+        matches!(refetched, SharedOutcome::Ready(Ok(_))),
+        "the next caller's own fetch runs"
+    );
 }
 
 #[tokio::test]
