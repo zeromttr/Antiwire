@@ -11,7 +11,7 @@ use std::collections::BTreeSet;
 use std::fs;
 use std::io::{Read, Write};
 use std::mem::MaybeUninit;
-use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, TcpListener, TcpStream, UdpSocket};
+use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr, TcpListener, TcpStream, UdpSocket};
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 use std::thread;
@@ -446,6 +446,65 @@ fn elevated_a_udp_datagram_peeked_and_then_read_is_counted_once() {
             remote_port: sender_address.port(),
         },
     );
+}
+
+/// Sends one datagram of [`READ_LEN`] bytes from `sender` to the unconnected `receiver`,
+/// which reads it with `recv(2)`. That read asks for no address, so the kernel copies none
+/// to the reader, and only the datagram's own headers name its sender. Returns the
+/// receiver's end of the exchange, keyed as the collector keys it: an IPv4-mapped address
+/// as the IPv4 address it maps.
+fn datagram_read_without_asking_its_sender(receiver: &UdpSocket, sender: &UdpSocket) -> FlowKey {
+    let receiver_address = receiver.local_addr().expect("receiver address");
+    let sender_address = sender.local_addr().expect("sender address");
+    let destination = SocketAddr::new(
+        receiver_address.ip().to_canonical(),
+        receiver_address.port(),
+    );
+    sender
+        .send_to(&[7_u8; READ_LEN], destination)
+        .expect("send");
+    let mut buffer = vec![0_u8; READ_LEN];
+    assert_eq!(receiver.recv(&mut buffer).expect("read"), READ_LEN);
+    FlowKey {
+        protocol: Protocol::Udp,
+        local_addr: receiver_address.ip().to_canonical(),
+        local_port: receiver_address.port(),
+        remote_addr: sender_address.ip().to_canonical(),
+        remote_port: sender_address.port(),
+    }
+}
+
+#[test]
+#[ignore = "requires Linux BTF plus BPF/PERFMON (or SYS_ADMIN) capabilities"]
+fn elevated_a_datagram_read_without_asking_its_sender_is_counted_under_the_sender() {
+    let (collector, events) = start_ebpf(Collector::builder().ignore_loopback(false));
+    let receiver = UdpSocket::bind((Ipv4Addr::LOCALHOST, 0)).expect("receiver");
+    let sender = UdpSocket::bind((Ipv4Addr::LOCALHOST, 0)).expect("sender");
+    let receiving_end = datagram_read_without_asking_its_sender(&receiver, &sender);
+    assert_received_once(collector, &events, receiving_end);
+}
+
+/// An IPv6 socket receives IPv4 under an IPv4-mapped address (`ipv6(7)`), from a sender it
+/// names the same way.
+#[test]
+#[ignore = "requires Linux BTF plus BPF/PERFMON (or SYS_ADMIN) capabilities"]
+fn elevated_a_datagram_an_ipv6_socket_receives_over_ipv4_is_counted_under_the_sender() {
+    let (collector, events) = start_ebpf(Collector::builder().ignore_loopback(false));
+    let receiver =
+        UdpSocket::bind((Ipv4Addr::LOCALHOST.to_ipv6_mapped(), 0)).expect("receiver on IPv6");
+    let sender = UdpSocket::bind((Ipv4Addr::LOCALHOST, 0)).expect("sender on IPv4");
+    let receiving_end = datagram_read_without_asking_its_sender(&receiver, &sender);
+    assert_received_once(collector, &events, receiving_end);
+}
+
+#[test]
+#[ignore = "requires Linux BTF plus BPF/PERFMON (or SYS_ADMIN) capabilities"]
+fn elevated_a_datagram_received_over_ipv6_is_counted_under_the_sender() {
+    let (collector, events) = start_ebpf(Collector::builder().ignore_loopback(false));
+    let receiver = UdpSocket::bind((Ipv6Addr::LOCALHOST, 0)).expect("receiver");
+    let sender = UdpSocket::bind((Ipv6Addr::LOCALHOST, 0)).expect("sender");
+    let receiving_end = datagram_read_without_asking_its_sender(&receiver, &sender);
+    assert_received_once(collector, &events, receiving_end);
 }
 
 /// The `st` column of the `/proc/net/tcp` row for `127.0.0.1:local_port` to

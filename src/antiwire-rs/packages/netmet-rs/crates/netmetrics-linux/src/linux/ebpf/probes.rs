@@ -57,8 +57,10 @@ pub(super) fn attach_probes(bpf: &mut Ebpf, sink: &EventSink) -> CapabilityMatri
             &["udp_recvmsg", "udpv6_recvmsg"],
         ),
     );
-    // Tells a read that only peeked from one that took its datagram. Without it the
-    // receive probes still count, and count a peeked datagram at each read.
+    // Tells a read that only peeked from one that took its datagram, and names the sender
+    // of a datagram an unconnected socket took. Without it the receive probes still count,
+    // count a peeked datagram at each read, and name that sender only where the kernel has
+    // given the reader its address before `udp_recvmsg` returns, which Linux 6.8 does not.
     report_capability(
         sink,
         "udp-receive-peek",
