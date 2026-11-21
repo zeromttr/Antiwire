@@ -688,8 +688,13 @@ impl UpdateService {
             }
             Err(error) => {
                 warn!(version = %version, error = %error, "update install failed");
-                if let Err(cleanup) = remove_dir_if_present(&paths.incoming(&version)) {
-                    warn!(error = %cleanup, "partial update could not be removed");
+                // The helper did not start, so nothing reads the download. A
+                // verified copy is as large as the release, and only a later
+                // successful update would otherwise remove it.
+                for download in [paths.incoming(&version), paths.verified(&version)] {
+                    if let Err(cleanup) = remove_dir_if_present(&download) {
+                        warn!(error = %cleanup, "the failed update's download could not be removed");
+                    }
                 }
                 self.record_failure(&paths, &error);
                 self.inner.lock().installing = false;
@@ -2228,6 +2233,33 @@ mod tests {
             service.request_install("0.3.0"),
             Err(UpdateError::VersionMismatch { .. })
         ));
+    }
+
+    /// An install that fails before the helper starts leaves no download.
+    #[tokio::test]
+    async fn a_failed_install_removes_its_download() {
+        let (_dir, paths) = temp_paths();
+        let service = UpdateService::new(supported(&paths), Arc::new(RecordingLauncher::default()));
+        let version = Version::new(0, 3, 0);
+        // Left by an earlier attempt that got as far as verifying the files.
+        let verified = paths.verified(&version);
+        std::fs::create_dir_all(&verified).expect("verified dir");
+        std::fs::write(verified.join("antiwire-ui.zip"), b"client").expect("verified file");
+        service.inner.lock().installing = true;
+        // No files for this platform, so the install fails before it downloads.
+        let release = Release::Tree(Manifest {
+            version: version.clone(),
+            notes: String::new(),
+            files: Vec::new(),
+        });
+
+        Arc::clone(&service)
+            .run_install(paths.clone(), test_trust(), release)
+            .await;
+
+        assert!(!verified.exists());
+        assert!(!paths.incoming(&version).exists());
+        assert_eq!(service.status().state, UpdateState::Failed);
     }
 
     #[tokio::test]
