@@ -84,6 +84,20 @@ impl InstallState {
         file.commit()
             .map_err(|error| UpdateError::io("commit", path, error))
     }
+
+    /// Whether `version` is the installed version: `current`, or the version a
+    /// helper is swapping in (`pending` in phase [`ApplyPhase::Swapping`]).
+    ///
+    /// The helper starts the new daemon and waits for it to stay healthy before
+    /// it records the version as `current`, so that daemon finds itself in
+    /// `pending`. The helper then either records it or stops it and rolls back.
+    #[must_use]
+    pub fn names_installed(&self, version: &Version) -> bool {
+        self.current.as_ref() == Some(version)
+            || self.pending.as_ref().is_some_and(|pending| {
+                pending.phase == ApplyPhase::Swapping && pending.version == *version
+            })
+    }
 }
 
 /// A fresh id for one install request.
@@ -116,14 +130,50 @@ mod tests {
         let state = InstallState {
             current: Some(Version::new(0, 2, 0)),
             previous: Some(Version::new(0, 1, 0)),
-            pending: Some(PendingInstall {
-                version: Version::new(0, 3, 0),
-                request_id: new_request_id(),
-                phase: ApplyPhase::Swapping,
-            }),
+            pending: Some(pending(Version::new(0, 3, 0), ApplyPhase::Swapping)),
             last_error: None,
         };
         state.store(&path).expect("store");
         assert_eq!(InstallState::load(&path).expect("load"), state);
+    }
+
+    fn pending(version: Version, phase: ApplyPhase) -> PendingInstall {
+        PendingInstall {
+            version,
+            request_id: new_request_id(),
+            phase,
+        }
+    }
+
+    #[test]
+    fn names_the_current_version_installed() {
+        let state = InstallState {
+            current: Some(Version::new(0, 2, 0)),
+            ..InstallState::default()
+        };
+        assert!(state.names_installed(&Version::new(0, 2, 0)));
+        assert!(!state.names_installed(&Version::new(0, 3, 0)));
+        assert!(!InstallState::default().names_installed(&Version::new(0, 2, 0)));
+    }
+
+    #[test]
+    fn names_the_version_a_swap_is_putting_in_place_installed() {
+        let swapping = InstallState {
+            current: Some(Version::new(0, 2, 0)),
+            pending: Some(pending(Version::new(0, 3, 0), ApplyPhase::Swapping)),
+            ..InstallState::default()
+        };
+        assert!(swapping.names_installed(&Version::new(0, 3, 0)));
+        assert!(swapping.names_installed(&Version::new(0, 2, 0)));
+    }
+
+    #[test]
+    fn does_not_name_a_version_the_helper_has_not_accepted() {
+        let requested = InstallState {
+            current: Some(Version::new(0, 2, 0)),
+            pending: Some(pending(Version::new(0, 3, 0), ApplyPhase::Requested)),
+            ..InstallState::default()
+        };
+        assert!(!requested.names_installed(&Version::new(0, 3, 0)));
     }
 }

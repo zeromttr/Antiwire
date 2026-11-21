@@ -100,7 +100,7 @@ impl UpdateSupport {
             return decide_package(&environment, Trust::compiled(), data_dir, format);
         }
         let layout = UpdatePaths::from_daemon_exe(data_dir, daemon_exe);
-        let recorded = layout.as_ref().is_some_and(recorded_as_current);
+        let recorded = layout.as_ref().is_some_and(recorded_as_installed);
         decide(&environment, Trust::compiled(), layout, recorded)
     }
 }
@@ -185,9 +185,13 @@ fn decide_package(
     }
 }
 
-fn recorded_as_current(paths: &UpdatePaths) -> bool {
+/// Read once, at start-up. A daemon an update helper started is still in the
+/// swap at that point, so it must count as installed: otherwise it refuses
+/// installs until it next restarts, and does not recover a swap that a reboot
+/// interrupted.
+fn recorded_as_installed(paths: &UpdatePaths) -> bool {
     match InstallState::load(&paths.install_state()) {
-        Ok(state) => state.current.as_ref() == Some(&product_version()),
+        Ok(state) => state.names_installed(&product_version()),
         Err(error) => {
             warn!(error = %error, "install state could not be read");
             false
