@@ -12,8 +12,9 @@
 //!    reports the new version installed.
 //! 5. Success: `previous = current`, `current = version`, keep the package for
 //!    the next rollback, remove the staging files.
-//! 6. Failure: stop, restore the database, set `last_error`, reinstall the
-//!    previous version's package, start, clear `pending`.
+//! 6. Failure: stop, restore the database and delete its copy, set
+//!    `last_error`, reinstall the previous version's package, start, clear
+//!    `pending`.
 
 use std::path::Path;
 
@@ -21,7 +22,7 @@ use semver::Version;
 
 use crate::apply::{
     backup_database, clean_staging, discard_backup, finish_rollback, record, record_failure,
-    record_reason_before_restart, remove_dir_if_present, restore_database,
+    record_reason_before_restart, remove_dir_if_present, restore_backup,
 };
 use crate::package::{PackageFormat, PackagePlan};
 use crate::package_install::PackageInstaller;
@@ -201,7 +202,6 @@ fn roll_back(
     cause: &UpdateError,
 ) -> Result<(), UpdateError> {
     let staged = paths.verified(version);
-    let backup = paths.db_backup(version);
     let mut failures = Vec::new();
     let stopped = record(
         &mut failures,
@@ -209,13 +209,7 @@ fn roll_back(
         service.stop(STOP_TIMEOUT),
     );
     if stopped {
-        if backup.is_dir() {
-            record(
-                &mut failures,
-                "the database could not be restored",
-                restore_database(paths.data_dir(), &backup),
-            );
-        }
+        restore_backup(paths, version, &mut failures);
         record_reason_before_restart(paths, state, cause, &failures);
         match PackagePlan::load(&staged) {
             Ok(PackagePlan {
@@ -440,6 +434,10 @@ mod tests {
             .last_error
             .is_some_and(|error| error.contains("crashed")));
         assert_eq!(std::fs::read(&database).expect("database"), b"before");
+        assert!(
+            !paths.db_backup(&Version::new(0, 3, 0)).exists(),
+            "the restored backup is deleted"
+        );
         assert_eq!(*fake.installed.borrow(), Some(Version::new(0, 2, 0)));
         // The daemon the reinstall starts reads why, and a rollback cut short
         // after that is still recovered.

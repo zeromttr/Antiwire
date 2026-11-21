@@ -11,7 +11,9 @@ mod unix;
 #[cfg(windows)]
 mod windows;
 
-pub use acl::{is_privileged_owner, restrict_to_owner_and_admins};
+pub use acl::{
+    is_privileged_owner, restrict_dir_to_owner_and_admins, restrict_to_owner_and_admins,
+};
 pub use error::KeyStoreError;
 #[cfg(unix)]
 pub use group::group_id;

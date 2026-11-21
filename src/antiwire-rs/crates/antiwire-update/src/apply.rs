@@ -11,8 +11,8 @@
 //! 4. Point the service at the new tree and start it until healthy.
 //! 5. Success: `previous = current`, `current = version`, clear `pending`,
 //!    delete version trees and staging older than `previous`.
-//! 6. Failure: stop, restore the database copy, point back at `previous`,
-//!    set `last_error`, start, clear `pending`.
+//! 6. Failure: stop, restore the database copy and delete it,
+//!    point back at `previous`, set `last_error`, start, clear `pending`.
 
 use std::ffi::OsString;
 use std::fs;
@@ -267,7 +267,6 @@ fn roll_back(
     service: &dyn DaemonService,
     cause: &UpdateError,
 ) -> Result<(), UpdateError> {
-    let backup = paths.db_backup(version);
     let mut failures = Vec::new();
     let stopped = record(
         &mut failures,
@@ -275,13 +274,7 @@ fn roll_back(
         service.stop(STOP_TIMEOUT),
     );
     if stopped {
-        if backup.is_dir() {
-            record(
-                &mut failures,
-                "the database could not be restored",
-                restore_database(paths.data_dir(), &backup),
-            );
-        }
+        restore_backup(paths, version, &mut failures);
         record(
             &mut failures,
             "the previous version could not be pointed at",
@@ -404,11 +397,19 @@ fn database_files(data_dir: &Path) -> Vec<OsString> {
 /// The copy is written under a partial name and renamed into place only when
 /// complete. The final directory therefore exists only for a whole copy, which
 /// is how rollback tells a usable backup from none.
+///
+/// The directory is restricted to the owner and administrators before anything
+/// is copied into it. A copy does not keep the database's own restriction: on
+/// Windows it takes what its directory passes on, and the data directory lets
+/// every local account read.
 pub(crate) fn backup_database(paths: &UpdatePaths, version: &Version) -> Result<(), UpdateError> {
     let target = paths.db_backup(version);
     let partial = with_suffix(&target, ".partial");
     fs::create_dir_all(&partial).map_err(|error| UpdateError::io("create", &partial, error))?;
-    if let Err(error) = copy_database(paths.data_dir(), &partial) {
+    let copied = antiwire_secrets::restrict_dir_to_owner_and_admins(&partial)
+        .map_err(|error| UpdateError::io("restrict", &partial, error))
+        .and_then(|()| copy_database(paths.data_dir(), &partial));
+    if let Err(error) = copied {
         let _ = fs::remove_dir_all(&partial);
         return Err(error);
     }
@@ -428,21 +429,43 @@ fn copy_database(data_dir: &Path, dest: &Path) -> Result<(), UpdateError> {
     Ok(())
 }
 
-/// Puts the database back exactly as the backup holds it. A file the backup
-/// lacks did not exist before the swap, so it is removed.
-pub(crate) fn restore_database(data_dir: &Path, backup: &Path) -> Result<(), UpdateError> {
-    for name in database_files(data_dir) {
-        let saved = backup.join(&name);
-        let live = data_dir.join(&name);
-        match fs::copy(&saved, &live) {
-            Ok(_) => {}
-            Err(error) if error.kind() == io::ErrorKind::NotFound => {
-                remove_file_if_present(&live)?;
-            }
-            Err(error) => return Err(UpdateError::io("restore", &saved, error)),
+/// Puts the database back from the copy taken before the swap, then deletes
+/// the copy. A copy that could not be put back is kept, and the failure is
+/// added to `failures`.
+pub(crate) fn restore_backup(paths: &UpdatePaths, version: &Version, failures: &mut Vec<String>) {
+    let backup = paths.db_backup(version);
+    if !backup.is_dir() {
+        return;
+    }
+    let restored = record(
+        failures,
+        "the database could not be restored",
+        restore_database(paths.data_dir(), &backup),
+    );
+    if restored {
+        if let Err(error) = discard_backup(paths, version) {
+            tracing::warn!(error = %error, "the restored database backup was not removed");
         }
     }
-    Ok(())
+}
+
+/// Puts the database back exactly as the backup holds it. A file the backup
+/// lacks did not exist before the swap, so it is removed.
+///
+/// A file this creates takes the data directory's DACL, which every local
+/// account can read, so the database is restricted again afterwards.
+fn restore_database(data_dir: &Path, backup: &Path) -> Result<(), UpdateError> {
+    let restored = database_files(data_dir).iter().try_for_each(|name| {
+        let saved = backup.join(name);
+        let live = data_dir.join(name);
+        match fs::copy(&saved, &live) {
+            Ok(_) => Ok(()),
+            Err(error) if error.kind() == io::ErrorKind::NotFound => remove_file_if_present(&live),
+            Err(error) => Err(UpdateError::io("restore", &saved, error)),
+        }
+    });
+    DataPaths::new(data_dir).secure_database();
+    restored
 }
 
 /// Removes the backup for `version`, complete or partial.
@@ -785,6 +808,10 @@ mod tests {
         let data = paths.data_dir();
         assert_eq!(fs::read(data.join(DB)).expect("db"), b"schema-1");
         assert!(
+            !paths.db_backup(&new()).exists(),
+            "the restored backup is deleted"
+        );
+        assert!(
             !data.join(WAL).exists(),
             "wal absent before the swap must go"
         );
@@ -866,6 +893,7 @@ mod tests {
             fs::read(paths.data_dir().join(DB)).expect("db"),
             b"schema-1"
         );
+        assert!(!backup.exists(), "the restored backup is deleted");
         let state = load(paths);
         assert_eq!(state.current, Some(old()));
         assert_eq!(state.pending, None);

@@ -23,6 +23,19 @@ use std::path::Path;
 #[cfg(windows)]
 const OWNER_AND_ADMINS_ONLY: &str = "D:P(A;;FA;;;SY)(A;;FA;;;BA)(A;;FA;;;S-1-3-4)";
 
+/// [`OWNER_AND_ADMINS_ONLY`] for a directory, passed on to everything created in it.
+///
+/// `SYSTEM` and Administrators are inherited by files (`OI`) and subdirectories (`CI`).
+/// The directory's owner gets full control of the directory itself through OWNER RIGHTS,
+/// as a file's owner does. Each new child instead gets its creator, through the
+/// inherit-only (`IO`) CREATOR OWNER ACE (`S-1-3-0`): "When the ACE is inherited, the
+/// system replaces the `CREATOR_OWNER` SID with the SID of the object's creator"
+/// (<https://learn.microsoft.com/en-us/windows/win32/secauthz/well-known-sids>). The flags
+/// are from <https://learn.microsoft.com/en-us/windows/win32/secauthz/ace-strings>.
+#[cfg(windows)]
+const DIR_OWNER_AND_ADMINS_ONLY: &str =
+    "D:P(A;OICI;FA;;;SY)(A;OICI;FA;;;BA)(A;;FA;;;S-1-3-4)(A;OICIIO;FA;;;S-1-3-0)";
+
 /// Restricts `path` so only its owner, and root, can open it: mode `0600`.
 ///
 /// A file the daemon creates gets the mode the umask leaves, which is `0644` under
@@ -51,6 +64,34 @@ pub fn restrict_to_owner_and_admins(path: &Path) -> io::Result<()> {
 #[cfg(windows)]
 pub fn restrict_to_owner_and_admins(path: &Path) -> io::Result<()> {
     apply_sddl(path, OWNER_AND_ADMINS_ONLY)
+}
+
+/// Restricts the directory `path` so only its owner, and root, can open it: mode `0700`.
+///
+/// # Errors
+///
+/// Returns the underlying OS error when `path` does not exist or belongs to someone else.
+#[cfg(not(windows))]
+pub fn restrict_dir_to_owner_and_admins(path: &Path) -> io::Result<()> {
+    use std::os::unix::fs::PermissionsExt as _;
+
+    std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o700))
+}
+
+/// Restricts the directory `path`, and every file and directory created in it afterwards,
+/// to `SYSTEM`, Administrators, and the owner.
+///
+/// For a directory that files are copied into: a copy does not keep its source's DACL but
+/// takes the one its directory passes on (`CopyFileExW` copies "security resource
+/// attributes", not the DACL:
+/// <https://learn.microsoft.com/en-us/windows/win32/api/winbase/nf-winbase-copyfileexw>).
+///
+/// # Errors
+///
+/// As [`restrict_to_owner_and_admins`].
+#[cfg(windows)]
+pub fn restrict_dir_to_owner_and_admins(path: &Path) -> io::Result<()> {
+    apply_sddl(path, DIR_OWNER_AND_ADMINS_ONLY)
 }
 
 /// Replaces `path`'s DACL with the one in `sddl`.
@@ -476,5 +517,75 @@ mod tests {
                     .cast_signed()
             )
         );
+    }
+
+    /// The update's database backup: a directory in the data directory, which passes
+    /// BUILTIN\Users read to everything created in it, restricted while empty and then
+    /// filled by copying the database.
+    #[test]
+    fn a_restricted_directory_passes_its_restriction_to_copies_made_in_it() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let granted = std::process::Command::new("icacls.exe")
+            .arg(dir.path())
+            .arg("/grant")
+            .arg("*S-1-5-32-545:(OI)(CI)(RX)")
+            .output()
+            .expect("run icacls");
+        assert!(
+            granted.status.success(),
+            "icacls failed: {}",
+            String::from_utf8_lossy(&granted.stdout)
+        );
+        let source = dir.path().join("antiwire.libsql");
+        std::fs::write(&source, b"history").expect("write");
+        let backup = dir.path().join("backup");
+        std::fs::create_dir(&backup).expect("backup dir");
+        // Guards the guard, as in the test above.
+        let inherited = dacl_sddl(&backup).expect("read back inherited dacl");
+        assert!(
+            inherited.contains("BU"),
+            "expected an inherited BUILTIN\\Users ACE to strip: {inherited}"
+        );
+
+        restrict_dir_to_owner_and_admins(&backup).expect("restrict");
+        let copy = backup.join("antiwire.libsql");
+        std::fs::copy(&source, &copy).expect("copy");
+
+        for path in [&backup, &copy] {
+            let sddl = dacl_sddl(path).expect("read back dacl");
+            assert!(
+                !sddl.contains("BU"),
+                "BUILTIN\\Users has access to {}: {sddl}",
+                path.display()
+            );
+            for expected in [";SY)", ";BA)"] {
+                assert!(sddl.contains(expected), "missing {expected}: {sddl}");
+            }
+        }
+        assert!(
+            dacl_sddl(&backup).expect("dacl").starts_with("D:P"),
+            "the directory's DACL is not protected"
+        );
+        // The creator keeps full control, elevated or not.
+        assert_eq!(std::fs::read(&copy).expect("read back"), b"history");
+        std::fs::remove_dir_all(&backup).expect("the creator can remove it");
+    }
+}
+
+#[cfg(all(test, not(windows)))]
+mod unix_tests {
+    use super::*;
+
+    #[test]
+    fn restricts_a_directory_to_its_owner() {
+        use std::os::unix::fs::PermissionsExt as _;
+
+        let dir = tempfile::tempdir().expect("tempdir");
+        restrict_dir_to_owner_and_admins(dir.path()).expect("restrict");
+        let mode = std::fs::metadata(dir.path())
+            .expect("metadata")
+            .permissions()
+            .mode();
+        assert_eq!(mode & 0o777, 0o700);
     }
 }
