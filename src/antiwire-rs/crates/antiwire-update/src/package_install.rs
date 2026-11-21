@@ -246,9 +246,13 @@ pub(crate) fn install_invocation(
             .args(["-U", "--oldpackage", "--replacepkgs"])
             .arg(package),
         // The package is unsigned; its SHA-256 is in the signed manifest and was
-        // checked before this runs, so the front end's own signature check is off.
+        // checked before this runs, so dnf's signature check is off for it, and
+        // only for it: `localpkg_gpgcheck` covers "local packages (packages in a
+        // file, not in a repository)" in DNF4 and DNF5 alike, where
+        // `--nogpgcheck` would also skip the dependencies dnf takes from
+        // repositories (dnf.conf(5), dnf5.conf(5)).
         (PackageFormat::Rpm, false) if available("dnf") => Invocation::new("dnf")
-            .args(["install", "-y", "--nogpgcheck"])
+            .args(["install", "-y", "--setopt=localpkg_gpgcheck=0"])
             .arg(package),
         (PackageFormat::Rpm, false) if available("zypper") => Invocation::new("zypper")
             .args(["--non-interactive", "install", "--allow-unsigned-rpm"])
@@ -346,7 +350,11 @@ mod tests {
             &only("dnf"),
         ));
         assert_eq!(program, "dnf");
-        assert!(args.contains(&"--nogpgcheck".to_owned()));
+        assert!(args.contains(&"--setopt=localpkg_gpgcheck=0".to_owned()));
+        assert!(
+            !args.iter().any(|arg| arg.contains("nogpgcheck")),
+            "repository packages keep their signature check"
+        );
         let (program, args) = program_and_args(&install_invocation(
             PackageFormat::Rpm,
             rpm,
