@@ -23,7 +23,9 @@ use crate::apply::{remove_dir_if_present, remove_file_if_present};
 use crate::channel::Channel;
 use crate::launcher::HelperLauncher;
 use crate::manifest::{self, Manifest, ManifestFile};
-use crate::package::{self, PackageFile, PackageFormat, PackageManifest, PackagePlan};
+use crate::package::{
+    self, InstalledPackage, PackageFile, PackageFormat, PackageManifest, PackagePlan,
+};
 use crate::package_install;
 use crate::state::{new_request_id, ApplyPhase, InstallState, PendingInstall};
 use crate::status::{AvailableRelease, UpdateState, UpdateStatus};
@@ -740,6 +742,11 @@ impl UpdateService {
             .map_err(|error| UpdateError::io("create", &incoming, error))?;
         self.download_asset(trust, version, package.into(), &incoming)
             .await?;
+        InstalledPackage {
+            version: version.clone(),
+            file: package.clone(),
+        }
+        .store(&incoming)?;
 
         // Without it a failed install cannot go back, but the user asked for the
         // update and the new package is verified, so the install goes ahead.
@@ -778,6 +785,11 @@ impl UpdateService {
         dir: &Path,
     ) -> Result<String, UpdateError> {
         let running = product_version();
+        if let Some(name) = copy_installed_package(paths, &running, platform, format, dir) {
+            return Ok(name);
+        }
+        // A package kept before records were kept is still checked against
+        // the release, if that is still published.
         let manifest = self
             .fetch_package_manifest(trust, &trust.package_manifest_url(&running))
             .await?;
@@ -1023,6 +1035,37 @@ fn offered_package(
 fn kept_package_matches(kept: &Path, file: &PackageFile) -> bool {
     std::fs::metadata(kept).is_ok_and(|metadata| metadata.is_file() && metadata.len() == file.size)
         && sha256_hex(kept).is_ok_and(|hash| hash == file.sha256)
+}
+
+/// Copies the package the last update kept into `dir`, when its record says it
+/// is `running`'s package for `platform` in `format` and it still hashes to
+/// what the record says. Returns its file name.
+///
+/// This needs no network, so it works after that version's release is gone.
+fn copy_installed_package(
+    paths: &UpdatePaths,
+    running: &Version,
+    platform: &str,
+    format: PackageFormat,
+    dir: &Path,
+) -> Option<String> {
+    let kept = paths.installed_packages();
+    let record = InstalledPackage::load(&kept).ok()?;
+    let file = &record.file;
+    if record.version != *running || file.platform != platform || file.format != format {
+        return None;
+    }
+    let source = kept.join(&file.name);
+    if !kept_package_matches(&source, file) {
+        return None;
+    }
+    match std::fs::copy(&source, dir.join(&file.name)) {
+        Ok(_) => Some(file.name.clone()),
+        Err(error) => {
+            warn!(error = %error, "the kept package could not be copied");
+            None
+        }
+    }
 }
 
 /// Starts the recovery helper when the install state shows a swap in flight.
@@ -1688,6 +1731,74 @@ mod tests {
         assert_eq!(applies.len(), 1);
         assert_eq!(applies[0].0, exe);
         assert_eq!(applies[0].3, pending.request_id);
+    }
+
+    /// The package and record the last update kept in `updates/installed`.
+    fn keep_package(paths: &UpdatePaths, version: &Version, bytes: &[u8]) -> PackageFile {
+        let kept = paths.installed_packages();
+        std::fs::create_dir_all(&kept).expect("installed dir");
+        let file = PackageFile {
+            platform: "linux-x86_64".to_owned(),
+            format: PackageFormat::Deb,
+            name: "antiwire_0.2.0_amd64.deb".to_owned(),
+            sha256: hex(bytes),
+            size: u64::try_from(bytes.len()).expect("size"),
+        };
+        std::fs::write(kept.join(&file.name), bytes).expect("package");
+        InstalledPackage {
+            version: version.clone(),
+            file: file.clone(),
+        }
+        .store(&kept)
+        .expect("record");
+        file
+    }
+
+    /// Its release may be gone: nightly releases are pruned.
+    #[test]
+    fn a_rollback_takes_the_kept_package_without_its_release() {
+        let (_dir, paths) = temp_paths();
+        let running = Version::new(0, 2, 0);
+        let file = keep_package(&paths, &running, b"old package");
+        let dir = tempfile::tempdir().expect("dir");
+
+        let name = copy_installed_package(
+            &paths,
+            &running,
+            "linux-x86_64",
+            PackageFormat::Deb,
+            dir.path(),
+        );
+
+        assert_eq!(name.as_deref(), Some(file.name.as_str()));
+        assert_eq!(
+            std::fs::read(dir.path().join(&file.name)).expect("copy"),
+            b"old package"
+        );
+    }
+
+    #[test]
+    fn a_kept_package_is_taken_only_when_its_record_fits() {
+        let (_dir, paths) = temp_paths();
+        let running = Version::new(0, 2, 0);
+        let file = keep_package(&paths, &running, b"old package");
+        let dir = tempfile::tempdir().expect("dir");
+        let copy = |version: &Version, format: PackageFormat| {
+            copy_installed_package(&paths, version, "linux-x86_64", format, dir.path())
+        };
+
+        assert_eq!(copy(&Version::new(0, 2, 1), PackageFormat::Deb), None);
+        assert_eq!(copy(&running, PackageFormat::Rpm), None);
+        std::fs::write(
+            paths.installed_packages().join(&file.name),
+            b"another package",
+        )
+        .expect("replace");
+        assert_eq!(
+            copy(&running, PackageFormat::Deb),
+            None,
+            "it no longer hashes"
+        );
     }
 
     #[test]

@@ -8,7 +8,7 @@
 //! {data}/updates/incoming/{version}/     partial download, discarded on failure
 //! {data}/updates/verified/{version}/     signature and hashes checked
 //! {data}/updates/db-backup/{version}/    database copy taken before the swap
-//! {data}/updates/installed/              Linux: the installed version's package, for rollback
+//! {data}/updates/installed/              Linux: the installed version's package and its record, for rollback
 //! {data}/install-state.json              current, previous, pending
 //! ```
 //!

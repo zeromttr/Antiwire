@@ -174,10 +174,7 @@ impl PackagePlan {
     ///
     /// When the file is missing or invalid, or names a path outside `dir`.
     pub fn load(dir: &Path) -> Result<Self, UpdateError> {
-        let path = dir.join(PLAN_FILE);
-        let bytes = std::fs::read(&path).map_err(|error| UpdateError::io("read", &path, error))?;
-        let plan: Self = serde_json::from_slice(&bytes)
-            .map_err(|error| UpdateError::BadManifest(format!("{PLAN_FILE}: {error}")))?;
+        let plan: Self = load_json(dir, PLAN_FILE)?;
         let names = std::iter::once(&plan.package).chain(plan.rollback.as_ref());
         for name in names {
             if !is_bare_name(name) {
@@ -195,16 +192,73 @@ impl PackagePlan {
     ///
     /// When the file cannot be written.
     pub fn store(&self, dir: &Path) -> Result<(), UpdateError> {
-        let path = dir.join(PLAN_FILE);
-        let bytes = serde_json::to_vec_pretty(self).map_err(|error| {
-            UpdateError::io(
-                "serialize",
-                &path,
-                std::io::Error::new(std::io::ErrorKind::InvalidData, error),
-            )
-        })?;
-        std::fs::write(&path, bytes).map_err(|error| UpdateError::io("write", &path, error))
+        store_json(dir, PLAN_FILE, self)
     }
+}
+
+/// Name of the record kept beside a package in `updates/installed`.
+pub const INSTALLED_RECORD_FILE: &str = "installed-package.json";
+
+/// A package an update installs, as its release's verified manifest lists it.
+///
+/// The daemon writes it beside the package it downloads, and once the install
+/// succeeds the helper keeps both in `updates/installed`. The next update can
+/// then roll back to that package without its release, which may be gone:
+/// nightly releases are pruned. The data directory is writable only by root,
+/// so the record is trusted as the plan is.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct InstalledPackage {
+    pub version: Version,
+    pub file: PackageFile,
+}
+
+impl InstalledPackage {
+    /// Reads the record in `dir`.
+    ///
+    /// # Errors
+    ///
+    /// When the file is missing or invalid, or names a path outside `dir`.
+    pub fn load(dir: &Path) -> Result<Self, UpdateError> {
+        let record: Self = load_json(dir, INSTALLED_RECORD_FILE)?;
+        if !is_bare_name(&record.file.name) || !is_sha256_hex(&record.file.sha256) {
+            return Err(UpdateError::BadManifest(format!(
+                "{INSTALLED_RECORD_FILE} names {:?} with a malformed hash or path",
+                record.file.name
+            )));
+        }
+        Ok(record)
+    }
+
+    /// Writes the record into `dir`.
+    ///
+    /// # Errors
+    ///
+    /// When the file cannot be written.
+    pub fn store(&self, dir: &Path) -> Result<(), UpdateError> {
+        store_json(dir, INSTALLED_RECORD_FILE, self)
+    }
+}
+
+/// Reads and parses the JSON file `name` in `dir`.
+fn load_json<T: serde::de::DeserializeOwned>(dir: &Path, name: &str) -> Result<T, UpdateError> {
+    let path = dir.join(name);
+    let bytes = std::fs::read(&path).map_err(|error| UpdateError::io("read", &path, error))?;
+    serde_json::from_slice(&bytes)
+        .map_err(|error| UpdateError::BadManifest(format!("{name}: {error}")))
+}
+
+/// Writes `value` as the JSON file `name` in `dir`.
+fn store_json<T: Serialize>(dir: &Path, name: &str, value: &T) -> Result<(), UpdateError> {
+    let path = dir.join(name);
+    let bytes = serde_json::to_vec_pretty(value).map_err(|error| {
+        UpdateError::io(
+            "serialize",
+            &path,
+            std::io::Error::new(std::io::ErrorKind::InvalidData, error),
+        )
+    })?;
+    std::fs::write(&path, bytes).map_err(|error| UpdateError::io("write", &path, error))
 }
 
 #[cfg(test)]
@@ -339,5 +393,26 @@ mod tests {
         };
         escaping.store(dir.path()).expect("store");
         assert!(PackagePlan::load(dir.path()).is_err());
+    }
+
+    #[test]
+    fn an_installed_record_naming_a_path_is_refused() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let mut record = InstalledPackage {
+            version: Version::new(0, 2, 0),
+            file: PackageFile {
+                platform: "linux-x86_64".to_owned(),
+                format: PackageFormat::Deb,
+                name: "antiwire_0.2.0_amd64.deb".to_owned(),
+                sha256: "0".repeat(64),
+                size: 1,
+            },
+        };
+        record.store(dir.path()).expect("store");
+        assert_eq!(InstalledPackage::load(dir.path()).expect("load"), record);
+
+        record.file.name = "../antiwire.deb".to_owned();
+        record.store(dir.path()).expect("store");
+        assert!(InstalledPackage::load(dir.path()).is_err());
     }
 }

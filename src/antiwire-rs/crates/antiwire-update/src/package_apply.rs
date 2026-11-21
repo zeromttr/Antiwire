@@ -24,7 +24,7 @@ use crate::apply::{
     backup_database, clean_staging, discard_backup, finish_rollback, record, record_failure,
     record_reason_before_restart, remove_dir_if_present, restore_backup,
 };
-use crate::package::{PackageFormat, PackagePlan};
+use crate::package::{PackageFormat, PackagePlan, INSTALLED_RECORD_FILE};
 use crate::package_install::PackageInstaller;
 use crate::service_control::{DaemonService, SETTLE_TIME, START_TIMEOUT, STOP_TIMEOUT};
 use crate::state::{ApplyPhase, InstallState};
@@ -174,16 +174,26 @@ fn commit(
     Ok(())
 }
 
-/// Moves `package` into `updates/installed`, replacing what was there.
+/// Moves `package`, and the record the daemon wrote beside it, into
+/// `updates/installed`, replacing what was there.
 fn keep_installed_package(paths: &UpdatePaths, package: &Path) -> Result<(), UpdateError> {
-    let Some(name) = package.file_name() else {
+    let (Some(name), Some(staged)) = (package.file_name(), package.parent()) else {
         return Ok(());
     };
     let kept = paths.installed_packages();
     remove_dir_if_present(&kept)?;
     std::fs::create_dir_all(&kept).map_err(|error| UpdateError::io("create", &kept, error))?;
-    let destination = kept.join(name);
-    std::fs::rename(package, &destination).map_err(|error| UpdateError::io("move", package, error))
+    let moves = [
+        (package.to_path_buf(), kept.join(name)),
+        (
+            staged.join(INSTALLED_RECORD_FILE),
+            kept.join(INSTALLED_RECORD_FILE),
+        ),
+    ];
+    for (from, to) in moves {
+        std::fs::rename(&from, &to).map_err(|error| UpdateError::io("move", &from, error))?;
+    }
+    Ok(())
 }
 
 /// Puts the previous version back in service and records why the install
@@ -244,6 +254,7 @@ mod tests {
     use std::time::Duration;
 
     use super::*;
+    use crate::package::{InstalledPackage, PackageFile};
     use crate::state::PendingInstall;
 
     const REQUEST: &str = "request-1";
@@ -354,6 +365,18 @@ mod tests {
         }
         .store(&verified)
         .expect("plan");
+        InstalledPackage {
+            version: version.clone(),
+            file: PackageFile {
+                platform: "linux-x86_64".to_owned(),
+                format: PackageFormat::Deb,
+                name: "new.deb".to_owned(),
+                sha256: "0".repeat(64),
+                size: 3,
+            },
+        }
+        .store(&verified)
+        .expect("record");
         std::fs::write(dir.path().join("antiwire.libsql"), b"before").expect("database");
         InstallState {
             current: Some(Version::new(0, 2, 0)),
@@ -386,6 +409,10 @@ mod tests {
         assert_eq!(state.previous, Some(Version::new(0, 2, 0)));
         assert_eq!(state.pending, None);
         assert!(paths.installed_packages().join("new.deb").is_file());
+        assert!(paths
+            .installed_packages()
+            .join(INSTALLED_RECORD_FILE)
+            .is_file());
         assert!(!paths.verified(&Version::new(0, 3, 0)).exists());
     }
 
