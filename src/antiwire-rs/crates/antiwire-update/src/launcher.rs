@@ -12,6 +12,8 @@ use std::process::{Command, Stdio};
 
 use semver::Version;
 
+use crate::state::new_request_id;
+
 /// Command-line flag that selects the apply helper in `antiwire-daemon`.
 pub const APPLY_FLAG: &str = "--apply-update";
 /// Command-line flag carrying the request id to the helper.
@@ -67,7 +69,11 @@ impl HelperLauncher for DetachedLauncher {
     }
 
     fn launch_recover(&self, daemon_exe: &Path, data_dir: &Path) -> std::io::Result<()> {
-        spawn_helper(daemon_exe, data_dir, &[OsStr::new(RECOVER_FLAG)], "recover")
+        // Every daemon start during a swap launches one, and the last may still
+        // be running. systemd-run refuses a unit name that is still loaded,
+        // and still exits 0, so a fixed name would lose this one unseen.
+        let unit = format!("recover-{}", new_request_id());
+        spawn_helper(daemon_exe, data_dir, &[OsStr::new(RECOVER_FLAG)], &unit)
     }
 }
 
@@ -156,10 +162,12 @@ fn spawn_helper(
     mode: &[&OsStr],
     unit: &str,
 ) -> std::io::Result<()> {
-    let output = Command::new("systemd-run")
-        .args(systemd_run_args(unit, daemon_exe, data_dir, mode))
-        .stdin(Stdio::null())
-        .output()?;
+    let output = Command::new(crate::system_program::require_system_program(
+        "systemd-run",
+    )?)
+    .args(systemd_run_args(unit, daemon_exe, data_dir, mode))
+    .stdin(Stdio::null())
+    .output()?;
     if output.status.success() {
         Ok(())
     } else {

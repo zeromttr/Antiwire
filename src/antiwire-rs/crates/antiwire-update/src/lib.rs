@@ -11,6 +11,8 @@
 pub mod apply;
 pub mod channel;
 pub mod error;
+#[cfg(windows)]
+mod junction;
 pub mod launcher;
 pub mod manifest;
 pub mod package;
@@ -21,12 +23,13 @@ pub mod service;
 pub mod service_control;
 pub mod state;
 pub mod status;
+mod system_program;
 pub mod trust;
 pub mod version;
 
 pub use channel::Channel;
 pub use error::UpdateError;
 pub use paths::UpdatePaths;
-pub use service::{UpdateService, UpdateSupport};
+pub use service::{recover_interrupted_install, UpdateService, UpdateSupport};
 pub use status::{UpdateState, UpdateStatus};
 pub use version::PRODUCT_VERSION;

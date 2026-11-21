@@ -76,6 +76,30 @@ pub(crate) fn parse_print(output: &str) -> JobStatus {
     status
 }
 
+/// How long a `launchctl bootstrap` that [`bootstrap_should_retry`] accepts is
+/// retried before the start fails.
+#[cfg(target_os = "macos")]
+const BOOTSTRAP_RETRY: Duration = Duration::from_secs(10);
+
+/// Whether a failed `launchctl bootstrap` is worth trying again.
+///
+/// launchctl reports `Bootstrap failed: <code>: <reason>`. Code 5 (EIO,
+/// "Input/output error") and 37 (EALREADY on macOS, "Operation already in
+/// progress") are what it reports while launchd is still tearing down a job
+/// with the same label. Apple does not document these codes for `bootstrap`,
+/// so the retry is short and any other code fails at once.
+pub(crate) fn bootstrap_should_retry(stderr: &str) -> bool {
+    const EIO: u32 = 5;
+    const EALREADY: u32 = 37;
+    stderr.lines().any(|line| {
+        line.trim()
+            .strip_prefix("Bootstrap failed: ")
+            .and_then(|rest| rest.split(':').next())
+            .and_then(|code| code.trim().parse::<u32>().ok())
+            .is_some_and(|code| code == EIO || code == EALREADY)
+    })
+}
+
 /// The `ProgramArguments` value for `plutil -replace … -json`.
 ///
 /// # Errors
@@ -120,14 +144,25 @@ impl DaemonService for LaunchdDaemonService {
             return Ok(());
         };
         let deadline = Instant::now() + timeout;
-        // `bootout` waits for the job to exit (up to its ExitTimeOut), and an
-        // unloaded job cannot be revived by KeepAlive.
+        // An unloaded job cannot be revived by KeepAlive.
         let output = run(
             "/bin/launchctl",
             &[OsStr::new("bootout"), OsStr::new(&Self::target())],
         )?;
         if !output.status.success() && Self::status()?.is_some() {
             return Err(command_error("unload the daemon job", &output));
+        }
+        // launchctl(1) does not say whether `bootout` returns before launchd
+        // has removed the job, and a `bootstrap` while it still lists the label
+        // can fail. So wait until `print` no longer finds the job.
+        while Self::status()?.is_some() {
+            if Instant::now() >= deadline {
+                return Err(UpdateError::Service(format!(
+                    "{LABEL} was still loaded {} seconds after bootout",
+                    timeout.as_secs()
+                )));
+            }
+            std::thread::sleep(POLL_INTERVAL);
         }
         match status.pid {
             Some(pid) => wait_for_process_exit(pid, deadline),
@@ -181,19 +216,27 @@ impl DaemonService for LaunchdDaemonService {
     }
 
     fn start_healthy(&self, start_timeout: Duration, settle: Duration) -> Result<(), UpdateError> {
-        let output = run(
-            "/bin/launchctl",
-            &[
-                OsStr::new("bootstrap"),
-                OsStr::new("system"),
-                self.plist.as_os_str(),
-            ],
-        )?;
-        if !output.status.success() {
-            return Err(UpdateError::Unhealthy(format!(
-                "the daemon job did not load: {}",
-                String::from_utf8_lossy(&output.stderr).trim()
-            )));
+        let retry_until = Instant::now() + BOOTSTRAP_RETRY;
+        loop {
+            let output = run(
+                "/bin/launchctl",
+                &[
+                    OsStr::new("bootstrap"),
+                    OsStr::new("system"),
+                    self.plist.as_os_str(),
+                ],
+            )?;
+            if output.status.success() {
+                break;
+            }
+            let stderr = String::from_utf8_lossy(&output.stderr);
+            if Instant::now() >= retry_until || !bootstrap_should_retry(&stderr) {
+                return Err(UpdateError::Unhealthy(format!(
+                    "the daemon job did not load: {}",
+                    stderr.trim()
+                )));
+            }
+            std::thread::sleep(POLL_INTERVAL);
         }
 
         let deadline = Instant::now() + start_timeout;
@@ -320,5 +363,20 @@ mod tests {
             json,
             r#"["/Applications/My Tools/antiwire-daemon","--data-dir","/var/lib/antiwire"]"#
         );
+    }
+
+    #[test]
+    fn retries_a_bootstrap_only_while_launchd_tears_the_job_down() {
+        assert!(bootstrap_should_retry(
+            "Bootstrap failed: 5: Input/output error\n\
+             Try re-running the command as root for richer errors.\n"
+        ));
+        assert!(bootstrap_should_retry(
+            "Bootstrap failed: 37: Operation already in progress\n"
+        ));
+        assert!(!bootstrap_should_retry(
+            "Bootstrap failed: 2: No such file or directory\n"
+        ));
+        assert!(!bootstrap_should_retry(""));
     }
 }

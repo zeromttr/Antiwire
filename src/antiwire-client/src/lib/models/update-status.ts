@@ -5,11 +5,14 @@ export type UpdateFooterView =
   | { kind: 'none' }
   | { kind: 'installing' }
   | { kind: 'reopen'; version: string }
-  | { kind: 'failed'; version: string; detail: string }
+  /** The last install failed, and a release is there to try again. */
+  | { kind: 'retry'; version: string }
+  /** The last install failed, and no release is known yet to try again. */
+  | { kind: 'failed'; detail: string }
   | { kind: 'available'; version: string }
   | { kind: 'unsupported'; version: string };
 
-/** Foreground refresh cadence; the footer also refreshes on mount and when the window shows. */
+/** Foreground refresh cadence; the footer also refreshes on connecting and when the window shows. */
 export const UPDATE_CHECK_MS = 15 * 60 * 1000;
 /** Refresh cadence while the daemon is installing, so the footer follows the restart. */
 export const UPDATE_INSTALL_POLL_MS = 5_000;
@@ -124,7 +127,9 @@ export function updateFooterView(status: UpdateStatus | null): UpdateFooterView 
     return { kind: 'reopen', version: status.currentVersion };
   }
   if (status.state === 'failed') {
-    return { kind: 'failed', version: status.availableVersion, detail: status.detail };
+    return status.availableVersion
+      ? { kind: 'retry', version: status.availableVersion }
+      : { kind: 'failed', detail: status.detail };
   }
   if (status.state === 'available') return { kind: 'available', version: status.availableVersion };
   if (
@@ -141,6 +146,8 @@ export type UpdatesPanelStatus =
   | { kind: 'checking' }
   | { kind: 'unreachable'; detail: string }
   | { kind: 'installing' }
+  /** The daemon runs a newer version than this client, which has to be reopened. */
+  | { kind: 'reopen'; version: string }
   | { kind: 'failed'; detail: string }
   | { kind: 'available'; version: string }
   | { kind: 'unsupported'; detail: string }
@@ -162,6 +169,9 @@ export function updatesPanelStatus(
   if (checkFailure) return { kind: 'unreachable', detail: checkFailure };
   if (!status) return { kind: 'unknown' };
   if (status.state === 'installing') return { kind: 'installing' };
+  if (compareVersions(status.currentVersion, status.clientVersion) > 0) {
+    return { kind: 'reopen', version: status.currentVersion };
+  }
   if (status.state === 'failed') return { kind: 'failed', detail: status.detail };
   if (status.state === 'available') return { kind: 'available', version: status.availableVersion };
   if (status.state === 'unsupported') return { kind: 'unsupported', detail: status.detail };

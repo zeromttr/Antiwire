@@ -8,7 +8,7 @@
 //! {data}/updates/incoming/{version}/     partial download, discarded on failure
 //! {data}/updates/verified/{version}/     signature and hashes checked
 //! {data}/updates/db-backup/{version}/    database copy taken before the swap
-//! {data}/updates/installed/              Linux: the installed version's package, for rollback
+//! {data}/updates/installed/              Linux: the installed version's package and its record, for rollback
 //! {data}/install-state.json              current, previous, pending
 //! ```
 //!
@@ -87,7 +87,14 @@ impl UpdatePaths {
 
     #[must_use]
     pub fn install_state(&self) -> PathBuf {
-        self.data_dir.join("install-state.json")
+        Self::install_state_in(&self.data_dir)
+    }
+
+    /// The install state in `data_dir`, for a caller that does not know the
+    /// install's layout yet.
+    #[must_use]
+    pub fn install_state_in(data_dir: &Path) -> PathBuf {
+        data_dir.join("install-state.json")
     }
 
     #[must_use]

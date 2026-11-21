@@ -9,10 +9,11 @@
 //! 3. Copy the database files (`antiwire.libsql` and any `-wal` / `-shm`
 //!    beside it) to `db-backup/{version}`.
 //! 4. Point the service at the new tree and start it until healthy.
-//! 5. Success: `previous = current`, `current = version`, clear `pending`,
-//!    delete version trees and staging older than `previous`.
-//! 6. Failure: stop, restore the database copy, point back at `previous`,
-//!    start, clear `pending`, set `last_error`.
+//! 5. Success: put the new client in place, then `previous = current`,
+//!    `current = version`, clear `pending`, and delete version trees and
+//!    staging older than `previous`.
+//! 6. Failure: stop, restore the database copy and delete it,
+//!    point back at `previous`, set `last_error`, start, clear `pending`.
 
 use std::ffi::OsString;
 use std::fs;
@@ -140,17 +141,19 @@ fn commit(
     version: &Version,
     current: &Version,
 ) -> Result<(), UpdateError> {
-    state.previous = Some(current.clone());
-    state.current = Some(version.clone());
-    state.pending = None;
-    state.last_error = None;
-    state.store(&paths.install_state())?;
-    // A failure leaves the user launching the previous version's client, which
+    // Before the swap is recorded as finished, which is when the new daemon
+    // tells the client to reopen: the reopened client must be the new one. A
+    // failure leaves the user launching the previous version's client, which
     // keeps working until a later update removes that tree, so it is logged
     // rather than undoing a healthy install.
     if let Err(error) = publish_client(paths, version) {
         tracing::warn!(error = %error, "the new client was not published");
     }
+    state.previous = Some(current.clone());
+    state.current = Some(version.clone());
+    state.pending = None;
+    state.last_error = None;
+    state.store(&paths.install_state())?;
     clean_up(paths, state, version);
     tracing::info!(%version, "update installed");
     Ok(())
@@ -179,33 +182,30 @@ fn publish_client(paths: &UpdatePaths, version: &Version) -> Result<(), UpdateEr
 
 /// Repoints the junction `link` at `target`.
 ///
-/// Removing a junction removes only the link. There is no std API that creates
-/// one, so this uses `mklink /J`, the same command the installer runs.
+/// The new junction is made beside the old one and checked first, so a
+/// failure leaves the old one in place. It replaces the old one with a rename,
+/// and `link` is missing only between the removal and the rename. Removing a
+/// junction removes only the link.
 #[cfg(windows)]
 fn point_current_link(link: &Path, target: &Path) -> Result<(), UpdateError> {
-    match fs::remove_dir(link) {
-        Ok(()) => {}
-        Err(error) if error.kind() == io::ErrorKind::NotFound => {}
-        Err(error) => return Err(UpdateError::io("remove", link, error)),
+    let staged = with_suffix(link, ".new");
+    remove_link_if_present(&staged)?;
+    crate::junction::create(&staged, target)
+        .map_err(|error| UpdateError::io("link", &staged, error))?;
+    if let Err(error) = remove_link_if_present(link) {
+        let _ = fs::remove_dir(&staged);
+        return Err(error);
     }
-    let status = std::process::Command::new("cmd")
-        .arg("/c")
-        .arg("mklink")
-        .arg("/J")
-        .arg(link)
-        .arg(target)
-        .stdout(std::process::Stdio::null())
-        .stderr(std::process::Stdio::null())
-        .status()
-        .map_err(|error| UpdateError::io("link", link, error))?;
-    if status.success() {
-        Ok(())
-    } else {
-        Err(UpdateError::io(
-            "link",
-            link,
-            io::Error::other(format!("mklink exited with {status}")),
-        ))
+    fs::rename(&staged, link).map_err(|error| UpdateError::io("move", &staged, error))
+}
+
+/// Removes the junction or empty directory at `path`, if there is one.
+#[cfg(windows)]
+fn remove_link_if_present(path: &Path) -> Result<(), UpdateError> {
+    match fs::remove_dir(path) {
+        Ok(()) => Ok(()),
+        Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(()),
+        Err(error) => Err(UpdateError::io("remove", path, error)),
     }
 }
 
@@ -237,17 +237,36 @@ fn publish_app_bundle(bundle: &Path, app: &Path) -> Result<(), UpdateError> {
             io::Error::other(format!("ditto exited with {status}")),
         ));
     }
-    if app.exists() {
-        fs::rename(app, &replaced).map_err(|error| UpdateError::io("move", app, error))?;
+    swap_in(&staged, app, &replaced)
+}
+
+/// Puts the bundle at `staged` in place of `app`, keeping the one it replaces
+/// at `replaced` until the new one is in place. When that fails, the old one
+/// goes back, so `app` is missing only between the two renames.
+#[cfg(any(target_os = "macos", test))]
+fn swap_in(staged: &Path, app: &Path, replaced: &Path) -> Result<(), UpdateError> {
+    let replacing = app.exists();
+    if replacing {
+        fs::rename(app, replaced).map_err(|error| UpdateError::io("move", app, error))?;
     }
-    fs::rename(&staged, app).map_err(|error| UpdateError::io("move", &staged, error))?;
-    if let Err(error) = fs::remove_dir_all(&replaced) {
-        tracing::warn!(error = %error, "the replaced app bundle was not removed");
+    if let Err(error) = fs::rename(staged, app) {
+        if replacing {
+            if let Err(restore) = fs::rename(replaced, app) {
+                tracing::error!(error = %restore, "the previous app bundle could not be put back");
+            }
+        }
+        return Err(UpdateError::io("move", staged, error));
+    }
+    if replacing {
+        if let Err(error) = fs::remove_dir_all(replaced) {
+            tracing::warn!(error = %error, "the replaced app bundle was not removed");
+        }
     }
     Ok(())
 }
 
-/// Puts `current` back in service and records why the swap failed in `state`.
+/// Puts `current` back in service and records why the swap failed in `state`,
+/// before that version starts, so it shows the reason.
 ///
 /// The database copy is restored only when the backup was completed, because
 /// the service must be stopped first. Every step is attempted even after an
@@ -266,7 +285,6 @@ fn roll_back(
     service: &dyn DaemonService,
     cause: &UpdateError,
 ) -> Result<(), UpdateError> {
-    let backup = paths.db_backup(version);
     let mut failures = Vec::new();
     let stopped = record(
         &mut failures,
@@ -274,33 +292,52 @@ fn roll_back(
         service.stop(STOP_TIMEOUT),
     );
     if stopped {
-        if backup.is_dir() {
-            record(
-                &mut failures,
-                "the database could not be restored",
-                restore_database(paths.data_dir(), &backup),
-            );
-        }
+        restore_backup(paths, version, &mut failures);
         record(
             &mut failures,
             "the previous version could not be pointed at",
             service.set_image(&paths.daemon_exe(current), paths.data_dir()),
         );
+        record_reason_before_restart(paths, state, cause, &failures);
         record(
             &mut failures,
             "the previous version did not start",
             service.start_healthy(START_TIMEOUT, SETTLE_TIME),
         );
     }
+    finish_rollback(paths, state, cause, failures)
+}
 
-    let mut last_error = cause.to_string();
-    for failure in &failures {
-        last_error.push_str("; ");
-        last_error.push_str(failure);
+/// Records why the install failed before a rollback starts the previous
+/// version. A daemon reads `last_error` only when it starts, so a reason
+/// recorded after the restart would not be shown until the next one.
+///
+/// `pending` is kept, so a rollback cut short is still recovered.
+pub(crate) fn record_reason_before_restart(
+    paths: &UpdatePaths,
+    state: &mut InstallState,
+    cause: &UpdateError,
+    failures: &[String],
+) {
+    if let Err(error) = store_reason(paths, state, cause, failures) {
+        tracing::warn!(error = %error, "the failure could not be recorded before the restart");
     }
+}
+
+/// Ends a rollback: clears `pending` and records why the install failed, with
+/// every rollback step in `failures`.
+///
+/// # Errors
+///
+/// The rollback's own failures, including a failure to record the reason.
+pub(crate) fn finish_rollback(
+    paths: &UpdatePaths,
+    state: &mut InstallState,
+    cause: &UpdateError,
+    mut failures: Vec<String>,
+) -> Result<(), UpdateError> {
     state.pending = None;
-    state.last_error = Some(last_error);
-    if let Err(error) = state.store(&paths.install_state()) {
+    if let Err(error) = store_reason(paths, state, cause, &failures) {
         failures.push(format!("the failure could not be recorded: {error}"));
     }
     if failures.is_empty() {
@@ -311,6 +348,22 @@ fn roll_back(
             failures.join("; ")
         )))
     }
+}
+
+/// Stores `cause`, followed by each rollback step that failed, as `last_error`.
+fn store_reason(
+    paths: &UpdatePaths,
+    state: &mut InstallState,
+    cause: &UpdateError,
+    failures: &[String],
+) -> Result<(), UpdateError> {
+    let mut reason = cause.to_string();
+    for failure in failures {
+        reason.push_str("; ");
+        reason.push_str(failure);
+    }
+    state.last_error = Some(reason);
+    state.store(&paths.install_state())
 }
 
 /// Clears the pending install and records `error` as the reason it failed.
@@ -362,11 +415,19 @@ fn database_files(data_dir: &Path) -> Vec<OsString> {
 /// The copy is written under a partial name and renamed into place only when
 /// complete. The final directory therefore exists only for a whole copy, which
 /// is how rollback tells a usable backup from none.
+///
+/// The directory is restricted to the owner and administrators before anything
+/// is copied into it. A copy does not keep the database's own restriction: on
+/// Windows it takes what its directory passes on, and the data directory lets
+/// every local account read.
 pub(crate) fn backup_database(paths: &UpdatePaths, version: &Version) -> Result<(), UpdateError> {
     let target = paths.db_backup(version);
     let partial = with_suffix(&target, ".partial");
     fs::create_dir_all(&partial).map_err(|error| UpdateError::io("create", &partial, error))?;
-    if let Err(error) = copy_database(paths.data_dir(), &partial) {
+    let copied = antiwire_secrets::restrict_dir_to_owner_and_admins(&partial)
+        .map_err(|error| UpdateError::io("restrict", &partial, error))
+        .and_then(|()| copy_database(paths.data_dir(), &partial));
+    if let Err(error) = copied {
         let _ = fs::remove_dir_all(&partial);
         return Err(error);
     }
@@ -386,21 +447,43 @@ fn copy_database(data_dir: &Path, dest: &Path) -> Result<(), UpdateError> {
     Ok(())
 }
 
-/// Puts the database back exactly as the backup holds it. A file the backup
-/// lacks did not exist before the swap, so it is removed.
-pub(crate) fn restore_database(data_dir: &Path, backup: &Path) -> Result<(), UpdateError> {
-    for name in database_files(data_dir) {
-        let saved = backup.join(&name);
-        let live = data_dir.join(&name);
-        match fs::copy(&saved, &live) {
-            Ok(_) => {}
-            Err(error) if error.kind() == io::ErrorKind::NotFound => {
-                remove_file_if_present(&live)?;
-            }
-            Err(error) => return Err(UpdateError::io("restore", &saved, error)),
+/// Puts the database back from the copy taken before the swap, then deletes
+/// the copy. A copy that could not be put back is kept, and the failure is
+/// added to `failures`.
+pub(crate) fn restore_backup(paths: &UpdatePaths, version: &Version, failures: &mut Vec<String>) {
+    let backup = paths.db_backup(version);
+    if !backup.is_dir() {
+        return;
+    }
+    let restored = record(
+        failures,
+        "the database could not be restored",
+        restore_database(paths.data_dir(), &backup),
+    );
+    if restored {
+        if let Err(error) = discard_backup(paths, version) {
+            tracing::warn!(error = %error, "the restored database backup was not removed");
         }
     }
-    Ok(())
+}
+
+/// Puts the database back exactly as the backup holds it. A file the backup
+/// lacks did not exist before the swap, so it is removed.
+///
+/// A file this creates takes the data directory's DACL, which every local
+/// account can read, so the database is restricted again afterwards.
+fn restore_database(data_dir: &Path, backup: &Path) -> Result<(), UpdateError> {
+    let restored = database_files(data_dir).iter().try_for_each(|name| {
+        let saved = backup.join(name);
+        let live = data_dir.join(name);
+        match fs::copy(&saved, &live) {
+            Ok(_) => Ok(()),
+            Err(error) if error.kind() == io::ErrorKind::NotFound => remove_file_if_present(&live),
+            Err(error) => Err(UpdateError::io("restore", &saved, error)),
+        }
+    });
+    DataPaths::new(data_dir).secure_database();
+    restored
 }
 
 /// Removes the backup for `version`, complete or partial.
@@ -515,15 +598,21 @@ mod tests {
         image: RefCell<PathBuf>,
         failing: Option<PathBuf>,
         calls: RefCell<Vec<Call>>,
+        state_path: PathBuf,
+        /// The install state each started daemon read, as a daemon reads it
+        /// once when it starts.
+        read_at_start: RefCell<Vec<InstallState>>,
     }
 
     impl FakeDaemonService {
         fn new(paths: &UpdatePaths, running: &Version) -> Self {
             Self {
                 data_dir: paths.data_dir().to_path_buf(),
+                state_path: paths.install_state(),
                 image: RefCell::new(paths.daemon_exe(running)),
                 failing: None,
                 calls: RefCell::new(Vec::new()),
+                read_at_start: RefCell::new(Vec::new()),
             }
         }
     }
@@ -549,6 +638,9 @@ mod tests {
         fn start_healthy(&self, _start: Duration, _settle: Duration) -> Result<(), UpdateError> {
             let image = self.image.borrow().clone();
             self.calls.borrow_mut().push(Call::Start(image.clone()));
+            self.read_at_start
+                .borrow_mut()
+                .push(InstallState::load(&self.state_path).expect("read state at start"));
             if self.failing.as_ref() == Some(&image) {
                 fs::write(self.data_dir.join(DB), b"migrated").expect("migrate db");
                 fs::write(self.data_dir.join(WAL), b"wal").expect("write wal");
@@ -635,6 +727,8 @@ mod tests {
                 Call::Start(paths.daemon_exe(&new())),
             ]
         );
+        // The new daemon reads the state while the swap is still in flight.
+        assert!(service.read_at_start.borrow()[0].names_installed(&new()));
         assert_eq!(
             load(paths),
             InstallState {
@@ -650,6 +744,63 @@ mod tests {
         assert!(!paths.db_backup(&new()).exists());
         // The shortcut's link now leads into the new tree.
         #[cfg(windows)]
+        assert_eq!(
+            fs::canonicalize(paths.current_link()).expect("link resolves"),
+            fs::canonicalize(paths.version_root(&new())).expect("new tree")
+        );
+    }
+
+    /// The new daemon tells the client to reopen once the swap is recorded as
+    /// finished, so the new client has to be in place by then. Recording is
+    /// made to fail here to show which came first.
+    #[cfg(windows)]
+    #[test]
+    fn the_new_client_is_in_place_before_the_swap_is_recorded() {
+        struct RecordBlocked<'a> {
+            inner: &'a FakeDaemonService,
+            state_path: PathBuf,
+        }
+
+        impl DaemonService for RecordBlocked<'_> {
+            fn stop(&self, timeout: Duration) -> Result<(), UpdateError> {
+                self.inner.stop(timeout)
+            }
+
+            fn image(&self) -> Result<PathBuf, UpdateError> {
+                self.inner.image()
+            }
+
+            fn set_image(&self, daemon_exe: &Path, data_dir: &Path) -> Result<(), UpdateError> {
+                self.inner.set_image(daemon_exe, data_dir)
+            }
+
+            fn start_healthy(&self, start: Duration, settle: Duration) -> Result<(), UpdateError> {
+                self.inner.start_healthy(start, settle)?;
+                fs::remove_file(&self.state_path).expect("remove state");
+                fs::create_dir(&self.state_path).expect("block the state file");
+                Ok(())
+            }
+        }
+
+        let fx = fixture();
+        let paths = &fx.paths;
+        save(
+            paths,
+            &InstallState {
+                current: Some(old()),
+                previous: None,
+                pending: Some(pending(ApplyPhase::Requested)),
+                last_error: None,
+            },
+        );
+        let fake = FakeDaemonService::new(paths, &old());
+        let service = RecordBlocked {
+            inner: &fake,
+            state_path: paths.install_state(),
+        };
+
+        apply(paths, &new(), "req-1", &service).expect_err("the record cannot be written");
+
         assert_eq!(
             fs::canonicalize(paths.current_link()).expect("link resolves"),
             fs::canonicalize(paths.version_root(&new())).expect("new tree")
@@ -732,6 +883,10 @@ mod tests {
         let data = paths.data_dir();
         assert_eq!(fs::read(data.join(DB)).expect("db"), b"schema-1");
         assert!(
+            !paths.db_backup(&new()).exists(),
+            "the restored backup is deleted"
+        );
+        assert!(
             !data.join(WAL).exists(),
             "wal absent before the swap must go"
         );
@@ -742,6 +897,15 @@ mod tests {
         assert_eq!(
             state.last_error.as_deref(),
             Some("the new version did not start correctly: the new daemon exited")
+        );
+        // The previous version reads why when it starts, and a rollback cut
+        // short after that is still recovered.
+        let read_at_start = service.read_at_start.borrow();
+        let restarted = read_at_start.last().expect("the previous version started");
+        assert_eq!(restarted.last_error, state.last_error);
+        assert_eq!(
+            restarted.pending.as_ref().map(|pending| pending.phase),
+            Some(ApplyPhase::Swapping)
         );
     }
 
@@ -804,9 +968,105 @@ mod tests {
             fs::read(paths.data_dir().join(DB)).expect("db"),
             b"schema-1"
         );
+        assert!(!backup.exists(), "the restored backup is deleted");
         let state = load(paths);
         assert_eq!(state.current, Some(old()));
         assert_eq!(state.pending, None);
+    }
+
+    /// A version tree at `dir/name` whose client holds `content`.
+    #[cfg(windows)]
+    fn tree(dir: &Path, name: &str, content: &[u8]) -> PathBuf {
+        let path = dir.join(name);
+        fs::create_dir_all(&path).expect("tree");
+        fs::write(path.join("antiwire.exe"), content).expect("tree file");
+        path
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn repointing_the_current_link_keeps_the_trees() {
+        let dir = tempfile::tempdir().expect("temp dir");
+        let old_tree = tree(dir.path(), "1.0.0", b"old");
+        let new_tree = tree(dir.path(), "1.1.0", b"new");
+        let link = dir.path().join("current");
+
+        point_current_link(&link, &old_tree).expect("first link");
+        point_current_link(&link, &new_tree).expect("repoint");
+
+        assert_eq!(
+            fs::read(link.join("antiwire.exe")).expect("through"),
+            b"new"
+        );
+        assert_eq!(
+            fs::read(old_tree.join("antiwire.exe")).expect("old"),
+            b"old"
+        );
+        assert!(fs::symlink_metadata(with_suffix(&link, ".new")).is_err());
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn a_failed_repoint_keeps_the_current_link() {
+        let dir = tempfile::tempdir().expect("temp dir");
+        let old_tree = tree(dir.path(), "1.0.0", b"old");
+        let link = dir.path().join("current");
+        point_current_link(&link, &old_tree).expect("first link");
+
+        point_current_link(&link, &dir.path().join("absent")).expect_err("no tree");
+
+        assert_eq!(
+            fs::read(link.join("antiwire.exe")).expect("through"),
+            b"old"
+        );
+        assert!(fs::symlink_metadata(with_suffix(&link, ".new")).is_err());
+    }
+
+    /// A bundle at `dir/name` holding one file with `content`.
+    fn bundle(dir: &Path, name: &str, content: &[u8]) -> PathBuf {
+        let path = dir.join(name);
+        fs::create_dir_all(&path).expect("bundle");
+        fs::write(path.join("Info.plist"), content).expect("bundle file");
+        path
+    }
+
+    #[test]
+    fn swapping_in_a_bundle_replaces_the_app() {
+        let dir = tempfile::tempdir().expect("temp dir");
+        let app = bundle(dir.path(), "Antiwire.app", b"old");
+        let staged = bundle(dir.path(), "Antiwire.app.new", b"new");
+        let replaced = dir.path().join("Antiwire.app.old");
+
+        swap_in(&staged, &app, &replaced).expect("swap");
+
+        assert_eq!(fs::read(app.join("Info.plist")).expect("app"), b"new");
+        assert!(!staged.exists());
+        assert!(!replaced.exists());
+    }
+
+    #[test]
+    fn swapping_in_a_bundle_where_none_was_installs_it() {
+        let dir = tempfile::tempdir().expect("temp dir");
+        let app = dir.path().join("Antiwire.app");
+        let staged = bundle(dir.path(), "Antiwire.app.new", b"new");
+
+        swap_in(&staged, &app, &dir.path().join("Antiwire.app.old")).expect("swap");
+
+        assert_eq!(fs::read(app.join("Info.plist")).expect("app"), b"new");
+    }
+
+    #[test]
+    fn a_failed_swap_puts_the_old_app_back() {
+        let dir = tempfile::tempdir().expect("temp dir");
+        let app = bundle(dir.path(), "Antiwire.app", b"old");
+        // Nothing staged, so moving it into place fails.
+        let staged = dir.path().join("Antiwire.app.new");
+        let replaced = dir.path().join("Antiwire.app.old");
+
+        swap_in(&staged, &app, &replaced).expect_err("nothing to move");
+
+        assert_eq!(fs::read(app.join("Info.plist")).expect("app"), b"old");
+        assert!(!replaced.exists());
     }
 
     #[test]

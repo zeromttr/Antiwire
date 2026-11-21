@@ -7,9 +7,9 @@
 //! caller.
 
 use std::fs::File;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
-use std::time::{Duration, SystemTime};
+use std::time::{Duration, Instant, SystemTime};
 
 use antiwire_downloader::{DownloadClient, DownloadConfig, DownloadError};
 use data_encoding::HEXLOWER;
@@ -23,7 +23,9 @@ use crate::apply::{remove_dir_if_present, remove_file_if_present};
 use crate::channel::Channel;
 use crate::launcher::HelperLauncher;
 use crate::manifest::{self, Manifest, ManifestFile};
-use crate::package::{self, PackageFile, PackageFormat, PackageManifest, PackagePlan};
+use crate::package::{
+    self, InstalledPackage, PackageFile, PackageFormat, PackageManifest, PackagePlan,
+};
 use crate::package_install;
 use crate::state::{new_request_id, ApplyPhase, InstallState, PendingInstall};
 use crate::status::{AvailableRelease, UpdateState, UpdateStatus};
@@ -45,6 +47,12 @@ const FIRST_CHECK_DELAY: Duration = Duration::from_secs(2 * 60);
 /// before treating the install as abandoned. Longer than the helper's stop
 /// budget (`service_control::STOP_TIMEOUT`).
 const HANDOFF_TIMEOUT: Duration = Duration::from_secs(3 * 60);
+
+/// How long a daemon that started during a swap reports `Installing` while the
+/// install state still shows the swap. The helper ends it once the daemon has
+/// stayed up for `service_control::SETTLE_TIME` and the new client is in place;
+/// a swap shown for longer was left by a helper that died.
+const SWAP_FINISH_TIMEOUT: Duration = Duration::from_secs(3 * 60);
 
 /// Largest manifest or signature the daemon will read.
 const MANIFEST_MAX_BYTES: u64 = 64 * 1024;
@@ -100,7 +108,7 @@ impl UpdateSupport {
             return decide_package(&environment, Trust::compiled(), data_dir, format);
         }
         let layout = UpdatePaths::from_daemon_exe(data_dir, daemon_exe);
-        let recorded = layout.as_ref().is_some_and(recorded_as_current);
+        let recorded = layout.as_ref().is_some_and(recorded_as_installed);
         decide(&environment, Trust::compiled(), layout, recorded)
     }
 }
@@ -185,9 +193,13 @@ fn decide_package(
     }
 }
 
-fn recorded_as_current(paths: &UpdatePaths) -> bool {
+/// Read once, at start-up. A daemon an update helper started is still in the
+/// swap at that point, so it must count as installed: otherwise it refuses
+/// installs until it next restarts, and does not recover a swap that a reboot
+/// interrupted.
+fn recorded_as_installed(paths: &UpdatePaths) -> bool {
     match InstallState::load(&paths.install_state()) {
-        Ok(state) => state.current.as_ref() == Some(&product_version()),
+        Ok(state) => state.names_installed(&product_version()),
         Err(error) => {
             warn!(error = %error, "install state could not be read");
             false
@@ -279,7 +291,15 @@ struct Inner {
     checked: bool,
     /// An install has been accepted and has not failed yet.
     installing: bool,
-    /// Cached from the install state so `status` never reads the file.
+    /// Set when this daemon started during a swap, as the version being swapped
+    /// in or the one a rollback put back, or when a swap it handed to the helper
+    /// was still in flight after the handoff. Until this time, or until the
+    /// install state shows the swap ended, the daemon reports `Installing` and
+    /// refuses installs: the swap is not decided yet, and the new client is not
+    /// in place.
+    swap_ends_by: Option<Instant>,
+    /// Cached from the install state, which `status` reads only while a swap
+    /// is in flight.
     last_error: Option<String>,
     /// The channel `available` and `checked` were found on. A result from
     /// another channel is not shown or installed.
@@ -288,6 +308,9 @@ struct Inner {
     last_checked: Option<SystemTime>,
     /// Why the last check could not read the feeds, until one succeeds.
     check_error: Option<String>,
+    /// The channel `last_checked` and `check_error` are about. Unlike
+    /// `checked_channel`, it moves with a check that read no feed.
+    last_check_channel: Option<Channel>,
 }
 
 impl UpdateService {
@@ -308,7 +331,7 @@ impl UpdateService {
         if let UpdateSupport::Supported { paths, .. } | UpdateSupport::Package { paths, .. } =
             &support
         {
-            recover_install_state(paths, launcher.as_ref(), &mut inner);
+            recover_install_state(paths, &mut inner);
         }
         Arc::new(Self {
             support,
@@ -334,8 +357,10 @@ impl UpdateService {
     #[must_use]
     pub fn status(&self) -> UpdateStatus {
         let channel = (self.channel)();
-        let inner = self.inner.lock();
+        let mut inner = self.inner.lock();
+        let swapping = self.swap_in_flight(&mut inner);
         let fresh = inner.checked_channel == Some(channel);
+        let checked_this_channel = inner.last_check_channel == Some(channel);
         let available =
             inner
                 .available
@@ -348,7 +373,7 @@ impl UpdateService {
         let (state, detail) = match &self.support {
             UpdateSupport::Unsupported { reason, .. } => (UpdateState::Unsupported, reason.clone()),
             UpdateSupport::Supported { .. } | UpdateSupport::Package { .. } => {
-                if inner.installing {
+                if inner.installing || swapping {
                     (UpdateState::Installing, String::new())
                 } else if let Some(error) = &inner.last_error {
                     (UpdateState::Failed, error.clone())
@@ -367,8 +392,13 @@ impl UpdateService {
             available,
             detail,
             channel,
-            last_checked: inner.last_checked,
-            check_error: inner.check_error.clone().unwrap_or_default(),
+            // A check of the channel the user left says nothing about this one.
+            last_checked: inner.last_checked.filter(|_| checked_this_channel),
+            check_error: inner
+                .check_error
+                .clone()
+                .filter(|_| checked_this_channel)
+                .unwrap_or_default(),
         }
     }
 
@@ -433,7 +463,7 @@ impl UpdateService {
                     });
                 }
             };
-            if inner.installing {
+            if inner.installing || self.swap_in_flight(&mut inner) {
                 return Err(UpdateError::AlreadyInstalling);
             }
             inner.installing = true;
@@ -453,6 +483,34 @@ impl UpdateService {
             service.run_install(paths, trust, release).await;
         });
         Ok(())
+    }
+
+    /// Whether the swap this daemon started during is still in flight. Reads the
+    /// install state until it shows the swap ended, then keeps the reason the
+    /// helper recorded, if the swap failed.
+    fn swap_in_flight(&self, inner: &mut Inner) -> bool {
+        let Some(ends_by) = inner.swap_ends_by else {
+            return false;
+        };
+        let (UpdateSupport::Supported { paths, .. } | UpdateSupport::Package { paths, .. }) =
+            &self.support
+        else {
+            inner.swap_ends_by = None;
+            return false;
+        };
+        match InstallState::load(&paths.install_state()) {
+            Ok(state) if state.swapping() && Instant::now() < ends_by => true,
+            Ok(state) => {
+                inner.swap_ends_by = None;
+                inner.last_error = state.last_error;
+                false
+            }
+            Err(error) => {
+                warn!(error = %error, "install state could not be read");
+                inner.swap_ends_by = None;
+                false
+            }
+        }
     }
 
     fn trust(&self) -> Option<&Trust> {
@@ -513,15 +571,43 @@ impl UpdateService {
             }
             results.push((feed, result));
         }
-        let outcome = combine_feeds(channel, results);
+        self.record_check(channel, combine_feeds(channel, results));
+    }
 
+    /// Keeps what a check of `channel` found.
+    ///
+    /// A failed install is shown so that it can be retried. A check that finds
+    /// nothing to retry, because the release was withdrawn or the user moved to
+    /// a channel with nothing newer, drops the failure, from the install state
+    /// too, so it does not come back at the next start.
+    fn record_check(&self, channel: Channel, outcome: FeedOutcome) {
         let mut inner = self.inner.lock();
         inner.last_checked = Some(SystemTime::now());
         inner.check_error = outcome.error;
-        if outcome.read {
-            inner.checked = true;
-            inner.checked_channel = Some(channel);
-            inner.available = outcome.offered;
+        inner.last_check_channel = Some(channel);
+        if !outcome.read {
+            return;
+        }
+        inner.checked = true;
+        inner.checked_channel = Some(channel);
+        inner.available = outcome.offered;
+        if inner.available.is_some()
+            || inner.last_error.is_none()
+            || inner.installing
+            || self.swap_in_flight(&mut inner)
+        {
+            return;
+        }
+        inner.last_error = None;
+        if let UpdateSupport::Supported { paths, .. } | UpdateSupport::Package { paths, .. } =
+            &self.support
+        {
+            // Under the lock, so no install request can start until it is written.
+            if let Err(error) = update_install_state(&paths.install_state(), |state| {
+                state.last_error = None;
+            }) {
+                warn!(error = %error, "the install failure could not be cleared");
+            }
         }
     }
 
@@ -614,8 +700,13 @@ impl UpdateService {
             }
             Err(error) => {
                 warn!(version = %version, error = %error, "update install failed");
-                if let Err(cleanup) = remove_dir_if_present(&paths.incoming(&version)) {
-                    warn!(error = %cleanup, "partial update could not be removed");
+                // The helper did not start, so nothing reads the download. A
+                // verified copy is as large as the release, and only a later
+                // successful update would otherwise remove it.
+                for download in [paths.incoming(&version), paths.verified(&version)] {
+                    if let Err(cleanup) = remove_dir_if_present(&download) {
+                        warn!(error = %cleanup, "the failed update's download could not be removed");
+                    }
                 }
                 self.record_failure(&paths, &error);
                 self.inner.lock().installing = false;
@@ -639,8 +730,14 @@ impl UpdateService {
             .await?;
 
         let verified = paths.verified(version);
-        replace_dir(&incoming, &verified)?;
-        stage_and_launch(paths, manifest, &verified, self.launcher.as_ref())
+        let paths = paths.clone();
+        let manifest = manifest.clone();
+        let launcher = Arc::clone(&self.launcher);
+        off_runtime(verified.clone(), move || {
+            replace_dir(&incoming, &verified)?;
+            stage_and_launch(&paths, &manifest, &verified, launcher.as_ref())
+        })
+        .await
     }
 
     /// Downloads the new release's package and the running version's package,
@@ -661,6 +758,11 @@ impl UpdateService {
             .map_err(|error| UpdateError::io("create", &incoming, error))?;
         self.download_asset(trust, version, package.into(), &incoming)
             .await?;
+        InstalledPackage {
+            version: version.clone(),
+            file: package.clone(),
+        }
+        .store(&incoming)?;
 
         // Without it a failed install cannot go back, but the user asked for the
         // update and the new package is verified, so the install goes ahead.
@@ -683,8 +785,14 @@ impl UpdateService {
         .store(&incoming)?;
 
         let verified = paths.verified(version);
-        replace_dir(&incoming, &verified)?;
-        stage_package_and_launch(paths, version, self.launcher.as_ref())
+        let paths = paths.clone();
+        let version = version.clone();
+        let launcher = Arc::clone(&self.launcher);
+        off_runtime(verified.clone(), move || {
+            replace_dir(&incoming, &verified)?;
+            stage_package_and_launch(&paths, &version, launcher.as_ref())
+        })
+        .await
     }
 
     /// Puts the running version's package in `dir`: the copy kept by the last
@@ -699,6 +807,25 @@ impl UpdateService {
         dir: &Path,
     ) -> Result<String, UpdateError> {
         let running = product_version();
+        let kept = {
+            let (paths, running, platform, dir) = (
+                paths.clone(),
+                running.clone(),
+                platform.to_owned(),
+                dir.to_path_buf(),
+            );
+            off_runtime(paths.installed_packages(), move || {
+                Ok(copy_installed_package(
+                    &paths, &running, &platform, format, &dir,
+                ))
+            })
+            .await?
+        };
+        if let Some(name) = kept {
+            return Ok(name);
+        }
+        // A package kept before records were kept is still checked against
+        // the release, if that is still published.
         let manifest = self
             .fetch_package_manifest(trust, &trust.package_manifest_url(&running))
             .await?;
@@ -710,11 +837,19 @@ impl UpdateService {
         }
         let file = manifest.package_for(platform, format)?;
         let kept = paths.installed_packages().join(&file.name);
-        let destination = dir.join(&file.name);
-        if kept_package_matches(&kept, file) {
-            std::fs::copy(&kept, &destination)
-                .map_err(|error| UpdateError::io("copy", &kept, error))?;
-        } else {
+        let reused = {
+            let (kept, destination, expected) = (kept.clone(), dir.join(&file.name), file.clone());
+            off_runtime(kept.clone(), move || {
+                if !kept_package_matches(&kept, &expected) {
+                    return Ok(false);
+                }
+                std::fs::copy(&kept, &destination)
+                    .map_err(|error| UpdateError::io("copy", &kept, error))?;
+                Ok(true)
+            })
+            .await?
+        };
+        if !reused {
             self.download_asset(trust, &running, file.into(), dir)
                 .await?;
         }
@@ -767,23 +902,31 @@ impl UpdateService {
         Ok(())
     }
 
-    /// Ends `Installing` when the helper did not take the request: it refused
-    /// it, or exited before stopping this daemon. A request the helper accepted
-    /// (`Swapping`) is left to the helper.
+    /// Ends `Installing` once the helper has had time to stop this daemon.
+    ///
+    /// A request the helper never took, because it refused it or exited first,
+    /// is cleared and reported. A request it took (`Swapping`) without stopping
+    /// this daemon means the helper died or hung. The swap is handed to the
+    /// recovery helper, which leaves it alone while the helper still holds its
+    /// lock, and this daemon follows the swap as it would one it started
+    /// during.
     fn reconcile_after_handoff(&self, paths: &UpdatePaths) {
         let path = paths.install_state();
         let mut state = match InstallState::load(&path) {
             Ok(state) => state,
             Err(error) => {
                 warn!(error = %error, "install state could not be read");
+                let mut inner = self.inner.lock();
+                inner.last_error = Some(error.to_string());
+                inner.installing = false;
                 return;
             }
         };
-        if state
-            .pending
-            .as_ref()
-            .is_some_and(|pending| pending.phase == ApplyPhase::Swapping)
-        {
+        if state.swapping() {
+            recover_interrupted_install(paths.data_dir(), self.launcher.as_ref());
+            let mut inner = self.inner.lock();
+            inner.swap_ends_by = Some(Instant::now() + SWAP_FINISH_TIMEOUT);
+            inner.installing = false;
             return;
         }
         if state.pending.take().is_some() {
@@ -938,8 +1081,67 @@ fn kept_package_matches(kept: &Path, file: &PackageFile) -> bool {
         && sha256_hex(kept).is_ok_and(|hash| hash == file.sha256)
 }
 
-/// Finishes or abandons an install that the previous daemon left behind.
-fn recover_install_state(paths: &UpdatePaths, launcher: &dyn HelperLauncher, inner: &mut Inner) {
+/// Copies the package the last update kept into `dir`, when its record says it
+/// is `running`'s package for `platform` in `format` and it still hashes to
+/// what the record says. Returns its file name.
+///
+/// This needs no network, so it works after that version's release is gone.
+fn copy_installed_package(
+    paths: &UpdatePaths,
+    running: &Version,
+    platform: &str,
+    format: PackageFormat,
+    dir: &Path,
+) -> Option<String> {
+    let kept = paths.installed_packages();
+    let record = InstalledPackage::load(&kept).ok()?;
+    let file = &record.file;
+    if record.version != *running || file.platform != platform || file.format != format {
+        return None;
+    }
+    let source = kept.join(&file.name);
+    if !kept_package_matches(&source, file) {
+        return None;
+    }
+    match std::fs::copy(&source, dir.join(&file.name)) {
+        Ok(_) => Some(file.name.clone()),
+        Err(error) => {
+            warn!(error = %error, "the kept package could not be copied");
+            None
+        }
+    }
+}
+
+/// Starts the recovery helper when the install state shows a swap in flight.
+///
+/// The daemon calls this first at start-up, before anything that can fail. A
+/// version that a reboot left mid-swap may fail before it builds its update
+/// service, and would otherwise be left in place, broken, with nothing to roll
+/// it back. While the swap's own helper is still running, the recovery helper
+/// finds its lock held and leaves the swap to it, so starting one without
+/// checking is safe.
+pub fn recover_interrupted_install(data_dir: &Path, launcher: &dyn HelperLauncher) {
+    match InstallState::load(&UpdatePaths::install_state_in(data_dir)) {
+        Ok(state) if state.swapping() => {}
+        Ok(_) => return,
+        Err(error) => {
+            warn!(error = %error, "install state could not be read");
+            return;
+        }
+    }
+    match std::env::current_exe() {
+        Ok(exe) => {
+            if let Err(error) = launcher.launch_recover(&exe, data_dir) {
+                warn!(error = %error, "could not start the update recovery helper");
+            }
+        }
+        Err(error) => warn!(error = %error, "could not find the daemon executable"),
+    }
+}
+
+/// Picks up an install that the previous daemon left behind. A swap in flight
+/// was handed to the recovery helper by [`recover_interrupted_install`].
+fn recover_install_state(paths: &UpdatePaths, inner: &mut Inner) {
     let path = paths.install_state();
     let mut state = match InstallState::load(&path) {
         Ok(state) => state,
@@ -953,16 +1155,7 @@ fn recover_install_state(paths: &UpdatePaths, launcher: &dyn HelperLauncher, inn
 
     match state.pending.as_ref().map(|pending| pending.phase) {
         Some(ApplyPhase::Swapping) => {
-            // The helper takes its own lock and exits when an apply is still
-            // running, so starting it without checking is safe.
-            match std::env::current_exe() {
-                Ok(exe) => {
-                    if let Err(error) = launcher.launch_recover(&exe, paths.data_dir()) {
-                        warn!(error = %error, "could not start the update recovery helper");
-                    }
-                }
-                Err(error) => warn!(error = %error, "could not find the daemon executable"),
-            }
+            inner.swap_ends_by = Some(Instant::now() + SWAP_FINISH_TIMEOUT);
         }
         Some(ApplyPhase::Requested) => {
             let message =
@@ -994,7 +1187,7 @@ pub(crate) fn stage_and_launch(
     let daemon_exe = paths.daemon_exe(version);
     let client_exe = paths.client_exe(version);
 
-    let copied = copy_verified(
+    let copied = stage_daemon(
         &verified.join(&files.daemon.name),
         &daemon_exe,
         files.daemon,
@@ -1089,6 +1282,21 @@ fn copy_verified(
         return Err(UpdateError::HashMismatch {
             name: file.name.clone(),
         });
+    }
+    Ok(())
+}
+
+/// Puts the daemon into the version tree, executable, since the helper is
+/// started from it. The download is written without the execute bit, and on
+/// Unix the copy keeps the download's mode, so macOS would refuse to run it.
+/// The mode is the installer's (`packaging/macos/install.sh`).
+fn stage_daemon(source: &Path, destination: &Path, file: &ManifestFile) -> Result<(), UpdateError> {
+    copy_verified(source, destination, file)?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt as _;
+        std::fs::set_permissions(destination, std::fs::Permissions::from_mode(0o755))
+            .map_err(|error| UpdateError::io("mark executable", destination, error))?;
     }
     Ok(())
 }
@@ -1218,6 +1426,21 @@ fn sha256_hex(path: &Path) -> Result<String, UpdateError> {
     let mut hasher = Sha256::new();
     std::io::copy(&mut file, &mut hasher).map_err(|error| UpdateError::io("read", path, error))?;
     Ok(HEXLOWER.encode(&hasher.finalize()))
+}
+
+/// Runs `work` on Tokio's blocking pool and returns its result.
+///
+/// Staging an update hashes, copies and unpacks files of a hundred megabytes or
+/// more, and waits on `tar`, `ditto` or `systemd-run`. On a runtime worker that
+/// would hold up the daemon's other tasks for as long. `path` names the work in
+/// the error when it panics or the runtime shuts down under it.
+async fn off_runtime<T: Send + 'static>(
+    path: PathBuf,
+    work: impl FnOnce() -> Result<T, UpdateError> + Send + 'static,
+) -> Result<T, UpdateError> {
+    tokio::task::spawn_blocking(work)
+        .await
+        .map_err(|error| UpdateError::io("stage", path, std::io::Error::other(error)))?
 }
 
 fn update_install_state(
@@ -1569,6 +1792,74 @@ mod tests {
         assert_eq!(applies[0].3, pending.request_id);
     }
 
+    /// The package and record the last update kept in `updates/installed`.
+    fn keep_package(paths: &UpdatePaths, version: &Version, bytes: &[u8]) -> PackageFile {
+        let kept = paths.installed_packages();
+        std::fs::create_dir_all(&kept).expect("installed dir");
+        let file = PackageFile {
+            platform: "linux-x86_64".to_owned(),
+            format: PackageFormat::Deb,
+            name: "antiwire_0.2.0_amd64.deb".to_owned(),
+            sha256: hex(bytes),
+            size: u64::try_from(bytes.len()).expect("size"),
+        };
+        std::fs::write(kept.join(&file.name), bytes).expect("package");
+        InstalledPackage {
+            version: version.clone(),
+            file: file.clone(),
+        }
+        .store(&kept)
+        .expect("record");
+        file
+    }
+
+    /// Its release may be gone: nightly releases are pruned.
+    #[test]
+    fn a_rollback_takes_the_kept_package_without_its_release() {
+        let (_dir, paths) = temp_paths();
+        let running = Version::new(0, 2, 0);
+        let file = keep_package(&paths, &running, b"old package");
+        let dir = tempfile::tempdir().expect("dir");
+
+        let name = copy_installed_package(
+            &paths,
+            &running,
+            "linux-x86_64",
+            PackageFormat::Deb,
+            dir.path(),
+        );
+
+        assert_eq!(name.as_deref(), Some(file.name.as_str()));
+        assert_eq!(
+            std::fs::read(dir.path().join(&file.name)).expect("copy"),
+            b"old package"
+        );
+    }
+
+    #[test]
+    fn a_kept_package_is_taken_only_when_its_record_fits() {
+        let (_dir, paths) = temp_paths();
+        let running = Version::new(0, 2, 0);
+        let file = keep_package(&paths, &running, b"old package");
+        let dir = tempfile::tempdir().expect("dir");
+        let copy = |version: &Version, format: PackageFormat| {
+            copy_installed_package(&paths, version, "linux-x86_64", format, dir.path())
+        };
+
+        assert_eq!(copy(&Version::new(0, 2, 1), PackageFormat::Deb), None);
+        assert_eq!(copy(&running, PackageFormat::Rpm), None);
+        std::fs::write(
+            paths.installed_packages().join(&file.name),
+            b"another package",
+        )
+        .expect("replace");
+        assert_eq!(
+            copy(&running, PackageFormat::Deb),
+            None,
+            "it no longer hashes"
+        );
+    }
+
     #[test]
     fn failed_package_launch_clears_pending() {
         let (_dir, paths) = temp_paths();
@@ -1658,6 +1949,17 @@ mod tests {
             std::fs::read(paths.daemon_exe(&version)).expect("daemon copy"),
             daemon
         );
+        // The helper is started from the staged daemon. The verified copy was
+        // written without the execute bit, as a download is.
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt as _;
+            let mode = std::fs::metadata(paths.daemon_exe(&version))
+                .expect("daemon copy")
+                .permissions()
+                .mode();
+            assert_eq!(mode & 0o777, 0o755);
+        }
         // On macOS the bundle is unpacked, so its executable holds the content.
         let staged_client = if cfg!(target_os = "macos") {
             paths
@@ -1715,36 +2017,188 @@ mod tests {
     fn failed_launch_clears_pending() {
         let (_dir, paths) = temp_paths();
         let version = Version::new(0, 3, 0);
-        let verified = write_verified(&paths, &version, b"new daemon", b"new client");
-        let manifest = manifest_for(&version, b"new daemon", b"new client");
+        // A real client payload, so staging succeeds and the launch is what fails.
+        let client = client_payload(b"new client");
+        let verified = write_verified(&paths, &version, b"new daemon", &client);
+        let manifest = manifest_for(&version, b"new daemon", &client);
         let launcher = RecordingLauncher {
             fail: true,
             ..RecordingLauncher::default()
         };
 
-        assert!(stage_and_launch(&paths, &manifest, &verified, &launcher).is_err());
+        let error = stage_and_launch(&paths, &manifest, &verified, &launcher).expect_err("launch");
+
+        assert!(
+            matches!(
+                error,
+                UpdateError::Io {
+                    action: "start",
+                    ..
+                }
+            ),
+            "failed for another reason: {error}"
+        );
+        assert_eq!(launcher.applies.lock().len(), 1);
         let state = InstallState::load(&paths.install_state()).expect("state");
         assert_eq!(state.pending, None);
     }
 
     #[test]
-    fn recovery_relaunches_swapping_install() {
+    fn a_swap_in_flight_at_start_up_is_handed_to_the_recovery_helper() {
         let (_dir, paths) = temp_paths();
+        store_pending(&paths, ApplyPhase::Swapping);
+        let launcher = RecordingLauncher::default();
+
+        recover_interrupted_install(paths.data_dir(), &launcher);
+
+        assert_eq!(*launcher.recovers.lock(), 1);
+    }
+
+    #[test]
+    fn only_a_swap_in_flight_starts_the_recovery_helper() {
+        let (_dir, paths) = temp_paths();
+        let launcher = RecordingLauncher::default();
+        recover_interrupted_install(paths.data_dir(), &launcher);
+        store_pending(&paths, ApplyPhase::Requested);
+        recover_interrupted_install(paths.data_dir(), &launcher);
+
+        assert_eq!(*launcher.recovers.lock(), 0);
+    }
+
+    /// A daemon a swap started reports `Installing`, so the client does not ask
+    /// to be reopened before the swap ends, and refuses another install.
+    #[test]
+    fn a_daemon_started_during_a_swap_reports_installing_until_it_ends() {
+        let (_dir, paths) = temp_paths();
+        store_pending(&paths, ApplyPhase::Swapping);
+        let launcher = Arc::new(RecordingLauncher::default());
+        let service = UpdateService::new(supported(&paths), launcher.clone());
+        {
+            let mut inner = service.inner.lock();
+            inner.available = Some(Release::Tree(manifest_for(
+                &Version::new(0, 4, 0),
+                b"daemon",
+                b"client",
+            )));
+            inner.checked_channel = Some(Channel::Stable);
+        }
+
+        assert_eq!(service.status().state, UpdateState::Installing);
+        assert!(matches!(
+            service.request_install("0.4.0"),
+            Err(UpdateError::AlreadyInstalling)
+        ));
+        assert_eq!(
+            *launcher.recovers.lock(),
+            0,
+            "recovery is started before the service is built"
+        );
+
+        // The helper records the swap as finished.
         InstallState {
-            pending: Some(PendingInstall {
-                version: Version::new(0, 3, 0),
-                request_id: "id".to_owned(),
-                phase: ApplyPhase::Swapping,
-            }),
+            current: Some(Version::new(0, 3, 0)),
+            ..InstallState::default()
+        }
+        .store(&paths.install_state())
+        .expect("store");
+        assert_eq!(service.status().state, UpdateState::Available);
+    }
+
+    #[test]
+    fn a_daemon_restarted_by_a_rollback_shows_why_once_it_ends() {
+        let (_dir, paths) = temp_paths();
+        store_pending(&paths, ApplyPhase::Swapping);
+        let service = UpdateService::new(supported(&paths), Arc::new(RecordingLauncher::default()));
+        assert_eq!(service.status().state, UpdateState::Installing);
+
+        InstallState {
+            last_error: Some("the new version did not start correctly".to_owned()),
             ..InstallState::default()
         }
         .store(&paths.install_state())
         .expect("store");
 
-        let launcher = Arc::new(RecordingLauncher::default());
-        let _service = UpdateService::new(supported(&paths), launcher.clone());
+        let status = service.status();
+        assert_eq!(status.state, UpdateState::Failed);
+        assert_eq!(status.detail, "the new version did not start correctly");
+    }
 
-        assert_eq!(*launcher.recovers.lock(), 1);
+    #[test]
+    fn a_swap_its_helper_never_finished_stops_showing_as_installing() {
+        let (_dir, paths) = temp_paths();
+        store_pending(&paths, ApplyPhase::Swapping);
+        let service = UpdateService::new(supported(&paths), Arc::new(RecordingLauncher::default()));
+        service.inner.lock().swap_ends_by = Some(Instant::now());
+
+        assert_ne!(service.status().state, UpdateState::Installing);
+    }
+
+    /// A service whose last install failed with "the new daemon exited".
+    fn after_a_failed_install() -> (tempfile::TempDir, UpdatePaths, Arc<UpdateService>) {
+        let (dir, paths) = temp_paths();
+        InstallState {
+            current: Some(Version::new(0, 2, 0)),
+            last_error: Some("the new daemon exited".to_owned()),
+            ..InstallState::default()
+        }
+        .store(&paths.install_state())
+        .expect("store");
+        let service = UpdateService::new(supported(&paths), Arc::new(RecordingLauncher::default()));
+        assert_eq!(service.status().state, UpdateState::Failed);
+        (dir, paths, service)
+    }
+
+    /// The release that failed was withdrawn, or the user moved to a channel
+    /// with nothing newer: there is nothing left to retry.
+    #[test]
+    fn a_check_with_nothing_to_retry_drops_the_failure() {
+        let (_dir, paths, service) = after_a_failed_install();
+
+        service.record_check(
+            Channel::Stable,
+            FeedOutcome {
+                read: true,
+                offered: None,
+                error: None,
+            },
+        );
+
+        assert_eq!(service.status().state, UpdateState::UpToDate);
+        let state = InstallState::load(&paths.install_state()).expect("state");
+        assert_eq!(
+            state.last_error, None,
+            "it does not come back at the next start"
+        );
+    }
+
+    #[test]
+    fn a_failure_stays_while_a_release_can_be_retried_or_the_feed_is_unread() {
+        let (_dir, paths, service) = after_a_failed_install();
+
+        service.record_check(
+            Channel::Stable,
+            FeedOutcome {
+                read: false,
+                offered: None,
+                error: Some("offline".to_owned()),
+            },
+        );
+        assert_eq!(service.status().state, UpdateState::Failed);
+
+        let release = manifest_for(&Version::new(0, 3, 0), b"daemon", b"client");
+        service.record_check(
+            Channel::Stable,
+            FeedOutcome {
+                read: true,
+                offered: Some(Release::Tree(release)),
+                error: None,
+            },
+        );
+        let status = service.status();
+        assert_eq!(status.state, UpdateState::Failed);
+        assert_eq!(status.detail, "the new daemon exited");
+        let state = InstallState::load(&paths.install_state()).expect("state");
+        assert!(state.last_error.is_some());
     }
 
     #[test]
@@ -1944,25 +2398,64 @@ mod tests {
             Arc::new(RecordingLauncher::default()),
             Arc::new(move || *source.lock()),
         );
-        {
-            let mut inner = service.inner.lock();
-            inner.checked = true;
-            inner.checked_channel = Some(Channel::Stable);
-            inner.available = Some(tree_release("0.3.0"));
-        }
+        service.record_check(
+            Channel::Stable,
+            FeedOutcome {
+                read: true,
+                offered: Some(tree_release("0.3.0")),
+                error: Some("the stable feed could not be read: offline".to_owned()),
+            },
+        );
         let status = service.status();
         assert_eq!(status.state, UpdateState::Available);
         assert_eq!(status.channel, Channel::Stable);
+        assert!(status.last_checked.is_some());
+        assert_eq!(
+            status.check_error,
+            "the stable feed could not be read: offline"
+        );
 
         *chosen.lock() = Channel::Beta;
         let status = service.status();
         assert_eq!(status.state, UpdateState::Unknown);
         assert_eq!(status.available, None);
         assert_eq!(status.channel, Channel::Beta);
+        assert_eq!(
+            status.last_checked, None,
+            "the beta feeds were never checked"
+        );
+        assert_eq!(status.check_error, "");
         assert!(matches!(
             service.request_install("0.3.0"),
             Err(UpdateError::VersionMismatch { .. })
         ));
+    }
+
+    /// An install that fails before the helper starts leaves no download.
+    #[tokio::test]
+    async fn a_failed_install_removes_its_download() {
+        let (_dir, paths) = temp_paths();
+        let service = UpdateService::new(supported(&paths), Arc::new(RecordingLauncher::default()));
+        let version = Version::new(0, 3, 0);
+        // Left by an earlier attempt that got as far as verifying the files.
+        let verified = paths.verified(&version);
+        std::fs::create_dir_all(&verified).expect("verified dir");
+        std::fs::write(verified.join("antiwire-ui.zip"), b"client").expect("verified file");
+        service.inner.lock().installing = true;
+        // No files for this platform, so the install fails before it downloads.
+        let release = Release::Tree(Manifest {
+            version: version.clone(),
+            notes: String::new(),
+            files: Vec::new(),
+        });
+
+        Arc::clone(&service)
+            .run_install(paths.clone(), test_trust(), release)
+            .await;
+
+        assert!(!verified.exists());
+        assert!(!paths.incoming(&version).exists());
+        assert_eq!(service.status().state, UpdateState::Failed);
     }
 
     #[tokio::test]
@@ -2062,17 +2555,44 @@ mod tests {
         assert_eq!(state.pending, None);
     }
 
+    /// The helper took the request but never stopped this daemon: it died or
+    /// hung after recording the swap.
     #[test]
-    fn swap_in_progress_is_left_to_the_helper() {
+    fn a_swap_whose_helper_never_stopped_the_daemon_goes_to_recovery() {
         let (_dir, paths) = temp_paths();
-        let service = UpdateService::new(supported(&paths), Arc::new(RecordingLauncher::default()));
+        let launcher = Arc::new(RecordingLauncher::default());
+        let service = UpdateService::new(supported(&paths), launcher.clone());
         store_pending(&paths, ApplyPhase::Swapping);
         service.inner.lock().installing = true;
 
         service.reconcile_after_handoff(&paths);
 
+        assert_eq!(*launcher.recovers.lock(), 1);
         assert_eq!(service.status().state, UpdateState::Installing);
         let state = InstallState::load(&paths.install_state()).expect("state");
-        assert!(state.pending.is_some());
+        assert!(state.pending.is_some(), "the swap is left to the helpers");
+
+        // The recovery rolls the swap back and records why.
+        InstallState {
+            last_error: Some("the swap to 0.3.0 was interrupted".to_owned()),
+            ..InstallState::default()
+        }
+        .store(&paths.install_state())
+        .expect("store");
+        let status = service.status();
+        assert_eq!(status.state, UpdateState::Failed);
+        assert_eq!(status.detail, "the swap to 0.3.0 was interrupted");
+    }
+
+    #[test]
+    fn an_unreadable_install_state_ends_installing() {
+        let (_dir, paths) = temp_paths();
+        let service = UpdateService::new(supported(&paths), Arc::new(RecordingLauncher::default()));
+        std::fs::create_dir(paths.install_state()).expect("block the state file");
+        service.inner.lock().installing = true;
+
+        service.reconcile_after_handoff(&paths);
+
+        assert_eq!(service.status().state, UpdateState::Failed);
     }
 }

@@ -8,12 +8,13 @@
 //! interrupted upgrade left half-configured.
 
 use std::ffi::OsString;
-use std::path::{Path, PathBuf};
+use std::path::Path;
 use std::process::Command;
 
 use semver::Version;
 
 use crate::package::PackageFormat;
+use crate::system_program::{require_system_program, system_program};
 use crate::UpdateError;
 
 /// The package name in `packaging/linux/nfpm.yaml`.
@@ -79,7 +80,7 @@ impl PackageInstaller for SystemPackageInstaller {
         rollback: bool,
     ) -> Result<(), UpdateError> {
         let invocation = install_invocation(format, package, rollback, &|name| {
-            find_program(name).is_some()
+            system_program(name).is_some()
         });
         let output = invocation.output()?;
         if output.status.success() {
@@ -108,7 +109,7 @@ pub fn owner_format(daemon_exe: &Path) -> Option<PackageFormat> {
             .filter(|output| output.status.success())
             .is_some_and(|output| parse(&String::from_utf8_lossy(&output.stdout)))
     };
-    if find_program("dpkg-query").is_some()
+    if system_program("dpkg-query").is_some()
         && owned(
             Invocation::new("dpkg-query").arg("-S").arg(daemon_exe),
             dpkg_search_names_package,
@@ -116,7 +117,7 @@ pub fn owner_format(daemon_exe: &Path) -> Option<PackageFormat> {
     {
         return Some(PackageFormat::Deb);
     }
-    if find_program("rpm").is_some()
+    if system_program("rpm").is_some()
         && owned(
             Invocation::new("rpm")
                 .args(["-qf", "--qf", "%{NAME}\\n"])
@@ -148,23 +149,23 @@ fn dpkg_search_names_package(stdout: &str) -> bool {
 /// appear as `0.3.0~beta.1` or `0.3.0_beta.1`, and Debian versions may carry an
 /// epoch (`1:`) or a numeric revision (`-1`). All map back to the release
 /// version.
+///
+/// The revision follows the last hyphen, and is dropped before `~` and `_`
+/// become hyphens. Afterwards it could not be told apart: semver accepts
+/// `0.3.0-beta.1-1` as the prerelease `beta.1-1`.
 #[must_use]
 pub fn parse_package_version(raw: &str) -> Option<Version> {
     let raw = raw.trim();
     let raw = raw.split_once(':').map_or(raw, |(_, rest)| rest);
-    let semver = raw.replace(['~', '_'], "-");
-    if let Ok(version) = Version::parse(&semver) {
-        // A purely numeric "prerelease" is a Debian revision, not a semver one.
-        if !version.pre.is_empty() && version.pre.as_str().bytes().all(|b| b.is_ascii_digit()) {
-            return Some(Version::new(version.major, version.minor, version.patch));
+    let upstream = match raw.rsplit_once('-') {
+        Some((upstream, revision))
+            if !revision.is_empty() && revision.bytes().all(|byte| byte.is_ascii_digit()) =>
+        {
+            upstream
         }
-        return Some(version);
-    }
-    let (upstream, revision) = semver.rsplit_once('-')?;
-    if revision.bytes().all(|byte| byte.is_ascii_digit()) {
-        return parse_package_version(upstream);
-    }
-    None
+        _ => raw,
+    };
+    Version::parse(&upstream.replace(['~', '_'], "-")).ok()
 }
 
 /// One command to run, kept as data so the choice of command is tested.
@@ -204,7 +205,8 @@ impl Invocation {
     }
 
     fn output(&self) -> Result<std::process::Output, UpdateError> {
-        let program = find_program(self.program).unwrap_or_else(|| PathBuf::from(self.program));
+        let program = require_system_program(self.program)
+            .map_err(|error| UpdateError::io("find", self.program, error))?;
         Command::new(&program)
             .args(&self.args)
             .envs(self.env.iter().copied())
@@ -244,24 +246,19 @@ pub(crate) fn install_invocation(
             .args(["-U", "--oldpackage", "--replacepkgs"])
             .arg(package),
         // The package is unsigned; its SHA-256 is in the signed manifest and was
-        // checked before this runs, so the front end's own signature check is off.
+        // checked before this runs, so dnf's signature check is off for it, and
+        // only for it: `localpkg_gpgcheck` covers "local packages (packages in a
+        // file, not in a repository)" in DNF4 and DNF5 alike, where
+        // `--nogpgcheck` would also skip the dependencies dnf takes from
+        // repositories (dnf.conf(5), dnf5.conf(5)).
         (PackageFormat::Rpm, false) if available("dnf") => Invocation::new("dnf")
-            .args(["install", "-y", "--nogpgcheck"])
+            .args(["install", "-y", "--setopt=localpkg_gpgcheck=0"])
             .arg(package),
         (PackageFormat::Rpm, false) if available("zypper") => Invocation::new("zypper")
             .args(["--non-interactive", "install", "--allow-unsigned-rpm"])
             .arg(package),
         (PackageFormat::Rpm, false) => Invocation::new("rpm").arg("-U").arg(package),
     }
-}
-
-/// `name` on `PATH`, or in the system directories a service's `PATH` may lack.
-fn find_program(name: &str) -> Option<PathBuf> {
-    let path = std::env::var_os("PATH").unwrap_or_default();
-    std::env::split_paths(&path)
-        .chain(["/usr/sbin", "/usr/bin", "/sbin", "/bin"].map(PathBuf::from))
-        .map(|dir| dir.join(name))
-        .find(|candidate| candidate.is_file())
 }
 
 /// The end of a command's error output, which is where the reason is.
@@ -301,6 +298,12 @@ mod tests {
         assert_eq!(v("0.3.0~beta.1"), Version::parse("0.3.0-beta.1").ok());
         assert_eq!(v("0.3.0-beta.1"), Version::parse("0.3.0-beta.1").ok());
         assert_eq!(v("0.3.0_beta.1"), Version::parse("0.3.0-beta.1").ok());
+        // A Debian revision on a prerelease is not part of the prerelease.
+        assert_eq!(v("0.3.0~beta.1-1"), Version::parse("0.3.0-beta.1").ok());
+        assert_eq!(
+            v("1:0.3.1~nightly.20261102.41-2"),
+            Version::parse("0.3.1-nightly.20261102.41").ok()
+        );
         assert_eq!(v("garbage"), None);
     }
 
@@ -353,7 +356,11 @@ mod tests {
             &only("dnf"),
         ));
         assert_eq!(program, "dnf");
-        assert!(args.contains(&"--nogpgcheck".to_owned()));
+        assert!(args.contains(&"--setopt=localpkg_gpgcheck=0".to_owned()));
+        assert!(
+            !args.iter().any(|arg| arg.contains("nogpgcheck")),
+            "repository packages keep their signature check"
+        );
         let (program, args) = program_and_args(&install_invocation(
             PackageFormat::Rpm,
             rpm,

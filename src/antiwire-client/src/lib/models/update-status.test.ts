@@ -99,6 +99,25 @@ describe('updatesPanelStatus', () => {
     ).toEqual({ kind: 'available', version: '0.3.0' });
   });
 
+  it('asks for a reopen when the daemon is newer than the client, as the footer does', () => {
+    const newerDaemon = { currentVersion: '0.3.0', clientVersion: '0.2.0' };
+    expect(updatesPanelStatus(status({ ...newerDaemon, state: 'unknown' }), false, '')).toEqual({
+      kind: 'reopen',
+      version: '0.3.0',
+    });
+    expect(
+      updatesPanelStatus(
+        status({ ...newerDaemon, state: 'available', availableVersion: '0.4.0' }),
+        false,
+        '',
+      ).kind,
+    ).toBe('reopen');
+    expect(
+      updatesPanelStatus(status({ ...newerDaemon, state: 'installing' }), false, '').kind,
+    ).toBe('installing');
+    expect(updatesPanelStatus(status(newerDaemon), true, '').kind).toBe('checking');
+  });
+
   it('says why the feeds could not be read when nothing is offered', () => {
     expect(updatesPanelStatus(status({ checkError: 'the beta feed: 404' }), false, '')).toEqual({
       kind: 'check_error',
@@ -148,12 +167,18 @@ describe('updateFooterView', () => {
     });
   });
 
-  it('offers a retry with the failure detail', () => {
+  it('offers a retry when a release is there to try again', () => {
     expect(
       updateFooterView(
         status({ state: 'failed', availableVersion: '0.3.0', detail: 'Download failed' }),
       ),
-    ).toEqual({ kind: 'failed', version: '0.3.0', detail: 'Download failed' });
+    ).toEqual({ kind: 'retry', version: '0.3.0' });
+  });
+
+  it('reports a failure without a retry before a release is known', () => {
+    expect(
+      updateFooterView(status({ state: 'failed', availableVersion: '', detail: 'Rolled back' })),
+    ).toEqual({ kind: 'failed', detail: 'Rolled back' });
   });
 
   it('shows the version for an unsupported install only when it is newer than the client', () => {
@@ -213,7 +238,7 @@ describe('updateFooterView', () => {
     it('puts a failure above an available release', () => {
       expect(
         updateFooterView(status({ state: 'failed', availableVersion: '0.3.0', detail: 'x' })).kind,
-      ).toBe('failed');
+      ).toBe('retry');
     });
   });
 });

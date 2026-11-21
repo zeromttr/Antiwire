@@ -10,6 +10,7 @@ use std::process::{Command, Output};
 use std::time::{Duration, Instant};
 
 use super::{DaemonService, POLL_INTERVAL};
+use crate::system_program::require_system_program;
 use crate::UpdateError;
 
 /// The unit in `packaging/linux/antiwire-daemon.service`.
@@ -134,6 +135,18 @@ impl DaemonService for SystemdDaemonService {
         if !enable.status.success() {
             return Err(command_error("enable the daemon unit", &enable));
         }
+        // A build that kept crashing, restarted by `Restart=on-failure`, the
+        // package scripts and the swap, can leave the unit over its start rate
+        // limit, and systemd then refuses this start. `reset-failed` "also
+        // resets ... the start rate limit counter" (systemctl(1)). A failure
+        // here is only logged: the start below reports what matters.
+        let reset = systemctl(&["reset-failed", UNIT])?;
+        if !reset.status.success() {
+            tracing::warn!(
+                error = %String::from_utf8_lossy(&reset.stderr).trim(),
+                "could not reset the daemon unit's failed state"
+            );
+        }
         let start = systemctl(&["start", UNIT])?;
         if !start.status.success() {
             return Err(UpdateError::Unhealthy(format!(
@@ -170,7 +183,9 @@ impl DaemonService for SystemdDaemonService {
 }
 
 fn systemctl(args: &[&str]) -> Result<Output, UpdateError> {
-    Command::new("systemctl")
+    let systemctl = require_system_program("systemctl")
+        .map_err(|error| UpdateError::io("find", "systemctl", error))?;
+    Command::new(systemctl)
         .args(args)
         .stdin(std::process::Stdio::null())
         .output()
