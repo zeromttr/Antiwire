@@ -9,8 +9,9 @@
 //! 3. Copy the database files (`antiwire.libsql` and any `-wal` / `-shm`
 //!    beside it) to `db-backup/{version}`.
 //! 4. Point the service at the new tree and start it until healthy.
-//! 5. Success: `previous = current`, `current = version`, clear `pending`,
-//!    delete version trees and staging older than `previous`.
+//! 5. Success: put the new client in place, then `previous = current`,
+//!    `current = version`, clear `pending`, and delete version trees and
+//!    staging older than `previous`.
 //! 6. Failure: stop, restore the database copy and delete it,
 //!    point back at `previous`, set `last_error`, start, clear `pending`.
 
@@ -140,17 +141,19 @@ fn commit(
     version: &Version,
     current: &Version,
 ) -> Result<(), UpdateError> {
-    state.previous = Some(current.clone());
-    state.current = Some(version.clone());
-    state.pending = None;
-    state.last_error = None;
-    state.store(&paths.install_state())?;
-    // A failure leaves the user launching the previous version's client, which
+    // Before the swap is recorded as finished, which is when the new daemon
+    // tells the client to reopen: the reopened client must be the new one. A
+    // failure leaves the user launching the previous version's client, which
     // keeps working until a later update removes that tree, so it is logged
     // rather than undoing a healthy install.
     if let Err(error) = publish_client(paths, version) {
         tracing::warn!(error = %error, "the new client was not published");
     }
+    state.previous = Some(current.clone());
+    state.current = Some(version.clone());
+    state.pending = None;
+    state.last_error = None;
+    state.store(&paths.install_state())?;
     clean_up(paths, state, version);
     tracing::info!(%version, "update installed");
     Ok(())
@@ -726,6 +729,63 @@ mod tests {
         assert!(!paths.db_backup(&new()).exists());
         // The shortcut's link now leads into the new tree.
         #[cfg(windows)]
+        assert_eq!(
+            fs::canonicalize(paths.current_link()).expect("link resolves"),
+            fs::canonicalize(paths.version_root(&new())).expect("new tree")
+        );
+    }
+
+    /// The new daemon tells the client to reopen once the swap is recorded as
+    /// finished, so the new client has to be in place by then. Recording is
+    /// made to fail here to show which came first.
+    #[cfg(windows)]
+    #[test]
+    fn the_new_client_is_in_place_before_the_swap_is_recorded() {
+        struct RecordBlocked<'a> {
+            inner: &'a FakeDaemonService,
+            state_path: PathBuf,
+        }
+
+        impl DaemonService for RecordBlocked<'_> {
+            fn stop(&self, timeout: Duration) -> Result<(), UpdateError> {
+                self.inner.stop(timeout)
+            }
+
+            fn image(&self) -> Result<PathBuf, UpdateError> {
+                self.inner.image()
+            }
+
+            fn set_image(&self, daemon_exe: &Path, data_dir: &Path) -> Result<(), UpdateError> {
+                self.inner.set_image(daemon_exe, data_dir)
+            }
+
+            fn start_healthy(&self, start: Duration, settle: Duration) -> Result<(), UpdateError> {
+                self.inner.start_healthy(start, settle)?;
+                fs::remove_file(&self.state_path).expect("remove state");
+                fs::create_dir(&self.state_path).expect("block the state file");
+                Ok(())
+            }
+        }
+
+        let fx = fixture();
+        let paths = &fx.paths;
+        save(
+            paths,
+            &InstallState {
+                current: Some(old()),
+                previous: None,
+                pending: Some(pending(ApplyPhase::Requested)),
+                last_error: None,
+            },
+        );
+        let fake = FakeDaemonService::new(paths, &old());
+        let service = RecordBlocked {
+            inner: &fake,
+            state_path: paths.install_state(),
+        };
+
+        apply(paths, &new(), "req-1", &service).expect_err("the record cannot be written");
+
         assert_eq!(
             fs::canonicalize(paths.current_link()).expect("link resolves"),
             fs::canonicalize(paths.version_root(&new())).expect("new tree")

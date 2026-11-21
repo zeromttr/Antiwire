@@ -9,7 +9,7 @@
 use std::fs::File;
 use std::path::Path;
 use std::sync::Arc;
-use std::time::{Duration, SystemTime};
+use std::time::{Duration, Instant, SystemTime};
 
 use antiwire_downloader::{DownloadClient, DownloadConfig, DownloadError};
 use data_encoding::HEXLOWER;
@@ -45,6 +45,12 @@ const FIRST_CHECK_DELAY: Duration = Duration::from_secs(2 * 60);
 /// before treating the install as abandoned. Longer than the helper's stop
 /// budget (`service_control::STOP_TIMEOUT`).
 const HANDOFF_TIMEOUT: Duration = Duration::from_secs(3 * 60);
+
+/// How long a daemon that started during a swap reports `Installing` while the
+/// install state still shows the swap. The helper ends it once the daemon has
+/// stayed up for `service_control::SETTLE_TIME` and the new client is in place;
+/// a swap shown for longer was left by a helper that died.
+const SWAP_FINISH_TIMEOUT: Duration = Duration::from_secs(3 * 60);
 
 /// Largest manifest or signature the daemon will read.
 const MANIFEST_MAX_BYTES: u64 = 64 * 1024;
@@ -283,7 +289,14 @@ struct Inner {
     checked: bool,
     /// An install has been accepted and has not failed yet.
     installing: bool,
-    /// Cached from the install state so `status` never reads the file.
+    /// Set when this daemon started during a swap, as the version being swapped
+    /// in or the one a rollback put back. Until this time, or until the install
+    /// state shows the swap ended, the daemon reports `Installing` and refuses
+    /// installs: the helper is still deciding whether this daemon stays, and the
+    /// new client is not in place yet.
+    swap_ends_by: Option<Instant>,
+    /// Cached from the install state, which `status` reads only while a swap
+    /// is in flight.
     last_error: Option<String>,
     /// The channel `available` and `checked` were found on. A result from
     /// another channel is not shown or installed.
@@ -338,7 +351,8 @@ impl UpdateService {
     #[must_use]
     pub fn status(&self) -> UpdateStatus {
         let channel = (self.channel)();
-        let inner = self.inner.lock();
+        let mut inner = self.inner.lock();
+        let swapping = self.swap_in_flight(&mut inner);
         let fresh = inner.checked_channel == Some(channel);
         let available =
             inner
@@ -352,7 +366,7 @@ impl UpdateService {
         let (state, detail) = match &self.support {
             UpdateSupport::Unsupported { reason, .. } => (UpdateState::Unsupported, reason.clone()),
             UpdateSupport::Supported { .. } | UpdateSupport::Package { .. } => {
-                if inner.installing {
+                if inner.installing || swapping {
                     (UpdateState::Installing, String::new())
                 } else if let Some(error) = &inner.last_error {
                     (UpdateState::Failed, error.clone())
@@ -437,7 +451,7 @@ impl UpdateService {
                     });
                 }
             };
-            if inner.installing {
+            if inner.installing || self.swap_in_flight(&mut inner) {
                 return Err(UpdateError::AlreadyInstalling);
             }
             inner.installing = true;
@@ -457,6 +471,34 @@ impl UpdateService {
             service.run_install(paths, trust, release).await;
         });
         Ok(())
+    }
+
+    /// Whether the swap this daemon started during is still in flight. Reads the
+    /// install state until it shows the swap ended, then keeps the reason the
+    /// helper recorded, if the swap failed.
+    fn swap_in_flight(&self, inner: &mut Inner) -> bool {
+        let Some(ends_by) = inner.swap_ends_by else {
+            return false;
+        };
+        let (UpdateSupport::Supported { paths, .. } | UpdateSupport::Package { paths, .. }) =
+            &self.support
+        else {
+            inner.swap_ends_by = None;
+            return false;
+        };
+        match InstallState::load(&paths.install_state()) {
+            Ok(state) if state.swapping() && Instant::now() < ends_by => true,
+            Ok(state) => {
+                inner.swap_ends_by = None;
+                inner.last_error = state.last_error;
+                false
+            }
+            Err(error) => {
+                warn!(error = %error, "install state could not be read");
+                inner.swap_ends_by = None;
+                false
+            }
+        }
     }
 
     fn trust(&self) -> Option<&Trust> {
@@ -980,6 +1022,9 @@ fn recover_install_state(paths: &UpdatePaths, inner: &mut Inner) {
     inner.last_error.clone_from(&state.last_error);
 
     match state.pending.as_ref().map(|pending| pending.phase) {
+        Some(ApplyPhase::Swapping) => {
+            inner.swap_ends_by = Some(Instant::now() + SWAP_FINISH_TIMEOUT);
+        }
         Some(ApplyPhase::Requested) => {
             let message =
                 "the daemon stopped before the update started; press Install to try again"
@@ -991,7 +1036,7 @@ fn recover_install_state(paths: &UpdatePaths, inner: &mut Inner) {
                 warn!(error = %error, "install state could not be cleared");
             }
         }
-        Some(ApplyPhase::Swapping) | None => {}
+        None => {}
     }
 }
 
@@ -1763,6 +1808,74 @@ mod tests {
         recover_interrupted_install(paths.data_dir(), &launcher);
 
         assert_eq!(*launcher.recovers.lock(), 0);
+    }
+
+    /// A daemon a swap started reports `Installing`, so the client does not ask
+    /// to be reopened before the swap ends, and refuses another install.
+    #[test]
+    fn a_daemon_started_during_a_swap_reports_installing_until_it_ends() {
+        let (_dir, paths) = temp_paths();
+        store_pending(&paths, ApplyPhase::Swapping);
+        let launcher = Arc::new(RecordingLauncher::default());
+        let service = UpdateService::new(supported(&paths), launcher.clone());
+        {
+            let mut inner = service.inner.lock();
+            inner.available = Some(Release::Tree(manifest_for(
+                &Version::new(0, 4, 0),
+                b"daemon",
+                b"client",
+            )));
+            inner.checked_channel = Some(Channel::Stable);
+        }
+
+        assert_eq!(service.status().state, UpdateState::Installing);
+        assert!(matches!(
+            service.request_install("0.4.0"),
+            Err(UpdateError::AlreadyInstalling)
+        ));
+        assert_eq!(
+            *launcher.recovers.lock(),
+            0,
+            "recovery is started before the service is built"
+        );
+
+        // The helper records the swap as finished.
+        InstallState {
+            current: Some(Version::new(0, 3, 0)),
+            ..InstallState::default()
+        }
+        .store(&paths.install_state())
+        .expect("store");
+        assert_eq!(service.status().state, UpdateState::Available);
+    }
+
+    #[test]
+    fn a_daemon_restarted_by_a_rollback_shows_why_once_it_ends() {
+        let (_dir, paths) = temp_paths();
+        store_pending(&paths, ApplyPhase::Swapping);
+        let service = UpdateService::new(supported(&paths), Arc::new(RecordingLauncher::default()));
+        assert_eq!(service.status().state, UpdateState::Installing);
+
+        InstallState {
+            last_error: Some("the new version did not start correctly".to_owned()),
+            ..InstallState::default()
+        }
+        .store(&paths.install_state())
+        .expect("store");
+
+        let status = service.status();
+        assert_eq!(status.state, UpdateState::Failed);
+        assert_eq!(status.detail, "the new version did not start correctly");
+    }
+
+    #[test]
+    fn a_swap_its_helper_never_finished_stops_showing_as_installing() {
+        let (_dir, paths) = temp_paths();
+        store_pending(&paths, ApplyPhase::Swapping);
+        let service = UpdateService::new(supported(&paths), Arc::new(RecordingLauncher::default()));
+        service.inner.lock().swap_ends_by = Some(Instant::now());
+
+        assert_ne!(service.status().state, UpdateState::Installing);
     }
 
     #[test]
