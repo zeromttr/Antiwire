@@ -240,12 +240,30 @@ fn publish_app_bundle(bundle: &Path, app: &Path) -> Result<(), UpdateError> {
             io::Error::other(format!("ditto exited with {status}")),
         ));
     }
-    if app.exists() {
-        fs::rename(app, &replaced).map_err(|error| UpdateError::io("move", app, error))?;
+    swap_in(&staged, app, &replaced)
+}
+
+/// Puts the bundle at `staged` in place of `app`, keeping the one it replaces
+/// at `replaced` until the new one is in place. When that fails, the old one
+/// goes back, so `app` is missing only between the two renames.
+#[cfg(any(target_os = "macos", test))]
+fn swap_in(staged: &Path, app: &Path, replaced: &Path) -> Result<(), UpdateError> {
+    let replacing = app.exists();
+    if replacing {
+        fs::rename(app, replaced).map_err(|error| UpdateError::io("move", app, error))?;
     }
-    fs::rename(&staged, app).map_err(|error| UpdateError::io("move", &staged, error))?;
-    if let Err(error) = fs::remove_dir_all(&replaced) {
-        tracing::warn!(error = %error, "the replaced app bundle was not removed");
+    if let Err(error) = fs::rename(staged, app) {
+        if replacing {
+            if let Err(restore) = fs::rename(replaced, app) {
+                tracing::error!(error = %restore, "the previous app bundle could not be put back");
+            }
+        }
+        return Err(UpdateError::io("move", staged, error));
+    }
+    if replacing {
+        if let Err(error) = fs::remove_dir_all(replaced) {
+            tracing::warn!(error = %error, "the replaced app bundle was not removed");
+        }
     }
     Ok(())
 }
@@ -957,6 +975,53 @@ mod tests {
         let state = load(paths);
         assert_eq!(state.current, Some(old()));
         assert_eq!(state.pending, None);
+    }
+
+    /// A bundle at `dir/name` holding one file with `content`.
+    fn bundle(dir: &Path, name: &str, content: &[u8]) -> PathBuf {
+        let path = dir.join(name);
+        fs::create_dir_all(&path).expect("bundle");
+        fs::write(path.join("Info.plist"), content).expect("bundle file");
+        path
+    }
+
+    #[test]
+    fn swapping_in_a_bundle_replaces_the_app() {
+        let dir = tempfile::tempdir().expect("temp dir");
+        let app = bundle(dir.path(), "Antiwire.app", b"old");
+        let staged = bundle(dir.path(), "Antiwire.app.new", b"new");
+        let replaced = dir.path().join("Antiwire.app.old");
+
+        swap_in(&staged, &app, &replaced).expect("swap");
+
+        assert_eq!(fs::read(app.join("Info.plist")).expect("app"), b"new");
+        assert!(!staged.exists());
+        assert!(!replaced.exists());
+    }
+
+    #[test]
+    fn swapping_in_a_bundle_where_none_was_installs_it() {
+        let dir = tempfile::tempdir().expect("temp dir");
+        let app = dir.path().join("Antiwire.app");
+        let staged = bundle(dir.path(), "Antiwire.app.new", b"new");
+
+        swap_in(&staged, &app, &dir.path().join("Antiwire.app.old")).expect("swap");
+
+        assert_eq!(fs::read(app.join("Info.plist")).expect("app"), b"new");
+    }
+
+    #[test]
+    fn a_failed_swap_puts_the_old_app_back() {
+        let dir = tempfile::tempdir().expect("temp dir");
+        let app = bundle(dir.path(), "Antiwire.app", b"old");
+        // Nothing staged, so moving it into place fails.
+        let staged = dir.path().join("Antiwire.app.new");
+        let replaced = dir.path().join("Antiwire.app.old");
+
+        swap_in(&staged, &app, &replaced).expect_err("nothing to move");
+
+        assert_eq!(fs::read(app.join("Info.plist")).expect("app"), b"old");
+        assert!(!replaced.exists());
     }
 
     #[test]
