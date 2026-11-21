@@ -1055,7 +1055,7 @@ pub(crate) fn stage_and_launch(
     let daemon_exe = paths.daemon_exe(version);
     let client_exe = paths.client_exe(version);
 
-    let copied = copy_verified(
+    let copied = stage_daemon(
         &verified.join(&files.daemon.name),
         &daemon_exe,
         files.daemon,
@@ -1150,6 +1150,21 @@ fn copy_verified(
         return Err(UpdateError::HashMismatch {
             name: file.name.clone(),
         });
+    }
+    Ok(())
+}
+
+/// Puts the daemon into the version tree, executable, since the helper is
+/// started from it. The download is written without the execute bit, and on
+/// Unix the copy keeps the download's mode, so macOS would refuse to run it.
+/// The mode is the installer's (`packaging/macos/install.sh`).
+fn stage_daemon(source: &Path, destination: &Path, file: &ManifestFile) -> Result<(), UpdateError> {
+    copy_verified(source, destination, file)?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt as _;
+        std::fs::set_permissions(destination, std::fs::Permissions::from_mode(0o755))
+            .map_err(|error| UpdateError::io("mark executable", destination, error))?;
     }
     Ok(())
 }
@@ -1719,6 +1734,17 @@ mod tests {
             std::fs::read(paths.daemon_exe(&version)).expect("daemon copy"),
             daemon
         );
+        // The helper is started from the staged daemon. The verified copy was
+        // written without the execute bit, as a download is.
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt as _;
+            let mode = std::fs::metadata(paths.daemon_exe(&version))
+                .expect("daemon copy")
+                .permissions()
+                .mode();
+            assert_eq!(mode & 0o777, 0o755);
+        }
         // On macOS the bundle is unpacked, so its executable holds the content.
         let staged_client = if cfg!(target_os = "macos") {
             paths
