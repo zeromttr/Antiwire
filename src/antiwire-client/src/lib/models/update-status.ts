@@ -9,7 +9,7 @@ export type UpdateFooterView =
   | { kind: 'available'; version: string }
   | { kind: 'unsupported'; version: string };
 
-/** Foreground refresh cadence; the footer also refreshes on mount and when the window shows. */
+/** Foreground refresh cadence; the footer also refreshes on connecting and when the window shows. */
 export const UPDATE_CHECK_MS = 15 * 60 * 1000;
 /** Refresh cadence while the daemon is installing, so the footer follows the restart. */
 export const UPDATE_INSTALL_POLL_MS = 5_000;

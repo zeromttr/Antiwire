@@ -78,8 +78,14 @@ export function StatusBar({ onShowSetup }: Props) {
 
   const openInstallDialog = () => updates.setInstallDialogOpen(true);
 
+  // The status comes from the daemon, which the shell connects to only after the footer
+  // mounts. A reconnect can also be to a daemon that restarted as another version.
+  const connected = useSelector(daemon, (d) => d.state.connected);
   useEffect(() => {
-    void updates.refresh();
+    if (connected) void updates.refresh();
+  }, [connected]);
+
+  useEffect(() => {
     const onVisibilityChange = () => {
       if (!document.hidden) void updates.refresh();
     };
