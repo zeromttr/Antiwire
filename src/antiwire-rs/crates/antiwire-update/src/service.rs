@@ -1958,14 +1958,28 @@ mod tests {
     fn failed_launch_clears_pending() {
         let (_dir, paths) = temp_paths();
         let version = Version::new(0, 3, 0);
-        let verified = write_verified(&paths, &version, b"new daemon", b"new client");
-        let manifest = manifest_for(&version, b"new daemon", b"new client");
+        // A real client payload, so staging succeeds and the launch is what fails.
+        let client = client_payload(b"new client");
+        let verified = write_verified(&paths, &version, b"new daemon", &client);
+        let manifest = manifest_for(&version, b"new daemon", &client);
         let launcher = RecordingLauncher {
             fail: true,
             ..RecordingLauncher::default()
         };
 
-        assert!(stage_and_launch(&paths, &manifest, &verified, &launcher).is_err());
+        let error = stage_and_launch(&paths, &manifest, &verified, &launcher).expect_err("launch");
+
+        assert!(
+            matches!(
+                error,
+                UpdateError::Io {
+                    action: "start",
+                    ..
+                }
+            ),
+            "failed for another reason: {error}"
+        );
+        assert_eq!(launcher.applies.lock().len(), 1);
         let state = InstallState::load(&paths.install_state()).expect("state");
         assert_eq!(state.pending, None);
     }
