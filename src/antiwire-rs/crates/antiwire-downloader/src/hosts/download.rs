@@ -813,7 +813,7 @@ mod tests {
         let err = download_hosts_list(&client.inner, &download_item, &config)
             .await
             .expect_err("redirect to cloud metadata must be blocked");
-        assert!(matches!(err, crate::DownloadError::Http(_)));
+        assert!(matches!(err, crate::DownloadError::Refused(_)));
     }
 
     #[tokio::test]
@@ -851,7 +851,7 @@ mod tests {
         let err = download_hosts_list(&client.inner, &download_item, &config)
             .await
             .expect_err("redirect loop should be terminated");
-        assert!(matches!(err, crate::DownloadError::Http(_)));
+        assert!(matches!(err, crate::DownloadError::Refused(_)));
     }
 
     #[tokio::test]

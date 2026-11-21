@@ -4,7 +4,7 @@ use thiserror::Error;
 #[derive(Debug, Error)]
 pub enum DownloadError {
     #[error("HTTP request failed: {0}")]
-    Http(#[from] antiwire_http::reqwest::Error),
+    Http(#[source] antiwire_http::HttpError),
     #[error("download refused: {0}")]
     Refused(String),
     #[error("download idle timeout")]
@@ -30,11 +30,11 @@ pub enum DownloadError {
 impl From<antiwire_http::HttpError> for DownloadError {
     fn from(error: antiwire_http::HttpError) -> Self {
         match error {
-            antiwire_http::HttpError::Request(error) => Self::Http(error),
             antiwire_http::HttpError::BodyTooLarge { limit } => Self::SizeLimitExceeded(limit),
             refused @ antiwire_http::HttpError::Refused { .. } => {
                 Self::Refused(refused.to_string())
             }
+            other => Self::Http(other),
         }
     }
 }

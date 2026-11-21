@@ -1,10 +1,9 @@
 //! SDK errors, server message extraction, and `Retry-After` parsing.
 
-use antiwire_http::reqwest;
 use std::fmt;
 use std::time::Duration;
 
-use reqwest::header::HeaderMap;
+use antiwire_http::header::HeaderMap;
 use serde_json::{Map, Value};
 use thiserror::Error;
 use time::format_description::well_known::Rfc2822;
@@ -386,8 +385,7 @@ mod tests {
         decode_error_body, http_error, kind_for_status, message_from_body, parse_retry_after,
         ApiErrorKind, ErrorBody,
     };
-    use antiwire_http::reqwest;
-    use reqwest::header::{HeaderMap, HeaderName, HeaderValue};
+    use antiwire_http::header::{HeaderMap, HeaderName, HeaderValue};
     use serde_json::json;
     use time::format_description::well_known::Rfc2822;
     use time::OffsetDateTime;

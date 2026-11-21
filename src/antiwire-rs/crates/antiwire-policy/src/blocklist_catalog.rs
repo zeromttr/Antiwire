@@ -476,7 +476,7 @@ mod tests {
                 match request.send().await {
                     Ok(response) => {
                         let status = response.status();
-                        if status != antiwire_http::reqwest::StatusCode::OK {
+                        if status != antiwire_http::StatusCode::OK {
                             failures.push(format!("{name}: {url} -> HTTP {status}"));
                         }
                     }

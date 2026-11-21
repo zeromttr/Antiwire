@@ -24,7 +24,7 @@ pub(crate) async fn download_file(
 
     let request = client
         .get(url)?
-        .header(antiwire_http::reqwest::header::ACCEPT_ENCODING, "identity");
+        .header(antiwire_http::header::ACCEPT_ENCODING, "identity");
     let response = send(request, config).await?;
     let writer = AtomicWriter::new(dest_path.to_path_buf());
 

@@ -17,6 +17,7 @@ blocking = ["reqwest/blocking"]
 
 [dependencies]
 bytes = { workspace = true }
+futures-util = { workspace = true }
 reqwest = { workspace = true, features = ["http2"] }
 thiserror = { workspace = true }
 tokio = { workspace = true }
