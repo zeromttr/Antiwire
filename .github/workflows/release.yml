@@ -168,6 +168,9 @@ jobs:
 
       - name: Install Bun
         uses: oven-sh/setup-bun@v2
+        with:
+          # One Bun for CI and developers; `bun check` and `bun fmt` need 1.4 or newer.
+          bun-version-file: .bun-version
 
       - name: Restore Bun packages
         id: bun-cache
@@ -282,6 +285,9 @@ jobs:
 
       - name: Install Bun
         uses: oven-sh/setup-bun@v2
+        with:
+          # One Bun for CI and developers; `bun check` and `bun fmt` need 1.4 or newer.
+          bun-version-file: .bun-version
 
       - name: Restore Bun packages
         id: bun-cache
@@ -407,6 +413,9 @@ jobs:
 
       - name: Install Bun
         uses: oven-sh/setup-bun@v2
+        with:
+          # One Bun for CI and developers; `bun check` and `bun fmt` need 1.4 or newer.
+          bun-version-file: .bun-version
 
       - name: Restore Bun packages
         id: bun-cache
