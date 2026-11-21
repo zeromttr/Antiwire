@@ -81,6 +81,11 @@ impl DaemonService for WindowsDaemonService {
         if status.current_state == ServiceState::Stopped {
             return Ok(());
         }
+        // Not `status.process_id`, which windows-service fills in only for a
+        // running service. A rollback can stop one that is still starting or
+        // already stopping, and its process must be gone before the database is
+        // restored.
+        let process_id = service_process_id(&service)?;
         // A stop already pending would be refused, so only send one when none is in flight.
         if status.current_state != ServiceState::StopPending {
             service
@@ -108,7 +113,7 @@ impl DaemonService for WindowsDaemonService {
 
         // The service reports stopped a moment before its process is gone. The
         // revert of host state runs after that, so wait for the process itself.
-        match status.process_id {
+        match process_id {
             Some(pid) => wait_for_process_exit(
                 pid,
                 deadline.saturating_duration_since(std::time::Instant::now()),
@@ -215,6 +220,57 @@ fn open_service(
         .map_err(|error| service_error("open the Antiwire service", &error))
 }
 
+/// The id of `service`'s process, or `None` when it has none because it is
+/// stopped.
+///
+/// windows-service's `query_status` reads the same structure but reports the
+/// process only for a running service. `QueryServiceStatusEx` with
+/// `SC_STATUS_PROCESS_INFO` fills a `SERVICE_STATUS_PROCESS`, whose
+/// `dwProcessId` is the service's process, and zero once it is stopped:
+/// <https://learn.microsoft.com/en-us/windows/win32/api/winsvc/nf-winsvc-queryservicestatusex>,
+/// <https://learn.microsoft.com/en-us/windows/win32/api/winsvc/ns-winsvc-service_status_process>.
+///
+/// # Errors
+///
+/// [`UpdateError::Service`] when the status cannot be read, for one because
+/// the handle lacks `SERVICE_QUERY_STATUS`.
+#[cfg(windows)]
+#[expect(
+    unsafe_code,
+    reason = "QueryServiceStatusEx: windows-service drops the process id of a service that is not running"
+)]
+fn service_process_id(
+    service: &windows_service::service::Service,
+) -> Result<Option<u32>, UpdateError> {
+    use windows::Win32::System::Services::{
+        QueryServiceStatusEx, SC_HANDLE, SC_STATUS_PROCESS_INFO, SERVICE_STATUS_PROCESS,
+    };
+
+    let mut status = SERVICE_STATUS_PROCESS::default();
+    let mut needed = 0_u32;
+    // SAFETY: `service` owns the handle and keeps it open for the call. The
+    // buffer is `status`, a whole `SERVICE_STATUS_PROCESS` that lives across
+    // the call: exactly what `SC_STATUS_PROCESS_INFO` writes, with its own
+    // alignment, and the slice's length is its size. `needed` is a valid
+    // out-pointer. The structure is read only after the call succeeded.
+    let queried = unsafe {
+        let buffer = std::slice::from_raw_parts_mut(
+            (&raw mut status).cast::<u8>(),
+            std::mem::size_of::<SERVICE_STATUS_PROCESS>(),
+        );
+        QueryServiceStatusEx(
+            SC_HANDLE(service.raw_handle()),
+            SC_STATUS_PROCESS_INFO,
+            Some(buffer),
+            &raw mut needed,
+        )
+    };
+    queried.map_err(|error| {
+        UpdateError::Service(format!("could not read the service status: {error}"))
+    })?;
+    Ok((status.dwProcessId != 0).then_some(status.dwProcessId))
+}
+
 #[cfg(windows)]
 fn service_error(action: &str, error: &windows_service::Error) -> UpdateError {
     UpdateError::Service(format!("could not {action}: {error}"))
@@ -274,5 +330,35 @@ mod tests {
             executable_of(r"C:\aw\antiwire-daemon.exe --data-dir C:\data"),
             PathBuf::from(r"C:\aw\antiwire-daemon.exe")
         );
+    }
+
+    /// The Remote Procedure Call service runs on every Windows machine, and
+    /// any account can read its status.
+    #[cfg(windows)]
+    fn rpc_service(
+        access: windows_service::service::ServiceAccess,
+    ) -> windows_service::service::Service {
+        use windows_service::service_manager::{ServiceManager, ServiceManagerAccess};
+
+        ServiceManager::local_computer(None::<&str>, ServiceManagerAccess::CONNECT)
+            .expect("service manager")
+            .open_service("RpcSs", access)
+            .expect("open RpcSs")
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn reads_the_process_of_a_running_service() {
+        let service = rpc_service(windows_service::service::ServiceAccess::QUERY_STATUS);
+        let reported = service.query_status().expect("status").process_id;
+        assert!(reported.is_some(), "RpcSs is running");
+        assert_eq!(service_process_id(&service).expect("process id"), reported);
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn a_handle_without_status_access_is_refused() {
+        let service = rpc_service(windows_service::service::ServiceAccess::QUERY_CONFIG);
+        assert!(service_process_id(&service).is_err());
     }
 }
