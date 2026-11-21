@@ -85,6 +85,15 @@ impl InstallState {
             .map_err(|error| UpdateError::io("commit", path, error))
     }
 
+    /// Whether a helper has accepted a request and not finished it: `pending`
+    /// in phase [`ApplyPhase::Swapping`].
+    #[must_use]
+    pub fn swapping(&self) -> bool {
+        self.pending
+            .as_ref()
+            .is_some_and(|pending| pending.phase == ApplyPhase::Swapping)
+    }
+
     /// Whether `version` is the installed version: `current`, or the version a
     /// helper is swapping in (`pending` in phase [`ApplyPhase::Swapping`]).
     ///

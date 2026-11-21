@@ -87,7 +87,14 @@ impl UpdatePaths {
 
     #[must_use]
     pub fn install_state(&self) -> PathBuf {
-        self.data_dir.join("install-state.json")
+        Self::install_state_in(&self.data_dir)
+    }
+
+    /// The install state in `data_dir`, for a caller that does not know the
+    /// install's layout yet.
+    #[must_use]
+    pub fn install_state_in(data_dir: &Path) -> PathBuf {
+        data_dir.join("install-state.json")
     }
 
     #[must_use]

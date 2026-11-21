@@ -8,6 +8,7 @@ use std::sync::Arc;
 use antiwire_ipc::{GrpcServer, IpcEndpoint, IpcPaths};
 use antiwire_runtime::AntiwireRuntime;
 use antiwire_tuning::{IPC_SERVER_DRAIN_TIMEOUT, PROCESS_EXIT_BLOCKING_TIMEOUT};
+use antiwire_update::launcher::DetachedLauncher;
 use anyhow::{Context, Result};
 use tracing::{info, warn};
 
@@ -76,6 +77,13 @@ where
     S: Future<Output = ()>,
     R: FnOnce(),
 {
+    // Before anything below that can fail, so an update that a reboot cut
+    // short is rolled back even when the version it left in place cannot
+    // start. Only a release build run by the service manager updates itself.
+    if matches!(host, DaemonHost::Service) && !cfg!(debug_assertions) {
+        antiwire_update::recover_interrupted_install(&data_dir, &DetachedLauncher);
+    }
+
     // Listened to from the start, not only once the daemon runs. A stop that
     // arrives while the daemon waits for its lock or starts up is otherwise
     // acted on late or not at all, and the shutdown future installs its

@@ -312,7 +312,7 @@ impl UpdateService {
         if let UpdateSupport::Supported { paths, .. } | UpdateSupport::Package { paths, .. } =
             &support
         {
-            recover_install_state(paths, launcher.as_ref(), &mut inner);
+            recover_install_state(paths, &mut inner);
         }
         Arc::new(Self {
             support,
@@ -783,11 +783,7 @@ impl UpdateService {
                 return;
             }
         };
-        if state
-            .pending
-            .as_ref()
-            .is_some_and(|pending| pending.phase == ApplyPhase::Swapping)
-        {
+        if state.swapping() {
             return;
         }
         if state.pending.take().is_some() {
@@ -942,8 +938,36 @@ fn kept_package_matches(kept: &Path, file: &PackageFile) -> bool {
         && sha256_hex(kept).is_ok_and(|hash| hash == file.sha256)
 }
 
-/// Finishes or abandons an install that the previous daemon left behind.
-fn recover_install_state(paths: &UpdatePaths, launcher: &dyn HelperLauncher, inner: &mut Inner) {
+/// Starts the recovery helper when the install state shows a swap in flight.
+///
+/// The daemon calls this first at start-up, before anything that can fail. A
+/// version that a reboot left mid-swap may fail before it builds its update
+/// service, and would otherwise be left in place, broken, with nothing to roll
+/// it back. While the swap's own helper is still running, the recovery helper
+/// finds its lock held and leaves the swap to it, so starting one without
+/// checking is safe.
+pub fn recover_interrupted_install(data_dir: &Path, launcher: &dyn HelperLauncher) {
+    match InstallState::load(&UpdatePaths::install_state_in(data_dir)) {
+        Ok(state) if state.swapping() => {}
+        Ok(_) => return,
+        Err(error) => {
+            warn!(error = %error, "install state could not be read");
+            return;
+        }
+    }
+    match std::env::current_exe() {
+        Ok(exe) => {
+            if let Err(error) = launcher.launch_recover(&exe, data_dir) {
+                warn!(error = %error, "could not start the update recovery helper");
+            }
+        }
+        Err(error) => warn!(error = %error, "could not find the daemon executable"),
+    }
+}
+
+/// Picks up an install that the previous daemon left behind. A swap in flight
+/// was handed to the recovery helper by [`recover_interrupted_install`].
+fn recover_install_state(paths: &UpdatePaths, inner: &mut Inner) {
     let path = paths.install_state();
     let mut state = match InstallState::load(&path) {
         Ok(state) => state,
@@ -956,18 +980,6 @@ fn recover_install_state(paths: &UpdatePaths, launcher: &dyn HelperLauncher, inn
     inner.last_error.clone_from(&state.last_error);
 
     match state.pending.as_ref().map(|pending| pending.phase) {
-        Some(ApplyPhase::Swapping) => {
-            // The helper takes its own lock and exits when an apply is still
-            // running, so starting it without checking is safe.
-            match std::env::current_exe() {
-                Ok(exe) => {
-                    if let Err(error) = launcher.launch_recover(&exe, paths.data_dir()) {
-                        warn!(error = %error, "could not start the update recovery helper");
-                    }
-                }
-                Err(error) => warn!(error = %error, "could not find the daemon executable"),
-            }
-        }
         Some(ApplyPhase::Requested) => {
             let message =
                 "the daemon stopped before the update started; press Install to try again"
@@ -979,7 +991,7 @@ fn recover_install_state(paths: &UpdatePaths, launcher: &dyn HelperLauncher, inn
                 warn!(error = %error, "install state could not be cleared");
             }
         }
-        None => {}
+        Some(ApplyPhase::Swapping) | None => {}
     }
 }
 
@@ -1732,23 +1744,25 @@ mod tests {
     }
 
     #[test]
-    fn recovery_relaunches_swapping_install() {
+    fn a_swap_in_flight_at_start_up_is_handed_to_the_recovery_helper() {
         let (_dir, paths) = temp_paths();
-        InstallState {
-            pending: Some(PendingInstall {
-                version: Version::new(0, 3, 0),
-                request_id: "id".to_owned(),
-                phase: ApplyPhase::Swapping,
-            }),
-            ..InstallState::default()
-        }
-        .store(&paths.install_state())
-        .expect("store");
+        store_pending(&paths, ApplyPhase::Swapping);
+        let launcher = RecordingLauncher::default();
 
-        let launcher = Arc::new(RecordingLauncher::default());
-        let _service = UpdateService::new(supported(&paths), launcher.clone());
+        recover_interrupted_install(paths.data_dir(), &launcher);
 
         assert_eq!(*launcher.recovers.lock(), 1);
+    }
+
+    #[test]
+    fn only_a_swap_in_flight_starts_the_recovery_helper() {
+        let (_dir, paths) = temp_paths();
+        let launcher = RecordingLauncher::default();
+        recover_interrupted_install(paths.data_dir(), &launcher);
+        store_pending(&paths, ApplyPhase::Requested);
+        recover_interrupted_install(paths.data_dir(), &launcher);
+
+        assert_eq!(*launcher.recovers.lock(), 0);
     }
 
     #[test]

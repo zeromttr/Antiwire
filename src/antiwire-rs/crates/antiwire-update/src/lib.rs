@@ -27,6 +27,6 @@ pub mod version;
 pub use channel::Channel;
 pub use error::UpdateError;
 pub use paths::UpdatePaths;
-pub use service::{UpdateService, UpdateSupport};
+pub use service::{recover_interrupted_install, UpdateService, UpdateSupport};
 pub use status::{UpdateState, UpdateStatus};
 pub use version::PRODUCT_VERSION;
