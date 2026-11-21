@@ -12,16 +12,16 @@
 //!    reports the new version installed.
 //! 5. Success: `previous = current`, `current = version`, keep the package for
 //!    the next rollback, remove the staging files.
-//! 6. Failure: stop, restore the database, reinstall the previous version's
-//!    package, start, clear `pending`, set `last_error`.
+//! 6. Failure: stop, restore the database, set `last_error`, reinstall the
+//!    previous version's package, start, clear `pending`.
 
 use std::path::Path;
 
 use semver::Version;
 
 use crate::apply::{
-    backup_database, clean_staging, discard_backup, record, record_failure, remove_dir_if_present,
-    restore_database,
+    backup_database, clean_staging, discard_backup, finish_rollback, record, record_failure,
+    record_reason_before_restart, remove_dir_if_present, restore_database,
 };
 use crate::package::{PackageFormat, PackagePlan};
 use crate::package_install::PackageInstaller;
@@ -189,6 +189,9 @@ fn keep_installed_package(paths: &UpdatePaths, package: &Path) -> Result<(), Upd
 /// failed. As on the other platforms, every step is attempted even after an
 /// earlier one fails, except that nothing touches the database while the
 /// service might still be running.
+///
+/// The reason is recorded before the reinstall, because the package's
+/// post-install script starts the daemon.
 fn roll_back(
     paths: &UpdatePaths,
     state: &mut InstallState,
@@ -213,6 +216,7 @@ fn roll_back(
                 restore_database(paths.data_dir(), &backup),
             );
         }
+        record_reason_before_restart(paths, state, cause, &failures);
         match PackagePlan::load(&staged) {
             Ok(PackagePlan {
                 format,
@@ -236,25 +240,7 @@ fn roll_back(
             service.start_healthy(START_TIMEOUT, SETTLE_TIME),
         );
     }
-
-    let mut last_error = cause.to_string();
-    for failure in &failures {
-        last_error.push_str("; ");
-        last_error.push_str(failure);
-    }
-    state.pending = None;
-    state.last_error = Some(last_error);
-    if let Err(error) = state.store(&paths.install_state()) {
-        failures.push(format!("the failure could not be recorded: {error}"));
-    }
-    if failures.is_empty() {
-        Ok(())
-    } else {
-        Err(UpdateError::Service(format!(
-            "rollback failed: {}",
-            failures.join("; ")
-        )))
-    }
+    finish_rollback(paths, state, cause, failures)
 }
 
 #[cfg(test)]
@@ -416,12 +402,23 @@ mod tests {
         *fake.fail_healthy_once.borrow_mut() = true;
         // The new daemon writes to the database before it crashes.
         let database = dir.path().join("antiwire.libsql");
+        let installer = ReadsStateOnRollback {
+            inner: &fake,
+            state_path: paths.install_state(),
+            read: RefCell::new(None),
+        };
         let result = {
             let service = WritesDatabase {
                 inner: &fake,
                 database: &database,
             };
-            apply(&paths, &Version::new(0, 3, 0), REQUEST, &service, &fake)
+            apply(
+                &paths,
+                &Version::new(0, 3, 0),
+                REQUEST,
+                &service,
+                &installer,
+            )
         };
 
         assert!(matches!(result, Err(UpdateError::Unhealthy(_))));
@@ -444,6 +441,19 @@ mod tests {
             .is_some_and(|error| error.contains("crashed")));
         assert_eq!(std::fs::read(&database).expect("database"), b"before");
         assert_eq!(*fake.installed.borrow(), Some(Version::new(0, 2, 0)));
+        // The daemon the reinstall starts reads why, and a rollback cut short
+        // after that is still recovered.
+        let restarted = installer
+            .read
+            .take()
+            .expect("the previous package was reinstalled");
+        assert!(restarted
+            .last_error
+            .is_some_and(|error| error.contains("crashed")));
+        assert_eq!(
+            restarted.pending.map(|pending| pending.phase),
+            Some(ApplyPhase::Swapping)
+        );
     }
 
     #[test]
@@ -500,6 +510,35 @@ mod tests {
         let state = state(&paths);
         assert_eq!(state.pending, None);
         assert_eq!(state.current, Some(Version::new(0, 2, 0)));
+    }
+
+    /// Wraps the fake package manager to read the install state when it
+    /// reinstalls the previous version, whose post-install script starts the
+    /// daemon.
+    struct ReadsStateOnRollback<'a> {
+        inner: &'a Fake,
+        state_path: PathBuf,
+        read: RefCell<Option<InstallState>>,
+    }
+
+    impl PackageInstaller for ReadsStateOnRollback<'_> {
+        fn installed_version(&self, format: PackageFormat) -> Result<Option<Version>, UpdateError> {
+            self.inner.installed_version(format)
+        }
+
+        fn install(
+            &self,
+            format: PackageFormat,
+            package: &Path,
+            rollback: bool,
+        ) -> Result<(), UpdateError> {
+            self.inner.install(format, package, rollback)?;
+            if rollback {
+                let state = InstallState::load(&self.state_path).expect("read state");
+                self.read.replace(Some(state));
+            }
+            Ok(())
+        }
     }
 
     /// Wraps the fake service so starting the new version overwrites the

@@ -12,7 +12,7 @@
 //! 5. Success: `previous = current`, `current = version`, clear `pending`,
 //!    delete version trees and staging older than `previous`.
 //! 6. Failure: stop, restore the database copy, point back at `previous`,
-//!    start, clear `pending`, set `last_error`.
+//!    set `last_error`, start, clear `pending`.
 
 use std::ffi::OsString;
 use std::fs;
@@ -247,7 +247,8 @@ fn publish_app_bundle(bundle: &Path, app: &Path) -> Result<(), UpdateError> {
     Ok(())
 }
 
-/// Puts `current` back in service and records why the swap failed in `state`.
+/// Puts `current` back in service and records why the swap failed in `state`,
+/// before that version starts, so it shows the reason.
 ///
 /// The database copy is restored only when the backup was completed, because
 /// the service must be stopped first. Every step is attempted even after an
@@ -286,21 +287,46 @@ fn roll_back(
             "the previous version could not be pointed at",
             service.set_image(&paths.daemon_exe(current), paths.data_dir()),
         );
+        record_reason_before_restart(paths, state, cause, &failures);
         record(
             &mut failures,
             "the previous version did not start",
             service.start_healthy(START_TIMEOUT, SETTLE_TIME),
         );
     }
+    finish_rollback(paths, state, cause, failures)
+}
 
-    let mut last_error = cause.to_string();
-    for failure in &failures {
-        last_error.push_str("; ");
-        last_error.push_str(failure);
+/// Records why the install failed before a rollback starts the previous
+/// version. A daemon reads `last_error` only when it starts, so a reason
+/// recorded after the restart would not be shown until the next one.
+///
+/// `pending` is kept, so a rollback cut short is still recovered.
+pub(crate) fn record_reason_before_restart(
+    paths: &UpdatePaths,
+    state: &mut InstallState,
+    cause: &UpdateError,
+    failures: &[String],
+) {
+    if let Err(error) = store_reason(paths, state, cause, failures) {
+        tracing::warn!(error = %error, "the failure could not be recorded before the restart");
     }
+}
+
+/// Ends a rollback: clears `pending` and records why the install failed, with
+/// every rollback step in `failures`.
+///
+/// # Errors
+///
+/// The rollback's own failures, including a failure to record the reason.
+pub(crate) fn finish_rollback(
+    paths: &UpdatePaths,
+    state: &mut InstallState,
+    cause: &UpdateError,
+    mut failures: Vec<String>,
+) -> Result<(), UpdateError> {
     state.pending = None;
-    state.last_error = Some(last_error);
-    if let Err(error) = state.store(&paths.install_state()) {
+    if let Err(error) = store_reason(paths, state, cause, &failures) {
         failures.push(format!("the failure could not be recorded: {error}"));
     }
     if failures.is_empty() {
@@ -311,6 +337,22 @@ fn roll_back(
             failures.join("; ")
         )))
     }
+}
+
+/// Stores `cause`, followed by each rollback step that failed, as `last_error`.
+fn store_reason(
+    paths: &UpdatePaths,
+    state: &mut InstallState,
+    cause: &UpdateError,
+    failures: &[String],
+) -> Result<(), UpdateError> {
+    let mut reason = cause.to_string();
+    for failure in failures {
+        reason.push_str("; ");
+        reason.push_str(failure);
+    }
+    state.last_error = Some(reason);
+    state.store(&paths.install_state())
 }
 
 /// Clears the pending install and records `error` as the reason it failed.
@@ -515,15 +557,21 @@ mod tests {
         image: RefCell<PathBuf>,
         failing: Option<PathBuf>,
         calls: RefCell<Vec<Call>>,
+        state_path: PathBuf,
+        /// The install state each started daemon read, as a daemon reads it
+        /// once when it starts.
+        read_at_start: RefCell<Vec<InstallState>>,
     }
 
     impl FakeDaemonService {
         fn new(paths: &UpdatePaths, running: &Version) -> Self {
             Self {
                 data_dir: paths.data_dir().to_path_buf(),
+                state_path: paths.install_state(),
                 image: RefCell::new(paths.daemon_exe(running)),
                 failing: None,
                 calls: RefCell::new(Vec::new()),
+                read_at_start: RefCell::new(Vec::new()),
             }
         }
     }
@@ -549,6 +597,9 @@ mod tests {
         fn start_healthy(&self, _start: Duration, _settle: Duration) -> Result<(), UpdateError> {
             let image = self.image.borrow().clone();
             self.calls.borrow_mut().push(Call::Start(image.clone()));
+            self.read_at_start
+                .borrow_mut()
+                .push(InstallState::load(&self.state_path).expect("read state at start"));
             if self.failing.as_ref() == Some(&image) {
                 fs::write(self.data_dir.join(DB), b"migrated").expect("migrate db");
                 fs::write(self.data_dir.join(WAL), b"wal").expect("write wal");
@@ -635,6 +686,8 @@ mod tests {
                 Call::Start(paths.daemon_exe(&new())),
             ]
         );
+        // The new daemon reads the state while the swap is still in flight.
+        assert!(service.read_at_start.borrow()[0].names_installed(&new()));
         assert_eq!(
             load(paths),
             InstallState {
@@ -742,6 +795,15 @@ mod tests {
         assert_eq!(
             state.last_error.as_deref(),
             Some("the new version did not start correctly: the new daemon exited")
+        );
+        // The previous version reads why when it starts, and a rollback cut
+        // short after that is still recovered.
+        let read_at_start = service.read_at_start.borrow();
+        let restarted = read_at_start.last().expect("the previous version started");
+        assert_eq!(restarted.last_error, state.last_error);
+        assert_eq!(
+            restarted.pending.as_ref().map(|pending| pending.phase),
+            Some(ApplyPhase::Swapping)
         );
     }
 
