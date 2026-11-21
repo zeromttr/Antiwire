@@ -148,12 +148,18 @@ describe('updateFooterView', () => {
     });
   });
 
-  it('offers a retry with the failure detail', () => {
+  it('offers a retry when a release is there to try again', () => {
     expect(
       updateFooterView(
         status({ state: 'failed', availableVersion: '0.3.0', detail: 'Download failed' }),
       ),
-    ).toEqual({ kind: 'failed', version: '0.3.0', detail: 'Download failed' });
+    ).toEqual({ kind: 'retry', version: '0.3.0' });
+  });
+
+  it('reports a failure without a retry before a release is known', () => {
+    expect(
+      updateFooterView(status({ state: 'failed', availableVersion: '', detail: 'Rolled back' })),
+    ).toEqual({ kind: 'failed', detail: 'Rolled back' });
   });
 
   it('shows the version for an unsupported install only when it is newer than the client', () => {
@@ -213,7 +219,7 @@ describe('updateFooterView', () => {
     it('puts a failure above an available release', () => {
       expect(
         updateFooterView(status({ state: 'failed', availableVersion: '0.3.0', detail: 'x' })).kind,
-      ).toBe('failed');
+      ).toBe('retry');
     });
   });
 });

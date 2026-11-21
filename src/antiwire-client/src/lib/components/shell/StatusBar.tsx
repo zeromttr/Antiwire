@@ -5,6 +5,7 @@ import { invoke, isNative } from '#lib/bridge.ts';
 import { AnimatedText } from '#lib/components/ui/AnimatedText.tsx';
 import { Button } from '#lib/components/ui/Button.tsx';
 import { DialogModal } from '#lib/components/ui/DialogModal.tsx';
+import { Tooltip } from '#lib/components/ui/Tooltip.tsx';
 import { m } from '#lib/i18n/messages.ts';
 import {
   UPDATE_CHECK_MS,
@@ -148,7 +149,7 @@ export function StatusBar({ onShowSetup }: Props) {
               <Download size={10} />
               {m.shell_update_available({ version: updateView.version })}
             </button>
-          ) : updateView.kind === 'failed' ? (
+          ) : updateView.kind === 'retry' ? (
             <button
               type="button"
               className={clsx(styles.updateButton, styles.failed)}
@@ -156,6 +157,10 @@ export function StatusBar({ onShowSetup }: Props) {
             >
               {m.shell_update_retry()}
             </button>
+          ) : updateView.kind === 'failed' ? (
+            <span className={styles.updateFailed}>
+              <Tooltip text={updateView.detail}>{m.settings_updates_failed()}</Tooltip>
+            </span>
           ) : null}
           <span>{m.shell_today({ bytes: today })}</span>
         </div>
@@ -178,7 +183,7 @@ export function StatusBar({ onShowSetup }: Props) {
             >
               {m.shell_update_dialog_later()}
             </Button>
-            {/* A failure the daemon reports before it knows of a newer release has nothing to retry. */}
+            {/* The status can change while the dialog is open, to a failure with nothing to retry. */}
             <Button
               variant="primary"
               disabled={update.submitting || !availableVersion}

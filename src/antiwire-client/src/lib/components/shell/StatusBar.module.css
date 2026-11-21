@@ -73,7 +73,8 @@
   border-color: color-mix(in srgb, var(--acc) 35%, var(--ln));
   background: color-mix(in srgb, var(--acc) 6%, transparent);
 }
-.update-button.failed {
+.update-button.failed,
+.update-failed {
   color: var(--warn);
 }
 .update-dialog {

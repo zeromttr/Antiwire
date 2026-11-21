@@ -559,15 +559,42 @@ impl UpdateService {
             }
             results.push((feed, result));
         }
-        let outcome = combine_feeds(channel, results);
+        self.record_check(channel, combine_feeds(channel, results));
+    }
 
+    /// Keeps what a check of `channel` found.
+    ///
+    /// A failed install is shown so that it can be retried. A check that finds
+    /// nothing to retry, because the release was withdrawn or the user moved to
+    /// a channel with nothing newer, drops the failure, from the install state
+    /// too, so it does not come back at the next start.
+    fn record_check(&self, channel: Channel, outcome: FeedOutcome) {
         let mut inner = self.inner.lock();
         inner.last_checked = Some(SystemTime::now());
         inner.check_error = outcome.error;
-        if outcome.read {
-            inner.checked = true;
-            inner.checked_channel = Some(channel);
-            inner.available = outcome.offered;
+        if !outcome.read {
+            return;
+        }
+        inner.checked = true;
+        inner.checked_channel = Some(channel);
+        inner.available = outcome.offered;
+        if inner.available.is_some()
+            || inner.last_error.is_none()
+            || inner.installing
+            || self.swap_in_flight(&mut inner)
+        {
+            return;
+        }
+        inner.last_error = None;
+        if let UpdateSupport::Supported { paths, .. } | UpdateSupport::Package { paths, .. } =
+            &self.support
+        {
+            // Under the lock, so no install request can start until it is written.
+            if let Err(error) = update_install_state(&paths.install_state(), |state| {
+                state.last_error = None;
+            }) {
+                warn!(error = %error, "the install failure could not be cleared");
+            }
         }
     }
 
@@ -1902,6 +1929,74 @@ mod tests {
         service.inner.lock().swap_ends_by = Some(Instant::now());
 
         assert_ne!(service.status().state, UpdateState::Installing);
+    }
+
+    /// A service whose last install failed with "the new daemon exited".
+    fn after_a_failed_install() -> (tempfile::TempDir, UpdatePaths, Arc<UpdateService>) {
+        let (dir, paths) = temp_paths();
+        InstallState {
+            current: Some(Version::new(0, 2, 0)),
+            last_error: Some("the new daemon exited".to_owned()),
+            ..InstallState::default()
+        }
+        .store(&paths.install_state())
+        .expect("store");
+        let service = UpdateService::new(supported(&paths), Arc::new(RecordingLauncher::default()));
+        assert_eq!(service.status().state, UpdateState::Failed);
+        (dir, paths, service)
+    }
+
+    /// The release that failed was withdrawn, or the user moved to a channel
+    /// with nothing newer: there is nothing left to retry.
+    #[test]
+    fn a_check_with_nothing_to_retry_drops_the_failure() {
+        let (_dir, paths, service) = after_a_failed_install();
+
+        service.record_check(
+            Channel::Stable,
+            FeedOutcome {
+                read: true,
+                offered: None,
+                error: None,
+            },
+        );
+
+        assert_eq!(service.status().state, UpdateState::UpToDate);
+        let state = InstallState::load(&paths.install_state()).expect("state");
+        assert_eq!(
+            state.last_error, None,
+            "it does not come back at the next start"
+        );
+    }
+
+    #[test]
+    fn a_failure_stays_while_a_release_can_be_retried_or_the_feed_is_unread() {
+        let (_dir, paths, service) = after_a_failed_install();
+
+        service.record_check(
+            Channel::Stable,
+            FeedOutcome {
+                read: false,
+                offered: None,
+                error: Some("offline".to_owned()),
+            },
+        );
+        assert_eq!(service.status().state, UpdateState::Failed);
+
+        let release = manifest_for(&Version::new(0, 3, 0), b"daemon", b"client");
+        service.record_check(
+            Channel::Stable,
+            FeedOutcome {
+                read: true,
+                offered: Some(Release::Tree(release)),
+                error: None,
+            },
+        );
+        let status = service.status();
+        assert_eq!(status.state, UpdateState::Failed);
+        assert_eq!(status.detail, "the new daemon exited");
+        let state = InstallState::load(&paths.install_state()).expect("state");
+        assert!(state.last_error.is_some());
     }
 
     #[test]

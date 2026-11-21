@@ -5,7 +5,10 @@ export type UpdateFooterView =
   | { kind: 'none' }
   | { kind: 'installing' }
   | { kind: 'reopen'; version: string }
-  | { kind: 'failed'; version: string; detail: string }
+  /** The last install failed, and a release is there to try again. */
+  | { kind: 'retry'; version: string }
+  /** The last install failed, and no release is known yet to try again. */
+  | { kind: 'failed'; detail: string }
   | { kind: 'available'; version: string }
   | { kind: 'unsupported'; version: string };
 
@@ -124,7 +127,9 @@ export function updateFooterView(status: UpdateStatus | null): UpdateFooterView 
     return { kind: 'reopen', version: status.currentVersion };
   }
   if (status.state === 'failed') {
-    return { kind: 'failed', version: status.availableVersion, detail: status.detail };
+    return status.availableVersion
+      ? { kind: 'retry', version: status.availableVersion }
+      : { kind: 'failed', detail: status.detail };
   }
   if (status.state === 'available') return { kind: 'available', version: status.availableVersion };
   if (
