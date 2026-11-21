@@ -290,10 +290,11 @@ struct Inner {
     /// An install has been accepted and has not failed yet.
     installing: bool,
     /// Set when this daemon started during a swap, as the version being swapped
-    /// in or the one a rollback put back. Until this time, or until the install
-    /// state shows the swap ended, the daemon reports `Installing` and refuses
-    /// installs: the helper is still deciding whether this daemon stays, and the
-    /// new client is not in place yet.
+    /// in or the one a rollback put back, or when a swap it handed to the helper
+    /// was still in flight after the handoff. Until this time, or until the
+    /// install state shows the swap ended, the daemon reports `Installing` and
+    /// refuses installs: the swap is not decided yet, and the new client is not
+    /// in place.
     swap_ends_by: Option<Instant>,
     /// Cached from the install state, which `status` reads only while a swap
     /// is in flight.
@@ -840,19 +841,31 @@ impl UpdateService {
         Ok(())
     }
 
-    /// Ends `Installing` when the helper did not take the request: it refused
-    /// it, or exited before stopping this daemon. A request the helper accepted
-    /// (`Swapping`) is left to the helper.
+    /// Ends `Installing` once the helper has had time to stop this daemon.
+    ///
+    /// A request the helper never took, because it refused it or exited first,
+    /// is cleared and reported. A request it took (`Swapping`) without stopping
+    /// this daemon means the helper died or hung. The swap is handed to the
+    /// recovery helper, which leaves it alone while the helper still holds its
+    /// lock, and this daemon follows the swap as it would one it started
+    /// during.
     fn reconcile_after_handoff(&self, paths: &UpdatePaths) {
         let path = paths.install_state();
         let mut state = match InstallState::load(&path) {
             Ok(state) => state,
             Err(error) => {
                 warn!(error = %error, "install state could not be read");
+                let mut inner = self.inner.lock();
+                inner.last_error = Some(error.to_string());
+                inner.installing = false;
                 return;
             }
         };
         if state.swapping() {
+            recover_interrupted_install(paths.data_dir(), self.launcher.as_ref());
+            let mut inner = self.inner.lock();
+            inner.swap_ends_by = Some(Instant::now() + SWAP_FINISH_TIMEOUT);
+            inner.installing = false;
             return;
         }
         if state.pending.take().is_some() {
@@ -2314,17 +2327,44 @@ mod tests {
         assert_eq!(state.pending, None);
     }
 
+    /// The helper took the request but never stopped this daemon: it died or
+    /// hung after recording the swap.
     #[test]
-    fn swap_in_progress_is_left_to_the_helper() {
+    fn a_swap_whose_helper_never_stopped_the_daemon_goes_to_recovery() {
         let (_dir, paths) = temp_paths();
-        let service = UpdateService::new(supported(&paths), Arc::new(RecordingLauncher::default()));
+        let launcher = Arc::new(RecordingLauncher::default());
+        let service = UpdateService::new(supported(&paths), launcher.clone());
         store_pending(&paths, ApplyPhase::Swapping);
         service.inner.lock().installing = true;
 
         service.reconcile_after_handoff(&paths);
 
+        assert_eq!(*launcher.recovers.lock(), 1);
         assert_eq!(service.status().state, UpdateState::Installing);
         let state = InstallState::load(&paths.install_state()).expect("state");
-        assert!(state.pending.is_some());
+        assert!(state.pending.is_some(), "the swap is left to the helpers");
+
+        // The recovery rolls the swap back and records why.
+        InstallState {
+            last_error: Some("the swap to 0.3.0 was interrupted".to_owned()),
+            ..InstallState::default()
+        }
+        .store(&paths.install_state())
+        .expect("store");
+        let status = service.status();
+        assert_eq!(status.state, UpdateState::Failed);
+        assert_eq!(status.detail, "the swap to 0.3.0 was interrupted");
+    }
+
+    #[test]
+    fn an_unreadable_install_state_ends_installing() {
+        let (_dir, paths) = temp_paths();
+        let service = UpdateService::new(supported(&paths), Arc::new(RecordingLauncher::default()));
+        std::fs::create_dir(paths.install_state()).expect("block the state file");
+        service.inner.lock().installing = true;
+
+        service.reconcile_after_handoff(&paths);
+
+        assert_eq!(service.status().state, UpdateState::Failed);
     }
 }
