@@ -10,6 +10,7 @@ use std::process::{Command, Output};
 use std::time::{Duration, Instant};
 
 use super::{DaemonService, POLL_INTERVAL};
+use crate::system_program::require_system_program;
 use crate::UpdateError;
 
 /// The unit in `packaging/linux/antiwire-daemon.service`.
@@ -182,7 +183,9 @@ impl DaemonService for SystemdDaemonService {
 }
 
 fn systemctl(args: &[&str]) -> Result<Output, UpdateError> {
-    Command::new("systemctl")
+    let systemctl = require_system_program("systemctl")
+        .map_err(|error| UpdateError::io("find", "systemctl", error))?;
+    Command::new(systemctl)
         .args(args)
         .stdin(std::process::Stdio::null())
         .output()

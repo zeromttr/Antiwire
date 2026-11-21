@@ -8,12 +8,13 @@
 //! interrupted upgrade left half-configured.
 
 use std::ffi::OsString;
-use std::path::{Path, PathBuf};
+use std::path::Path;
 use std::process::Command;
 
 use semver::Version;
 
 use crate::package::PackageFormat;
+use crate::system_program::{require_system_program, system_program};
 use crate::UpdateError;
 
 /// The package name in `packaging/linux/nfpm.yaml`.
@@ -79,7 +80,7 @@ impl PackageInstaller for SystemPackageInstaller {
         rollback: bool,
     ) -> Result<(), UpdateError> {
         let invocation = install_invocation(format, package, rollback, &|name| {
-            find_program(name).is_some()
+            system_program(name).is_some()
         });
         let output = invocation.output()?;
         if output.status.success() {
@@ -108,7 +109,7 @@ pub fn owner_format(daemon_exe: &Path) -> Option<PackageFormat> {
             .filter(|output| output.status.success())
             .is_some_and(|output| parse(&String::from_utf8_lossy(&output.stdout)))
     };
-    if find_program("dpkg-query").is_some()
+    if system_program("dpkg-query").is_some()
         && owned(
             Invocation::new("dpkg-query").arg("-S").arg(daemon_exe),
             dpkg_search_names_package,
@@ -116,7 +117,7 @@ pub fn owner_format(daemon_exe: &Path) -> Option<PackageFormat> {
     {
         return Some(PackageFormat::Deb);
     }
-    if find_program("rpm").is_some()
+    if system_program("rpm").is_some()
         && owned(
             Invocation::new("rpm")
                 .args(["-qf", "--qf", "%{NAME}\\n"])
@@ -204,7 +205,8 @@ impl Invocation {
     }
 
     fn output(&self) -> Result<std::process::Output, UpdateError> {
-        let program = find_program(self.program).unwrap_or_else(|| PathBuf::from(self.program));
+        let program = require_system_program(self.program)
+            .map_err(|error| UpdateError::io("find", self.program, error))?;
         Command::new(&program)
             .args(&self.args)
             .envs(self.env.iter().copied())
@@ -253,15 +255,6 @@ pub(crate) fn install_invocation(
             .arg(package),
         (PackageFormat::Rpm, false) => Invocation::new("rpm").arg("-U").arg(package),
     }
-}
-
-/// `name` on `PATH`, or in the system directories a service's `PATH` may lack.
-fn find_program(name: &str) -> Option<PathBuf> {
-    let path = std::env::var_os("PATH").unwrap_or_default();
-    std::env::split_paths(&path)
-        .chain(["/usr/sbin", "/usr/bin", "/sbin", "/bin"].map(PathBuf::from))
-        .map(|dir| dir.join(name))
-        .find(|candidate| candidate.is_file())
 }
 
 /// The end of a command's error output, which is where the reason is.

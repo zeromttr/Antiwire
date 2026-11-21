@@ -162,10 +162,12 @@ fn spawn_helper(
     mode: &[&OsStr],
     unit: &str,
 ) -> std::io::Result<()> {
-    let output = Command::new("systemd-run")
-        .args(systemd_run_args(unit, daemon_exe, data_dir, mode))
-        .stdin(Stdio::null())
-        .output()?;
+    let output = Command::new(crate::system_program::require_system_program(
+        "systemd-run",
+    )?)
+    .args(systemd_run_args(unit, daemon_exe, data_dir, mode))
+    .stdin(Stdio::null())
+    .output()?;
     if output.status.success() {
         Ok(())
     } else {

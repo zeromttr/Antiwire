@@ -21,6 +21,7 @@ pub mod service;
 pub mod service_control;
 pub mod state;
 pub mod status;
+mod system_program;
 pub mod trust;
 pub mod version;
 
