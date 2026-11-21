@@ -1,6 +1,6 @@
 //! Sending a download request and reading its body within the configured limits.
 
-use antiwire_http::reqwest::{RequestBuilder, Response};
+use antiwire_http::{HttpRequestBuilder, HttpResponse};
 use futures_util::StreamExt;
 use tokio::io::AsyncRead;
 use tokio_util::io::StreamReader;
@@ -16,9 +16,9 @@ use crate::DownloadConfig;
 /// [`DownloadError::IdleTimeout`] when no response arrives within
 /// `config.idle_timeout`, or the request or status error otherwise.
 pub(crate) async fn send(
-    request: RequestBuilder,
+    request: HttpRequestBuilder,
     config: &DownloadConfig,
-) -> Result<Response, DownloadError> {
+) -> Result<HttpResponse, DownloadError> {
     match tokio::time::timeout(config.idle_timeout, request.send()).await {
         Ok(result) => Ok(result?.error_for_status()?),
         Err(_) => Err(DownloadError::IdleTimeout),
@@ -28,7 +28,7 @@ pub(crate) async fn send(
 /// The body of `response` as a reader that fails once more than `max_bytes`
 /// have been read. Callers still time each read against the idle timeout.
 pub(crate) fn limited_body(
-    response: Response,
+    response: HttpResponse,
     max_bytes: u64,
 ) -> ByteLimitedReader<impl AsyncRead + Unpin> {
     let byte_stream = response

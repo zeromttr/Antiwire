@@ -9,26 +9,31 @@
 //! - **Destinations.** Every address a request connects to, whether from DNS or
 //!   an IP-address URL, on the first request and on every redirect, must be
 //!   allowed by the client's [`Destinations`] policy. Link-local addresses,
-//!   which include every cloud metadata service, are always refused.
+//!   cloud metadata endpoints (including Azure `WireServer`), local-use NAT64
+//!   (`64:ff9b:1::/48`), and non-global IPv6 space outside `2000::/3` are
+//!   always refused. Redirects only narrow the active destination zone, so a
+//!   public host cannot pivot into private or loopback addresses.
 //! - **Transport.** TLS 1.2 or later, no proxies, no HTTPS-to-HTTP redirects,
-//!   and a bounded number of redirects.
-//! - **Time.** Connect and overall timeouts on every client.
-//! - **Size.** [`read_limited`] and [`read_text_limited`] read a body with a
-//!   cap, rather than trusting the server about its size.
+//!   bounded redirects, no `Referer`, strict cross-origin header allowlisting,
+//!   and no cross-origin `307`/`308` body replay.
+//! - **Time.** Connect and overall timeouts on every client, shared across
+//!   redirect hops.
+//! - **Size.** [`read_limited`] and [`read_text_limited`] cap response bodies
+//!   without trusting the server.
+//! - **Secrets.** [`HttpError`] reduces URLs to `scheme://host[:port]` and
+//!   strips unredacted URLs from underlying transport errors.
 
 mod body;
 mod client;
 mod destination;
 mod error;
+mod redirect;
 mod resolver;
 
 pub use body::{read_limited, read_text_limited};
 #[cfg(feature = "blocking")]
-pub use client::BlockingHttpClient;
-pub use client::{HttpClient, HttpClientBuilder};
+pub use client::{BlockingHttpClient, BlockingRequestBuilder, BlockingResponse};
+pub use client::{HttpClient, HttpClientBuilder, HttpRequestBuilder, HttpResponse};
 pub use destination::Destinations;
 pub use error::HttpError;
-
-/// Re-exported so callers can name request and response types without their
-/// own `reqwest` dependency drifting from this one.
-pub use reqwest;
+pub use reqwest::{header, Method, StatusCode, Url};

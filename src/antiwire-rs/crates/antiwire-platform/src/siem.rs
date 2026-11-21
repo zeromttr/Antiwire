@@ -802,7 +802,7 @@ impl WorkerState {
         let mut request = self
             .http
             .post(&self.config.webhook_url)
-            .map_err(webhook_error)?
+            .map_err(std::io::Error::other)?
             .header("content-type", "application/json")
             .body(body);
 
@@ -815,11 +815,7 @@ impl WorkerState {
             request = request.header(header_name, &self.config.webhook_auth_token);
         }
 
-        // Webhook URLs often carry their secret in the path or query, so the
-        // error that reaches the log leaves the URL out.
-        let response = request
-            .send()
-            .map_err(|error| std::io::Error::other(error.without_url()))?;
+        let response = request.send().map_err(std::io::Error::other)?;
         if !response.status().is_success() {
             return Err(std::io::Error::other(format!(
                 "webhook returned HTTP {}",
@@ -827,17 +823,6 @@ impl WorkerState {
             )));
         }
         Ok(())
-    }
-}
-
-/// A webhook request error without the URL, which may hold the webhook's secret.
-fn webhook_error(error: antiwire_http::HttpError) -> std::io::Error {
-    match error {
-        antiwire_http::HttpError::Refused { reason, .. } => {
-            std::io::Error::other(format!("webhook URL refused: {reason}"))
-        }
-        antiwire_http::HttpError::Request(error) => std::io::Error::other(error.without_url()),
-        other @ antiwire_http::HttpError::BodyTooLarge { .. } => std::io::Error::other(other),
     }
 }
 

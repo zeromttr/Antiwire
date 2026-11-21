@@ -5,9 +5,9 @@ use std::net::{IpAddr, Ipv4Addr, Ipv6Addr};
 /// The addresses a client is allowed to reach.
 ///
 /// Link-local addresses (including every cloud metadata service), unspecified,
-/// multicast, broadcast, documentation and other reserved ranges are refused
-/// under every policy. The policies differ only in how far into the local
-/// network a request may go.
+/// multicast, broadcast, documentation, local-use NAT64, deprecated tunneling,
+/// and other non-global reserved ranges are refused under every policy. The
+/// policies differ only in how far into the local network a request may go.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Destinations {
     /// Globally routable addresses only. For servers on the internet: registries,
@@ -44,15 +44,25 @@ impl Destinations {
             AddressClass::Forbidden => false,
         }
     }
+
+    /// Narrows this policy after a request reaches an address in `reached`, so
+    /// a redirect cannot pivot from a wider zone into a more local one
+    /// (`Public` -> `Private`, or `Private` -> `Loopback`).
+    #[must_use]
+    pub(crate) const fn narrow(self, reached: AddressClass) -> Self {
+        match (self, reached) {
+            (_, AddressClass::Public | AddressClass::Forbidden) | (Self::Public, _) => Self::Public,
+            (Self::PublicAndPrivate | Self::PublicPrivateAndLoopback, AddressClass::Private)
+            | (Self::PublicAndPrivate, AddressClass::Loopback) => Self::PublicAndPrivate,
+            (Self::PublicPrivateAndLoopback, AddressClass::Loopback) => {
+                Self::PublicPrivateAndLoopback
+            }
+        }
+    }
 }
 
-/// Classifies `ip`, looking through IPv6 forms that carry an IPv4 address.
-///
-/// An IPv4-mapped (`::ffff:a.b.c.d`), IPv4-translated (`::ffff:0:a.b.c.d`),
-/// IPv4-compatible (`::a.b.c.d`), NAT64 (`64:ff9b::/96`, `64:ff9b:1::/48`),
-/// 6to4 (`2002::/16`) or Teredo (`2001::/32`) address reaches the IPv4 address
-/// it embeds, so it is classified as that address. Otherwise
-/// `::ffff:127.0.0.1` would pass as a public IPv6 address.
+/// Classifies `ip`, looking through IPv6 forms that legitimately deliver to an
+/// IPv4 address (`::ffff:a.b.c.d` and well-known NAT64 `64:ff9b::/96`).
 pub(crate) fn classify(ip: IpAddr) -> AddressClass {
     match ip {
         IpAddr::V4(v4) => classify_v4(v4),
@@ -65,80 +75,84 @@ fn classify_v4(ip: Ipv4Addr) -> AddressClass {
     if ip.is_loopback() {
         return AddressClass::Loopback;
     }
-    let forbidden = a == 0                                  // "this network"
-        || ip.is_link_local()                               // 169.254/16, incl. cloud metadata
-        || ip.is_multicast()
-        || ip.is_broadcast()
-        || a >= 240                                         // reserved
+    let forbidden = a == 0                                  // 0.0.0.0/8 "this network"
+        || ip.is_link_local()                               // 169.254.0.0/16, incl. cloud metadata
+        || ip.is_multicast()                                // 224.0.0.0/4
+        || ip.is_broadcast()                                // 255.255.255.255
+        || a >= 240                                         // 240.0.0.0/4 reserved
         || (a, b, c) == (192, 0, 0)                         // IETF assignments, incl. Oracle metadata
-        || (a, b, c) == (192, 0, 2)                         // documentation
-        || (a, b, c) == (198, 51, 100)
-        || (a, b, c) == (203, 0, 113)
-        || (a == 198 && (b & 0xfe) == 18)                   // 198.18/15 benchmarking
-        || ip == Ipv4Addr::new(100, 100, 100, 200); //         Alibaba Cloud metadata
+        || (a, b, c) == (192, 0, 2)                         // TEST-NET-1 documentation
+        || (a, b, c) == (192, 88, 99)                       // deprecated 6to4 relay anycast (RFC 7526)
+        || (a, b, c) == (198, 51, 100)                      // TEST-NET-2 documentation
+        || (a, b, c) == (203, 0, 113)                       // TEST-NET-3 documentation
+        || (a == 198 && (b & 0xfe) == 18)                   // 198.18.0.0/15 benchmarking
+        || ip == Ipv4Addr::new(100, 100, 100, 200)          // Alibaba Cloud metadata
+        || ip == Ipv4Addr::new(168, 63, 129, 16); // Azure WireServer platform VIP
     if forbidden {
         return AddressClass::Forbidden;
     }
     if ip.is_private() || (a == 100 && (b & 0xc0) == 64) {
-        // RFC 1918, and 100.64/10 carrier-grade NAT (also Tailscale and similar).
+        // RFC 1918, and 100.64.0.0/10 carrier-grade NAT (also Tailscale and similar).
         return AddressClass::Private;
     }
     AddressClass::Public
 }
+
+/// Cloud metadata endpoints that sit inside unique local space (`fc00::/7`),
+/// where a policy allowing private addresses would otherwise reach them.
+const ULA_METADATA: [Ipv6Addr; 2] = [
+    // AWS Instance Metadata Service.
+    Ipv6Addr::new(0xfd00, 0x0ec2, 0, 0, 0, 0, 0, 0x0254),
+    // Google Compute Engine metadata server, on IPv6-only instances.
+    Ipv6Addr::new(0xfd20, 0x00ce, 0, 0, 0, 0, 0, 0x0254),
+];
 
 fn classify_v6(ip: Ipv6Addr) -> AddressClass {
     let segments = ip.segments();
     if ip.is_loopback() {
         return AddressClass::Loopback;
     }
-    let forbidden = ip.is_unspecified()
-        || ip.is_multicast()
-        || (segments[0] & 0xffc0) == 0xfe80                  // link-local
-        || (segments[0], segments[1]) == (0x2001, 0x0db8)   // documentation
-        || (segments[0], segments[1], segments[2]) == (0x2001, 0x0002, 0) // benchmarking
-        || (segments[0] == 0x0100 && segments[1..4] == [0, 0, 0]) // discard-only
-        || ip == Ipv6Addr::new(0xfd00, 0x0ec2, 0, 0, 0, 0, 0, 0x0254); // AWS metadata
-    if forbidden {
+    if ULA_METADATA.contains(&ip) {
         return AddressClass::Forbidden;
     }
     if (segments[0] & 0xfe00) == 0xfc00 || (segments[0] & 0xffc0) == 0xfec0 {
-        // Unique local, and the deprecated site-local range.
+        // Unique local (fc00::/7) and the deprecated site-local range (fec0::/10).
         return AddressClass::Private;
     }
-    AddressClass::Public
+    // Only IANA Global Unicast space (2000::/3) can be public, minus reserved
+    // and non-globally-routable sub-blocks. Everything outside 2000::/3 (link-local,
+    // multicast, unspecified, discard, SRv6 5f00::/16, local-use NAT64
+    // 64:ff9b:1::/48, deprecated IPv4-compatible/SIIT, and unallocated space)
+    // is forbidden.
+    let is_global_unicast = (segments[0] & 0xe000) == 0x2000;
+    let special_in_gua = (segments[0] == 0x2001
+        && (segments[1] < 0x0200 || segments[1] == 0x0db8)) // 2001::/23 (Teredo, benchmarking, ORCHID, DRIP) & 2001:db8::/32
+        || segments[0] == 0x2002                            // 2002::/16 deprecated 6to4
+        || (segments[0] == 0x3fff && segments[1] < 0x1000); // 3fff::/20 documentation (RFC 9637)
+    if is_global_unicast && !special_in_gua {
+        return AddressClass::Public;
+    }
+    AddressClass::Forbidden
 }
 
-/// The IPv4 address an IPv6 address delivers to, when it embeds one.
+/// The IPv4 address an IPv6 address delivers to, for the fixed-layout forms
+/// used on dual-stack sockets and well-known DNS64/NAT64 networks.
+///
+/// Local-use NAT64 (`64:ff9b:1::/48`, RFC 8215) is deliberately excluded: its
+/// prefix length may be `/48`, `/56`, `/64`, or `/96` (RFC 6052), so assuming
+/// `/96` would misclassify non-`/96` encodings of local IPv4 addresses, and the
+/// prefix itself is never globally routable. Deprecated tunneling/translation
+/// forms (IPv4-compatible `::/96`, SIIT `::ffff:0:0:0/96`, Teredo `2001::/32`,
+/// 6to4 `2002::/16`) are likewise refused by [`classify_v6`].
 fn embedded_v4(ip: Ipv6Addr) -> Option<Ipv4Addr> {
     if let Some(v4) = ip.to_ipv4_mapped() {
         return Some(v4);
     }
     let segments = ip.segments();
-    let low = || Ipv4Addr::from((u32::from(segments[6]) << 16) | u32::from(segments[7]));
-    // IPv4-compatible (deprecated), excluding :: and ::1, which are not IPv4.
-    if segments[..6] == [0, 0, 0, 0, 0, 0] && !ip.is_unspecified() && !ip.is_loopback() {
-        return Some(low());
-    }
-    // IPv4-translated (SIIT): ::ffff:0:a.b.c.d.
-    if segments[..6] == [0, 0, 0, 0, 0xffff, 0] {
-        return Some(low());
-    }
-    // NAT64 well-known prefix 64:ff9b::/96, and the local-use 64:ff9b:1::/48,
-    // whose prefixes carry the IPv4 address in the last 32 bits as RFC 6052
-    // lays out for a /96 translator.
-    if segments[..2] == [0x0064, 0xff9b] && (segments[2..6] == [0, 0, 0, 0] || segments[2] == 1) {
-        return Some(low());
-    }
-    // Teredo: 2001:0::/32 carries the client's IPv4 address, bit-inverted, last.
-    if segments[..2] == [0x2001, 0x0000] {
+    // NAT64 well-known prefix 64:ff9b::/96 (RFC 6052 §2.1): fixed /96 layout.
+    if segments[..6] == [0x0064, 0xff9b, 0, 0, 0, 0] {
         return Some(Ipv4Addr::from(
-            !((u32::from(segments[6]) << 16) | u32::from(segments[7])),
-        ));
-    }
-    // 6to4: 2002:AABB:CCDD::/48 carries AA.BB.CC.DD.
-    if segments[0] == 0x2002 {
-        return Some(Ipv4Addr::from(
-            (u32::from(segments[1]) << 16) | u32::from(segments[2]),
+            (u32::from(segments[6]) << 16) | u32::from(segments[7]),
         ));
     }
     None
@@ -165,7 +179,9 @@ mod tests {
             ("127.8.9.10", AddressClass::Loopback),
             ("169.254.169.254", AddressClass::Forbidden),
             ("100.100.100.200", AddressClass::Forbidden),
+            ("168.63.129.16", AddressClass::Forbidden),
             ("192.0.0.192", AddressClass::Forbidden),
+            ("192.88.99.1", AddressClass::Forbidden),
             ("0.0.0.0", AddressClass::Forbidden),
             ("224.0.0.1", AddressClass::Forbidden),
             ("255.255.255.255", AddressClass::Forbidden),
@@ -180,40 +196,76 @@ mod tests {
     fn classifies_ipv6() {
         for (address, class) in [
             ("2606:4700:4700::1111", AddressClass::Public),
+            ("2001:4860:4860::8888", AddressClass::Public),
+            ("2001:200::1", AddressClass::Public),
+            ("3fff:1000::1", AddressClass::Public),
             ("::1", AddressClass::Loopback),
             ("fd12:3456::1", AddressClass::Private),
+            ("fec0::1", AddressClass::Private),
             ("fe80::1", AddressClass::Forbidden),
+            ("fe00::1", AddressClass::Forbidden),
             ("::", AddressClass::Forbidden),
             ("ff02::1", AddressClass::Forbidden),
+            ("100::1", AddressClass::Forbidden),
+            ("100:0:0:1::1", AddressClass::Forbidden),
             ("2001:db8::1", AddressClass::Forbidden),
+            ("2001:2::1", AddressClass::Forbidden),
+            ("2001:10::1", AddressClass::Forbidden),
+            ("2001:20::1", AddressClass::Forbidden),
+            ("2001:30::1", AddressClass::Forbidden),
+            ("3fff::1", AddressClass::Forbidden),
+            ("3fff:0fff::1", AddressClass::Forbidden),
+            ("5f00::1", AddressClass::Forbidden),
+            ("4000::1", AddressClass::Forbidden),
+            ("8000::1", AddressClass::Forbidden),
             ("fd00:ec2::254", AddressClass::Forbidden),
+            ("fd20:ce::254", AddressClass::Forbidden),
+            ("fd20:ce::253", AddressClass::Private),
         ] {
             assert_eq!(classify(ip(address)), class, "{address}");
         }
     }
 
-    /// The regression this guards: an IPv6 spelling of a local IPv4 address
-    /// slipped past checks that only looked at IPv4.
+    /// Dual-stack IPv4-mapped and well-known NAT64 addresses are classified as
+    /// the IPv4 address they reach; local-use NAT64 (`64:ff9b:1::/48`) and
+    /// deprecated tunneling/translation prefixes are always forbidden.
     #[test]
-    fn ipv6_forms_of_ipv4_are_classified_as_the_ipv4_address() {
+    fn ipv6_forms_of_ipv4_and_transition_prefixes() {
         for (address, class) in [
             ("::ffff:127.0.0.1", AddressClass::Loopback),
             ("::ffff:169.254.169.254", AddressClass::Forbidden),
+            ("::ffff:168.63.129.16", AddressClass::Forbidden),
             ("::ffff:10.0.0.1", AddressClass::Private),
             ("::ffff:8.8.8.8", AddressClass::Public),
-            ("::169.254.169.254", AddressClass::Forbidden),
             ("64:ff9b::7f00:1", AddressClass::Loopback),
             ("64:ff9b::a9fe:a9fe", AddressClass::Forbidden),
-            ("2002:7f00:1::", AddressClass::Loopback),
-            ("2002:0808:0808::1", AddressClass::Public),
-            ("::ffff:0:7f00:1", AddressClass::Loopback),
+            ("64:ff9b::a00:1", AddressClass::Private),
+            ("64:ff9b::808:808", AddressClass::Public),
+            // Local-use NAT64 (RFC 8215), including RFC 6052 /64 zero-suffix
+            // 127.0.0.1 and /48 169.254.169.254 with a public-looking suffix.
+            ("64:ff9b:1::808:808", AddressClass::Forbidden),
             ("64:ff9b:1::a9fe:a9fe", AddressClass::Forbidden),
-            // Teredo with client 127.0.0.1, inverted: 0x80ff:0xfffe.
+            ("64:ff9b:1::7f:0:100:0", AddressClass::Forbidden),
+            ("64:ff9b:1::a:0:100:0", AddressClass::Forbidden),
+            ("64:ff9b:1:a9fe:a9:fe00:808:808", AddressClass::Forbidden),
+            ("64:ff9b:2::808:808", AddressClass::Forbidden),
+            // Deprecated IPv4-compatible, SIIT, 6to4, and Teredo (including
+            // Teredo carrying a metadata server IPv4 with a public client IPv4).
+            ("::169.254.169.254", AddressClass::Forbidden),
+            ("::8.8.8.8", AddressClass::Forbidden),
+            ("::ffff:0:7f00:1", AddressClass::Forbidden),
+            ("::ffff:0:808:808", AddressClass::Forbidden),
+            ("2002:7f00:1::", AddressClass::Forbidden),
+            ("2002:0808:0808::1", AddressClass::Forbidden),
             (
                 "2001:0:4136:e378:8000:63bf:80ff:fffe",
-                AddressClass::Loopback,
+                AddressClass::Forbidden,
             ),
-            ("2001:0:4136:e378:8000:63bf:f7f7:f7f7", AddressClass::Public),
+            (
+                "2001:0:4136:e378:8000:63bf:f7f7:f7f7",
+                AddressClass::Forbidden,
+            ),
+            ("2001:0:a9fe:a9fe:0:0:f7f7:f7f7", AddressClass::Forbidden),
         ] {
             assert_eq!(classify(ip(address)), class, "{address}");
         }
@@ -225,6 +277,8 @@ mod tests {
         let private = ip("192.168.1.1");
         let loopback = ip("127.0.0.1");
         let metadata = ip("169.254.169.254");
+        let wire_server = ip("168.63.129.16");
+        let gce_metadata_v6 = ip("fd20:ce::254");
 
         assert!(Destinations::Public.allows(public));
         assert!(!Destinations::Public.allows(private));
@@ -240,6 +294,40 @@ mod tests {
             Destinations::PublicPrivateAndLoopback,
         ] {
             assert!(!policy.allows(metadata), "{policy:?}");
+            assert!(!policy.allows(wire_server), "{policy:?}");
+            assert!(!policy.allows(gce_metadata_v6), "{policy:?}");
         }
+    }
+
+    #[test]
+    fn narrowing_prevents_pivoting_into_more_local_zones() {
+        assert_eq!(
+            Destinations::Public.narrow(AddressClass::Public),
+            Destinations::Public
+        );
+        assert_eq!(
+            Destinations::PublicAndPrivate.narrow(AddressClass::Public),
+            Destinations::Public
+        );
+        assert_eq!(
+            Destinations::PublicAndPrivate.narrow(AddressClass::Private),
+            Destinations::PublicAndPrivate
+        );
+        assert_eq!(
+            Destinations::PublicPrivateAndLoopback.narrow(AddressClass::Public),
+            Destinations::Public
+        );
+        assert_eq!(
+            Destinations::PublicPrivateAndLoopback.narrow(AddressClass::Private),
+            Destinations::PublicAndPrivate
+        );
+        assert_eq!(
+            Destinations::PublicPrivateAndLoopback.narrow(AddressClass::Loopback),
+            Destinations::PublicPrivateAndLoopback
+        );
+        assert_eq!(
+            Destinations::PublicPrivateAndLoopback.narrow(AddressClass::Forbidden),
+            Destinations::Public
+        );
     }
 }

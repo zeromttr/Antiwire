@@ -1,7 +1,8 @@
 //! Reading response bodies without trusting the server about their size.
 
-use bytes::{Bytes, BytesMut};
+use bytes::Bytes;
 
+use crate::client::HttpResponse;
 use crate::error::HttpError;
 
 /// Reads the whole body of `response`, refusing more than `limit` bytes.
@@ -15,14 +16,33 @@ use crate::error::HttpError;
 ///
 /// Returns [`HttpError::BodyTooLarge`] past the limit, or [`HttpError::Request`]
 /// when reading fails.
-pub async fn read_limited(mut response: reqwest::Response, limit: u64) -> Result<Bytes, HttpError> {
+pub async fn read_limited(response: HttpResponse, limit: u64) -> Result<Bytes, HttpError> {
+    read_limited_vec(response, limit).await.map(Bytes::from)
+}
+
+/// Reads the body of `response` as text, refusing more than `limit` bytes.
+///
+/// Invalid UTF-8 is replaced with U+FFFD rather than rejected, as `reqwest`'s
+/// own `text()` does for a UTF-8 body. Valid UTF-8 reuses the buffer without
+/// copying; invalid UTF-8 replacement is also bounded by `limit` so adversarial
+/// binary input cannot expand past the cap.
+///
+/// # Errors
+///
+/// As [`read_limited`].
+pub async fn read_text_limited(response: HttpResponse, limit: u64) -> Result<String, HttpError> {
+    let body = read_limited_vec(response, limit).await?;
+    decode_utf8_lossy_limited(body, limit)
+}
+
+async fn read_limited_vec(mut response: HttpResponse, limit: u64) -> Result<Vec<u8>, HttpError> {
     if response
         .content_length()
         .is_some_and(|length| length > limit)
     {
         return Err(HttpError::BodyTooLarge { limit });
     }
-    let mut body = BytesMut::new();
+    let mut body = Vec::new();
     while let Some(chunk) = response.chunk().await? {
         let total = u64::try_from(body.len().saturating_add(chunk.len())).unwrap_or(u64::MAX);
         if total > limit {
@@ -30,23 +50,37 @@ pub async fn read_limited(mut response: reqwest::Response, limit: u64) -> Result
         }
         body.extend_from_slice(&chunk);
     }
-    Ok(body.freeze())
+    Ok(body)
 }
 
-/// Reads the body of `response` as text, refusing more than `limit` bytes.
-///
-/// Invalid UTF-8 is replaced rather than rejected, as `reqwest`'s own `text()`
-/// does for a UTF-8 body.
-///
-/// # Errors
-///
-/// As [`read_limited`].
-pub async fn read_text_limited(
-    response: reqwest::Response,
-    limit: u64,
-) -> Result<String, HttpError> {
-    let body = read_limited(response, limit).await?;
-    Ok(String::from_utf8_lossy(&body).into_owned())
+fn decode_utf8_lossy_limited(raw: Vec<u8>, limit: u64) -> Result<String, HttpError> {
+    match String::from_utf8(raw) {
+        Ok(text) => Ok(text),
+        Err(error) => {
+            let bytes = error.into_bytes();
+            let mut out = String::new();
+            for chunk in bytes.utf8_chunks() {
+                let valid = chunk.valid();
+                let replacement = if chunk.invalid().is_empty() {
+                    0
+                } else {
+                    '\u{FFFD}'.len_utf8()
+                };
+                let next_len = out
+                    .len()
+                    .saturating_add(valid.len())
+                    .saturating_add(replacement);
+                if u64::try_from(next_len).unwrap_or(u64::MAX) > limit {
+                    return Err(HttpError::BodyTooLarge { limit });
+                }
+                out.push_str(valid);
+                if !chunk.invalid().is_empty() {
+                    out.push('\u{FFFD}');
+                }
+            }
+            Ok(out)
+        }
+    }
 }
 
 #[cfg(test)]
@@ -89,13 +123,28 @@ mod tests {
             .expect("client")
     }
 
-    async fn fetch(url: &str) -> reqwest::Response {
+    async fn fetch(url: &str) -> HttpResponse {
         local_client()
             .get(url)
             .expect("allowed")
             .send()
             .await
             .expect("response")
+    }
+
+    #[test]
+    fn lossy_utf8_decoding_bounds_replacement_expansion() {
+        assert_eq!(
+            decode_utf8_lossy_limited(b"hello".to_vec(), 5).expect("valid"),
+            "hello"
+        );
+        assert_eq!(
+            decode_utf8_lossy_limited(b"hi\xff".to_vec(), 5).expect("fits"),
+            "hi\u{FFFD}"
+        );
+        let error = decode_utf8_lossy_limited(vec![0xff; 10], 10)
+            .expect_err("30-byte replacement exceeds 10-byte limit");
+        assert!(matches!(error, HttpError::BodyTooLarge { limit: 10 }));
     }
 
     #[tokio::test]
@@ -163,10 +212,7 @@ mod tests {
         let by_name = url.replace("127.0.0.1", "localhost");
         let error = client
             .get(&by_name)
-            .expect("a hostname passes the URL check")
-            .send()
-            .await
-            .expect_err("the resolver refuses it");
-        assert!(error.is_connect() || error.is_request(), "{error}");
+            .expect_err("localhost is refused before anything is sent");
+        assert!(matches!(error, HttpError::Refused { .. }), "{error}");
     }
 }

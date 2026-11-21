@@ -1,10 +1,9 @@
 //! Async `TypeSafe` client.
 
-use antiwire_http::reqwest;
 use std::sync::Arc;
 use std::time::Duration;
 
-use antiwire_http::{Destinations, HttpClient};
+use antiwire_http::{header, Destinations, HttpClient, Method};
 use serde::de::DeserializeOwned;
 use serde_json::{Map, Value};
 
@@ -181,8 +180,8 @@ impl ClientBuilder {
 
 struct Inner {
     http: HttpClient,
-    base_headers: reqwest::header::HeaderMap,
-    protected: reqwest::header::HeaderMap,
+    base_headers: header::HeaderMap,
+    protected: header::HeaderMap,
     base_url: String,
     model: String,
     timeout: Duration,
@@ -326,7 +325,7 @@ impl TypeSafeClient {
         transport::execute(
             &self.http_state(),
             RequestParts {
-                method: reqwest::Method::POST,
+                method: Method::POST,
                 path: transport::SYSTEM_ONE_PATH,
                 body: Some(body),
                 timeout,
@@ -387,7 +386,7 @@ impl Models<'_> {
         let success = transport::execute(
             &self.client.http_state(),
             RequestParts {
-                method: reqwest::Method::GET,
+                method: Method::GET,
                 path: transport::MODELS_PATH,
                 body: None,
                 timeout,

@@ -130,9 +130,7 @@ impl CertificateSearch {
     }
 }
 
-async fn read_capped(
-    mut response: antiwire_http::reqwest::Response,
-) -> Result<(Vec<u8>, bool), Error> {
+async fn read_capped(mut response: antiwire_http::HttpResponse) -> Result<(Vec<u8>, bool), Error> {
     let mut body = Vec::new();
     while let Some(chunk) = response
         .chunk()

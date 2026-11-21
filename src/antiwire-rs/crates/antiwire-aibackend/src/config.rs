@@ -1,6 +1,6 @@
 //! Environment resolution for the `TypeSafe` client.
 
-use antiwire_http::reqwest;
+use antiwire_http::Url;
 use std::time::Duration;
 
 use crate::error::Error;
@@ -102,8 +102,8 @@ fn resolve_base_url(env: &dyn Fn(&str) -> Option<String>) -> String {
 
 fn normalize_base_url(base: &str) -> Result<String, Error> {
     let trimmed = base.trim_end_matches('/');
-    let parsed = reqwest::Url::parse(trimmed)
-        .map_err(|_| Error::client(format!("invalid base URL: {base}")))?;
+    let parsed =
+        Url::parse(trimmed).map_err(|_| Error::client(format!("invalid base URL: {base}")))?;
     if parsed.cannot_be_a_base() {
         return Err(Error::client(format!("invalid base URL: {base}")));
     }
@@ -123,10 +123,10 @@ fn normalize_base_url(base: &str) -> Result<String, Error> {
 
 /// Whether `base_url` names this machine, which only a local mock does.
 pub(crate) fn is_loopback_base(base_url: &str) -> bool {
-    reqwest::Url::parse(base_url).is_ok_and(|url| is_loopback(&url))
+    Url::parse(base_url).is_ok_and(|url| is_loopback(&url))
 }
 
-fn is_loopback(url: &reqwest::Url) -> bool {
+fn is_loopback(url: &Url) -> bool {
     let Some(host) = url.host_str() else {
         return false;
     };

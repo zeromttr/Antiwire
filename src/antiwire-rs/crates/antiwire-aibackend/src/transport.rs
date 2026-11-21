@@ -1,12 +1,12 @@
 //! HTTP request preparation, secret-header redaction, and the retry loop.
 
-use antiwire_http::reqwest;
 use std::time::{Duration, Instant};
 
-use bytes::Bytes;
-use reqwest::header::{
+use antiwire_http::header::{
     HeaderMap, HeaderName, HeaderValue, ACCEPT, AUTHORIZATION, CONTENT_TYPE, USER_AGENT,
 };
+use antiwire_http::{HttpError, Method, Url};
+use bytes::Bytes;
 
 use crate::error::{self, Error};
 use crate::retry::RetryPolicy;
@@ -28,7 +28,7 @@ pub(crate) struct HttpState<'a> {
 }
 
 pub(crate) struct RequestParts<'a> {
-    pub(crate) method: reqwest::Method,
+    pub(crate) method: Method,
     pub(crate) path: &'a str,
     pub(crate) body: Option<Vec<u8>>,
     pub(crate) timeout: Duration,
@@ -101,7 +101,7 @@ pub(crate) async fn execute(
 async fn send_once(
     state: &HttpState<'_>,
     request: &RequestParts<'_>,
-    url: &reqwest::Url,
+    url: &Url,
     endpoint: &str,
     attempt: u32,
 ) -> Result<Success, Error> {
@@ -132,7 +132,7 @@ async fn send_once(
         .http
         .request(request.method.clone(), url.clone())
         .map_err(|error| Error::client(error.to_string()))?
-        .headers(headers.clone())
+        .headers(&headers)
         .timeout(request.timeout);
     if let Some(body) = &request.body {
         builder = builder.body(body.clone());
@@ -145,12 +145,7 @@ async fn send_once(
     let response_headers = response.headers().clone();
     let body = antiwire_http::read_limited(response, MAX_RESPONSE_BYTES)
         .await
-        .map_err(|error| match error {
-            antiwire_http::HttpError::Request(error) => map_transport(&error, request.timeout),
-            other => Error::Connection {
-                message: other.to_string(),
-            },
-        })?;
+        .map_err(|error| map_transport(&error, request.timeout))?;
     let request_id = error::header_text(&response_headers, "x-typesafe-request-id");
     let elapsed_ms = u64::try_from(attempt_started.elapsed().as_millis()).unwrap_or(u64::MAX);
     tracing::info!(
@@ -258,12 +253,12 @@ fn runtime_header() -> String {
     )
 }
 
-fn join_url(base: &str, path: &str) -> Result<reqwest::Url, Error> {
-    reqwest::Url::parse(&format!("{base}{path}"))
+fn join_url(base: &str, path: &str) -> Result<Url, Error> {
+    Url::parse(&format!("{base}{path}"))
         .map_err(|_| Error::client(format!("invalid request URL for {base}{path}")))
 }
 
-pub(crate) fn endpoint_of(method: &reqwest::Method, url: &reqwest::Url) -> String {
+pub(crate) fn endpoint_of(method: &Method, url: &Url) -> String {
     let mut clean = url.clone();
     clean.set_query(None);
     clean.set_fragment(None);
@@ -272,7 +267,7 @@ pub(crate) fn endpoint_of(method: &reqwest::Method, url: &reqwest::Url) -> Strin
     format!("{method} {clean}")
 }
 
-fn map_transport(error: &reqwest::Error, timeout: Duration) -> Error {
+fn map_transport(error: &HttpError, timeout: Duration) -> Error {
     if error.is_timeout() {
         Error::Timeout {
             seconds: timeout.as_secs_f64(),
@@ -284,13 +279,7 @@ fn map_transport(error: &reqwest::Error, timeout: Duration) -> Error {
     }
 }
 
-fn log_wire(
-    method: &reqwest::Method,
-    url: &reqwest::Url,
-    headers: &HeaderMap,
-    body: &[u8],
-    message: &'static str,
-) {
+fn log_wire(method: &Method, url: &Url, headers: &HeaderMap, body: &[u8], message: &'static str) {
     if tracing::enabled!(tracing::Level::DEBUG) {
         tracing::debug!(
             %method,
@@ -328,8 +317,8 @@ fn is_secret(name: &str) -> bool {
 #[cfg(test)]
 mod tests {
     use super::{endpoint_of, redact_headers, static_headers};
-    use antiwire_http::reqwest;
-    use reqwest::header::{HeaderMap, HeaderValue, AUTHORIZATION};
+    use antiwire_http::header::{HeaderMap, HeaderValue, AUTHORIZATION};
+    use antiwire_http::{Method, Url};
 
     #[test]
     fn redacts_secret_headers_only() {
@@ -386,12 +375,10 @@ mod tests {
 
     #[test]
     fn endpoint_drops_userinfo_query_and_fragment() {
-        let url = reqwest::Url::parse(
-            "https://user:password@example.test/v1/models?token=secret#fragment",
-        )
-        .expect("url");
+        let url = Url::parse("https://user:password@example.test/v1/models?token=secret#fragment")
+            .expect("url");
         assert_eq!(
-            endpoint_of(&reqwest::Method::GET, &url),
+            endpoint_of(&Method::GET, &url),
             "GET https://example.test/v1/models"
         );
     }

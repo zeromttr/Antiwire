@@ -188,13 +188,10 @@ impl Lookup {
             .client
             .get(url)
             .map_err(Error::from)?
-            .header(
-                antiwire_http::reqwest::header::ACCEPT,
-                "application/rdap+json",
-            )
+            .header(antiwire_http::header::ACCEPT, "application/rdap+json")
             .send()
             .await
-            .map_err(|error| Error::Transport(error.to_string()))?;
+            .map_err(Error::from)?;
         let status = response.status();
         if status.as_u16() == 429 {
             return Err(Error::RateLimited);
@@ -215,10 +212,10 @@ impl Lookup {
             .client
             .get(url)
             .map_err(Error::from)?
-            .header(antiwire_http::reqwest::header::ACCEPT, "application/json")
+            .header(antiwire_http::header::ACCEPT, "application/json")
             .send()
             .await
-            .map_err(|error| Error::Transport(error.to_string()))?;
+            .map_err(Error::from)?;
         let status = response.status();
         if !status.is_success() {
             return Err(Error::Transport(format!("bootstrap {status}")));
