@@ -308,6 +308,9 @@ struct Inner {
     last_checked: Option<SystemTime>,
     /// Why the last check could not read the feeds, until one succeeds.
     check_error: Option<String>,
+    /// The channel `last_checked` and `check_error` are about. Unlike
+    /// `checked_channel`, it moves with a check that read no feed.
+    last_check_channel: Option<Channel>,
 }
 
 impl UpdateService {
@@ -357,6 +360,7 @@ impl UpdateService {
         let mut inner = self.inner.lock();
         let swapping = self.swap_in_flight(&mut inner);
         let fresh = inner.checked_channel == Some(channel);
+        let checked_this_channel = inner.last_check_channel == Some(channel);
         let available =
             inner
                 .available
@@ -388,8 +392,13 @@ impl UpdateService {
             available,
             detail,
             channel,
-            last_checked: inner.last_checked,
-            check_error: inner.check_error.clone().unwrap_or_default(),
+            // A check of the channel the user left says nothing about this one.
+            last_checked: inner.last_checked.filter(|_| checked_this_channel),
+            check_error: inner
+                .check_error
+                .clone()
+                .filter(|_| checked_this_channel)
+                .unwrap_or_default(),
         }
     }
 
@@ -575,6 +584,7 @@ impl UpdateService {
         let mut inner = self.inner.lock();
         inner.last_checked = Some(SystemTime::now());
         inner.check_error = outcome.error;
+        inner.last_check_channel = Some(channel);
         if !outcome.read {
             return;
         }
@@ -2339,21 +2349,33 @@ mod tests {
             Arc::new(RecordingLauncher::default()),
             Arc::new(move || *source.lock()),
         );
-        {
-            let mut inner = service.inner.lock();
-            inner.checked = true;
-            inner.checked_channel = Some(Channel::Stable);
-            inner.available = Some(tree_release("0.3.0"));
-        }
+        service.record_check(
+            Channel::Stable,
+            FeedOutcome {
+                read: true,
+                offered: Some(tree_release("0.3.0")),
+                error: Some("the stable feed could not be read: offline".to_owned()),
+            },
+        );
         let status = service.status();
         assert_eq!(status.state, UpdateState::Available);
         assert_eq!(status.channel, Channel::Stable);
+        assert!(status.last_checked.is_some());
+        assert_eq!(
+            status.check_error,
+            "the stable feed could not be read: offline"
+        );
 
         *chosen.lock() = Channel::Beta;
         let status = service.status();
         assert_eq!(status.state, UpdateState::Unknown);
         assert_eq!(status.available, None);
         assert_eq!(status.channel, Channel::Beta);
+        assert_eq!(
+            status.last_checked, None,
+            "the beta feeds were never checked"
+        );
+        assert_eq!(status.check_error, "");
         assert!(matches!(
             service.request_install("0.3.0"),
             Err(UpdateError::VersionMismatch { .. })
