@@ -182,33 +182,30 @@ fn publish_client(paths: &UpdatePaths, version: &Version) -> Result<(), UpdateEr
 
 /// Repoints the junction `link` at `target`.
 ///
-/// Removing a junction removes only the link. There is no std API that creates
-/// one, so this uses `mklink /J`, the same command the installer runs.
+/// The new junction is made beside the old one and checked first, so a
+/// failure leaves the old one in place. It replaces the old one with a rename,
+/// and `link` is missing only between the removal and the rename. Removing a
+/// junction removes only the link.
 #[cfg(windows)]
 fn point_current_link(link: &Path, target: &Path) -> Result<(), UpdateError> {
-    match fs::remove_dir(link) {
-        Ok(()) => {}
-        Err(error) if error.kind() == io::ErrorKind::NotFound => {}
-        Err(error) => return Err(UpdateError::io("remove", link, error)),
+    let staged = with_suffix(link, ".new");
+    remove_link_if_present(&staged)?;
+    crate::junction::create(&staged, target)
+        .map_err(|error| UpdateError::io("link", &staged, error))?;
+    if let Err(error) = remove_link_if_present(link) {
+        let _ = fs::remove_dir(&staged);
+        return Err(error);
     }
-    let status = std::process::Command::new("cmd")
-        .arg("/c")
-        .arg("mklink")
-        .arg("/J")
-        .arg(link)
-        .arg(target)
-        .stdout(std::process::Stdio::null())
-        .stderr(std::process::Stdio::null())
-        .status()
-        .map_err(|error| UpdateError::io("link", link, error))?;
-    if status.success() {
-        Ok(())
-    } else {
-        Err(UpdateError::io(
-            "link",
-            link,
-            io::Error::other(format!("mklink exited with {status}")),
-        ))
+    fs::rename(&staged, link).map_err(|error| UpdateError::io("move", &staged, error))
+}
+
+/// Removes the junction or empty directory at `path`, if there is one.
+#[cfg(windows)]
+fn remove_link_if_present(path: &Path) -> Result<(), UpdateError> {
+    match fs::remove_dir(path) {
+        Ok(()) => Ok(()),
+        Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(()),
+        Err(error) => Err(UpdateError::io("remove", path, error)),
     }
 }
 
@@ -975,6 +972,54 @@ mod tests {
         let state = load(paths);
         assert_eq!(state.current, Some(old()));
         assert_eq!(state.pending, None);
+    }
+
+    /// A version tree at `dir/name` whose client holds `content`.
+    #[cfg(windows)]
+    fn tree(dir: &Path, name: &str, content: &[u8]) -> PathBuf {
+        let path = dir.join(name);
+        fs::create_dir_all(&path).expect("tree");
+        fs::write(path.join("antiwire.exe"), content).expect("tree file");
+        path
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn repointing_the_current_link_keeps_the_trees() {
+        let dir = tempfile::tempdir().expect("temp dir");
+        let old_tree = tree(dir.path(), "1.0.0", b"old");
+        let new_tree = tree(dir.path(), "1.1.0", b"new");
+        let link = dir.path().join("current");
+
+        point_current_link(&link, &old_tree).expect("first link");
+        point_current_link(&link, &new_tree).expect("repoint");
+
+        assert_eq!(
+            fs::read(link.join("antiwire.exe")).expect("through"),
+            b"new"
+        );
+        assert_eq!(
+            fs::read(old_tree.join("antiwire.exe")).expect("old"),
+            b"old"
+        );
+        assert!(fs::symlink_metadata(with_suffix(&link, ".new")).is_err());
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn a_failed_repoint_keeps_the_current_link() {
+        let dir = tempfile::tempdir().expect("temp dir");
+        let old_tree = tree(dir.path(), "1.0.0", b"old");
+        let link = dir.path().join("current");
+        point_current_link(&link, &old_tree).expect("first link");
+
+        point_current_link(&link, &dir.path().join("absent")).expect_err("no tree");
+
+        assert_eq!(
+            fs::read(link.join("antiwire.exe")).expect("through"),
+            b"old"
+        );
+        assert!(fs::symlink_metadata(with_suffix(&link, ".new")).is_err());
     }
 
     /// A bundle at `dir/name` holding one file with `content`.

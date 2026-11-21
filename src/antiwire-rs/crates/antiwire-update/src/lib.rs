@@ -11,6 +11,8 @@
 pub mod apply;
 pub mod channel;
 pub mod error;
+#[cfg(windows)]
+mod junction;
 pub mod launcher;
 pub mod manifest;
 pub mod package;
