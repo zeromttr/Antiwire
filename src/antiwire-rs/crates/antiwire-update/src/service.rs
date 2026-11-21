@@ -7,7 +7,7 @@
 //! caller.
 
 use std::fs::File;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::{Duration, Instant, SystemTime};
 
@@ -730,8 +730,14 @@ impl UpdateService {
             .await?;
 
         let verified = paths.verified(version);
-        replace_dir(&incoming, &verified)?;
-        stage_and_launch(paths, manifest, &verified, self.launcher.as_ref())
+        let paths = paths.clone();
+        let manifest = manifest.clone();
+        let launcher = Arc::clone(&self.launcher);
+        off_runtime(verified.clone(), move || {
+            replace_dir(&incoming, &verified)?;
+            stage_and_launch(&paths, &manifest, &verified, launcher.as_ref())
+        })
+        .await
     }
 
     /// Downloads the new release's package and the running version's package,
@@ -779,8 +785,14 @@ impl UpdateService {
         .store(&incoming)?;
 
         let verified = paths.verified(version);
-        replace_dir(&incoming, &verified)?;
-        stage_package_and_launch(paths, version, self.launcher.as_ref())
+        let paths = paths.clone();
+        let version = version.clone();
+        let launcher = Arc::clone(&self.launcher);
+        off_runtime(verified.clone(), move || {
+            replace_dir(&incoming, &verified)?;
+            stage_package_and_launch(&paths, &version, launcher.as_ref())
+        })
+        .await
     }
 
     /// Puts the running version's package in `dir`: the copy kept by the last
@@ -795,7 +807,21 @@ impl UpdateService {
         dir: &Path,
     ) -> Result<String, UpdateError> {
         let running = product_version();
-        if let Some(name) = copy_installed_package(paths, &running, platform, format, dir) {
+        let kept = {
+            let (paths, running, platform, dir) = (
+                paths.clone(),
+                running.clone(),
+                platform.to_owned(),
+                dir.to_path_buf(),
+            );
+            off_runtime(paths.installed_packages(), move || {
+                Ok(copy_installed_package(
+                    &paths, &running, &platform, format, &dir,
+                ))
+            })
+            .await?
+        };
+        if let Some(name) = kept {
             return Ok(name);
         }
         // A package kept before records were kept is still checked against
@@ -811,11 +837,19 @@ impl UpdateService {
         }
         let file = manifest.package_for(platform, format)?;
         let kept = paths.installed_packages().join(&file.name);
-        let destination = dir.join(&file.name);
-        if kept_package_matches(&kept, file) {
-            std::fs::copy(&kept, &destination)
-                .map_err(|error| UpdateError::io("copy", &kept, error))?;
-        } else {
+        let reused = {
+            let (kept, destination, expected) = (kept.clone(), dir.join(&file.name), file.clone());
+            off_runtime(kept.clone(), move || {
+                if !kept_package_matches(&kept, &expected) {
+                    return Ok(false);
+                }
+                std::fs::copy(&kept, &destination)
+                    .map_err(|error| UpdateError::io("copy", &kept, error))?;
+                Ok(true)
+            })
+            .await?
+        };
+        if !reused {
             self.download_asset(trust, &running, file.into(), dir)
                 .await?;
         }
@@ -1392,6 +1426,21 @@ fn sha256_hex(path: &Path) -> Result<String, UpdateError> {
     let mut hasher = Sha256::new();
     std::io::copy(&mut file, &mut hasher).map_err(|error| UpdateError::io("read", path, error))?;
     Ok(HEXLOWER.encode(&hasher.finalize()))
+}
+
+/// Runs `work` on Tokio's blocking pool and returns its result.
+///
+/// Staging an update hashes, copies and unpacks files of a hundred megabytes or
+/// more, and waits on `tar`, `ditto` or `systemd-run`. On a runtime worker that
+/// would hold up the daemon's other tasks for as long. `path` names the work in
+/// the error when it panics or the runtime shuts down under it.
+async fn off_runtime<T: Send + 'static>(
+    path: PathBuf,
+    work: impl FnOnce() -> Result<T, UpdateError> + Send + 'static,
+) -> Result<T, UpdateError> {
+    tokio::task::spawn_blocking(work)
+        .await
+        .map_err(|error| UpdateError::io("stage", path, std::io::Error::other(error)))?
 }
 
 fn update_install_state(
