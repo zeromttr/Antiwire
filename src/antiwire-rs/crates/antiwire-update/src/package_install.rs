@@ -149,23 +149,23 @@ fn dpkg_search_names_package(stdout: &str) -> bool {
 /// appear as `0.3.0~beta.1` or `0.3.0_beta.1`, and Debian versions may carry an
 /// epoch (`1:`) or a numeric revision (`-1`). All map back to the release
 /// version.
+///
+/// The revision follows the last hyphen, and is dropped before `~` and `_`
+/// become hyphens. Afterwards it could not be told apart: semver accepts
+/// `0.3.0-beta.1-1` as the prerelease `beta.1-1`.
 #[must_use]
 pub fn parse_package_version(raw: &str) -> Option<Version> {
     let raw = raw.trim();
     let raw = raw.split_once(':').map_or(raw, |(_, rest)| rest);
-    let semver = raw.replace(['~', '_'], "-");
-    if let Ok(version) = Version::parse(&semver) {
-        // A purely numeric "prerelease" is a Debian revision, not a semver one.
-        if !version.pre.is_empty() && version.pre.as_str().bytes().all(|b| b.is_ascii_digit()) {
-            return Some(Version::new(version.major, version.minor, version.patch));
+    let upstream = match raw.rsplit_once('-') {
+        Some((upstream, revision))
+            if !revision.is_empty() && revision.bytes().all(|byte| byte.is_ascii_digit()) =>
+        {
+            upstream
         }
-        return Some(version);
-    }
-    let (upstream, revision) = semver.rsplit_once('-')?;
-    if revision.bytes().all(|byte| byte.is_ascii_digit()) {
-        return parse_package_version(upstream);
-    }
-    None
+        _ => raw,
+    };
+    Version::parse(&upstream.replace(['~', '_'], "-")).ok()
 }
 
 /// One command to run, kept as data so the choice of command is tested.
@@ -298,6 +298,12 @@ mod tests {
         assert_eq!(v("0.3.0~beta.1"), Version::parse("0.3.0-beta.1").ok());
         assert_eq!(v("0.3.0-beta.1"), Version::parse("0.3.0-beta.1").ok());
         assert_eq!(v("0.3.0_beta.1"), Version::parse("0.3.0-beta.1").ok());
+        // A Debian revision on a prerelease is not part of the prerelease.
+        assert_eq!(v("0.3.0~beta.1-1"), Version::parse("0.3.0-beta.1").ok());
+        assert_eq!(
+            v("1:0.3.1~nightly.20261102.41-2"),
+            Version::parse("0.3.1-nightly.20261102.41").ok()
+        );
         assert_eq!(v("garbage"), None);
     }
 
