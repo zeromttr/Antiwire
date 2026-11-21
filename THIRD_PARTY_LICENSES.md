@@ -98,7 +98,7 @@ Build and development tools (not shipped):
 | [@inlang/plugin-message-format](https://github.com/opral/inlang) | 4.5.6 | MIT |
 | [@playwright/test](https://github.com/microsoft/playwright) | 1.64.1 | Apache-2.0 |
 | [@types/node](https://github.com/DefinitelyTyped/DefinitelyTyped), [@types/react, @types/react-dom](https://github.com/DefinitelyTyped/DefinitelyTyped) | 26.6.5, 19.3.0 | MIT |
-| [bun-types](https://github.com/oven-sh/bun) | 1.4.3 | MIT |
+| [bun-types](https://github.com/oven-sh/bun) | 1.4.5 | MIT |
 
 ## Rust crates
 
