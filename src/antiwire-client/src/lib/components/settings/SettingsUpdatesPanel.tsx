@@ -106,6 +106,13 @@ function hero(view: UpdatesPanelStatus, status: UpdateStatus | null): Hero {
         title: m.settings_updates_installing(),
         body: m.shell_update_dialog_body(),
       };
+    case 'reopen':
+      return {
+        tone: 'ok',
+        icon: ShieldCheck,
+        title: m.shell_update_reopen({ version: view.version }),
+        body: '',
+      };
     case 'failed':
       return {
         tone: 'bad',

@@ -99,6 +99,25 @@ describe('updatesPanelStatus', () => {
     ).toEqual({ kind: 'available', version: '0.3.0' });
   });
 
+  it('asks for a reopen when the daemon is newer than the client, as the footer does', () => {
+    const newerDaemon = { currentVersion: '0.3.0', clientVersion: '0.2.0' };
+    expect(updatesPanelStatus(status({ ...newerDaemon, state: 'unknown' }), false, '')).toEqual({
+      kind: 'reopen',
+      version: '0.3.0',
+    });
+    expect(
+      updatesPanelStatus(
+        status({ ...newerDaemon, state: 'available', availableVersion: '0.4.0' }),
+        false,
+        '',
+      ).kind,
+    ).toBe('reopen');
+    expect(
+      updatesPanelStatus(status({ ...newerDaemon, state: 'installing' }), false, '').kind,
+    ).toBe('installing');
+    expect(updatesPanelStatus(status(newerDaemon), true, '').kind).toBe('checking');
+  });
+
   it('says why the feeds could not be read when nothing is offered', () => {
     expect(updatesPanelStatus(status({ checkError: 'the beta feed: 404' }), false, '')).toEqual({
       kind: 'check_error',

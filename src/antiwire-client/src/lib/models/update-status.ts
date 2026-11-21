@@ -146,6 +146,8 @@ export type UpdatesPanelStatus =
   | { kind: 'checking' }
   | { kind: 'unreachable'; detail: string }
   | { kind: 'installing' }
+  /** The daemon runs a newer version than this client, which has to be reopened. */
+  | { kind: 'reopen'; version: string }
   | { kind: 'failed'; detail: string }
   | { kind: 'available'; version: string }
   | { kind: 'unsupported'; detail: string }
@@ -167,6 +169,9 @@ export function updatesPanelStatus(
   if (checkFailure) return { kind: 'unreachable', detail: checkFailure };
   if (!status) return { kind: 'unknown' };
   if (status.state === 'installing') return { kind: 'installing' };
+  if (compareVersions(status.currentVersion, status.clientVersion) > 0) {
+    return { kind: 'reopen', version: status.currentVersion };
+  }
   if (status.state === 'failed') return { kind: 'failed', detail: status.detail };
   if (status.state === 'available') return { kind: 'available', version: status.availableVersion };
   if (status.state === 'unsupported') return { kind: 'unsupported', detail: status.detail };
